@@ -1,0 +1,373 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-1.1.x"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+  schemas   = ["public"]
+}
+
+model audio_files {
+  id                       BigInt                 @id @default(autoincrement())
+  visit_session_id         BigInt
+  type                     String                 @db.VarChar(50)
+  s3_uri                   String
+  start_timestamp_ms       BigInt
+  end_timestamp_ms         BigInt
+  format                   String                 @db.VarChar(50)
+  meta_data                Json?                  @default("{}")
+  created_at               DateTime               @default(now()) @db.Timestamp(6)
+  updated_at               DateTime               @default(now()) @db.Timestamp(6)
+  transcription_session_id BigInt
+  transcription_sessions   transcription_sessions @relation(fields: [transcription_session_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  visit_sessions           visit_sessions         @relation(fields: [visit_session_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_audio_files_visit_session")
+
+  @@index([visit_session_id], map: "idx_audio_files_visit_session_id")
+  @@schema("public")
+}
+
+model companies {
+  id              Int              @id @default(autoincrement())
+  name            String           @db.VarChar
+  logo_url        String?
+  city            String?          @db.VarChar
+  state           String?          @db.VarChar
+  country         String?          @db.VarChar
+  postal_code     String?          @db.VarChar
+  geocoded_lat    Float?
+  geocoded_lng    Float?
+  created_at      DateTime         @default(now()) @db.Timestamp(6)
+  updated_at      DateTime         @default(now()) @db.Timestamp(6)
+  address         Json?            @default("{}")
+  company_configs company_configs?
+  jobs            jobs[]
+  users           users[]
+
+  @@schema("public")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model company_configs {
+  id         Int       @id @default(autoincrement())
+  company_id Int       @unique
+  checklists Json
+  updated_at DateTime  @default(now()) @db.Timestamp(6)
+  companies  companies @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@schema("public")
+}
+
+model documents {
+  id        BigInt                 @id @default(autoincrement())
+  content   String?
+  metadata  Json?
+  embedding Unsupported("vector")?
+
+  @@schema("public")
+}
+
+model jobs {
+  id              BigInt          @id @default(autoincrement())
+  company_id      Int
+  technician_id   BigInt?
+  start_timestamp DateTime        @db.Timestamp(6)
+  address         String          @db.VarChar
+  geocoded_lat    Float?
+  geocoded_lng    Float?
+  description     String?
+  job_target_name String          @db.VarChar
+  created_at      DateTime        @default(now()) @db.Timestamp(6)
+  updated_at      DateTime        @default(now()) @db.Timestamp(6)
+  status          job_status      @default(scheduled)
+  companies       companies       @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users           users?          @relation(fields: [technician_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  visit_sessions  visit_sessions?
+
+  @@schema("public")
+}
+
+model sessions {
+  id                 Int      @id @default(autoincrement())
+  user_id            BigInt
+  refresh_token_hash String   @db.VarChar(255)
+  user_agent         String?
+  ip_address         String?  @db.Inet
+  expires_at         DateTime @db.Timestamp(6)
+  created_at         DateTime @default(now()) @db.Timestamp(6)
+  updated_at         DateTime @default(now()) @db.Timestamp(6)
+  users              users    @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@schema("public")
+}
+
+model transcription_sessions {
+  id                  BigInt                @id @default(autoincrement())
+  visit_session_id    BigInt
+  starts_at           DateTime?             @db.Timestamp(6)
+  ends_at             DateTime?             @db.Timestamp(6)
+  meta_data           Json?                 @default("{}")
+  created_at          DateTime              @default(now()) @db.Timestamp(6)
+  updated_at          DateTime              @default(now()) @db.Timestamp(6)
+  last_heartbeat_at   DateTime?             @db.Timestamp(6)
+  audio_files         audio_files[]
+  visit_sessions      visit_sessions        @relation(fields: [visit_session_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  transcription_turns transcription_turns[]
+
+  @@index([visit_session_id], map: "idx_transcription_sessions_visit_session_id")
+  @@schema("public")
+}
+
+model transcription_turns {
+  id                       BigInt                 @id @default(autoincrement())
+  visit_session_id         BigInt
+  transcription_session_id BigInt
+  turn_index               Int
+  start_timestamp_ms       BigInt
+  end_timestamp_ms         BigInt
+  speaker                  String?                @db.VarChar(50)
+  text                     String
+  audio_s3_uri             String?
+  meta_data                Json?                  @default("{}")
+  created_at               DateTime               @default(now()) @db.Timestamp(6)
+  updated_at               DateTime               @default(now()) @db.Timestamp(6)
+  provider                 transcription_provider
+  provider_result_id       String                 @db.VarChar(200)
+  transcription_sessions   transcription_sessions @relation(fields: [transcription_session_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_transcription_turns_transcription_session")
+  visit_sessions           visit_sessions         @relation(fields: [visit_session_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_transcription_turns_visit_session")
+
+  @@index([transcription_session_id], map: "idx_transcription_turns_transcription_session_id")
+  @@index([visit_session_id], map: "idx_transcription_turns_visit_session_id")
+  @@schema("public")
+}
+
+model users {
+  id              BigInt           @id @default(autoincrement())
+  first_name      String           @db.VarChar(100)
+  last_name       String           @db.VarChar(100)
+  job_title       String?          @db.VarChar(150)
+  email           String           @unique @db.VarChar(200)
+  role            user_role        @default(technician)
+  hashed_password String           @db.VarChar(255)
+  created_at      DateTime         @default(now()) @db.Timestamp(6)
+  updated_at      DateTime         @default(now()) @db.Timestamp(6)
+  company_id      Int
+  address         Json?            @default("{}")
+  jobs            jobs[]
+  sessions        sessions[]
+  companies       companies        @relation(fields: [company_id], references: [id], onUpdate: NoAction, map: "fk_users_company")
+  visit_sessions  visit_sessions[]
+
+  @@schema("public")
+}
+
+model visit_sessions {
+  id                     BigInt                   @id @default(autoincrement())
+  job_id                 BigInt                   @unique
+  technician_id          BigInt
+  start_time             DateTime                 @db.Timestamp(6)
+  end_time               DateTime?                @db.Timestamp(6)
+  status                 session_status           @default(active)
+  meta_data              Json?                    @default("{}")
+  created_at             DateTime                 @default(now()) @db.Timestamp(6)
+  updated_at             DateTime                 @default(now()) @db.Timestamp(6)
+  checklists             Json?                    @default("{}")
+  job_summary            String?
+  audio_files            audio_files[]
+  transcription_sessions transcription_sessions[]
+  transcription_turns    transcription_turns[]
+  jobs                   jobs                     @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_visit_sessions_job")
+  users                  users                    @relation(fields: [technician_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_visit_sessions_technician")
+
+  @@schema("public")
+}
+
+model Conversation {
+  id             String                @id @default(uuid())
+  userId         String                @map("user_id")
+  jobId          String?               @unique @map("job_id")
+  channelType    ChannelType           @map("channel_type")
+  members        String[]
+  status         ConversationStatus    @default(ACTIVE)
+  metadata       Json?                 @default("{}")
+  createdAt      DateTime              @default(now()) @map("created_at")
+  updatedAt      DateTime              @updatedAt @map("updated_at")
+  conversationId String?               @map("openai_conversation_id")
+  context        ConversationContext[]
+  messages       Message[]
+
+  @@index([userId])
+  @@index([conversationId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("conversations")
+  @@schema("public")
+}
+
+model Message {
+  id             String        @id @default(uuid())
+  conversationId String        @map("conversation_id")
+  senderType     SenderType    @map("sender_type")
+  senderId       String?       @map("sender_id")
+  content        String
+  contentType    ContentType   @default(TEXT) @map("content_type")
+  attachments    Json?         @default("[]")
+  metadata       Json?         @default("{}")
+  status         MessageStatus @default(SENT)
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  toolCalls      ToolCall[]
+
+  @@index([conversationId])
+  @@index([senderType])
+  @@index([senderId])
+  @@index([createdAt])
+  @@map("messages")
+  @@schema("public")
+}
+
+model ToolCall {
+  id          String         @id @default(uuid())
+  messageId   String         @map("message_id")
+  toolName    String         @map("tool_name")
+  toolInput   Json           @map("tool_input")
+  toolOutput  Json?          @map("tool_output")
+  status      ToolCallStatus @default(PENDING)
+  startedAt   DateTime       @default(now()) @map("started_at")
+  completedAt DateTime?      @map("completed_at")
+  durationMs  Int?           @map("duration_ms")
+  error       String?
+  message     Message        @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([toolName])
+  @@index([status])
+  @@map("tool_calls")
+  @@schema("public")
+}
+
+model ConversationContext {
+  id             String       @id @default(uuid())
+  conversationId String       @map("conversation_id")
+  contextType    ContextType  @map("context_type")
+  content        String
+  embedding      Float[]      @default([])
+  tokenCount     Int?         @map("token_count")
+  metadata       Json?        @default("{}")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+  expiresAt      DateTime?    @map("expires_at")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@index([contextType])
+  @@index([createdAt])
+  @@map("conversation_contexts")
+  @@schema("public")
+}
+
+enum job_status {
+  scheduled
+  ongoing
+  completed
+
+  @@schema("public")
+}
+
+enum session_status {
+  active
+  ended
+
+  @@schema("public")
+}
+
+enum transcription_provider {
+  Amazon_Transcribe @map("Amazon Transcribe")
+  Deepgram
+
+  @@schema("public")
+}
+
+enum user_role {
+  service_manager
+  admin
+  technician
+
+  @@schema("public")
+}
+
+enum ChannelType {
+  MESSAGING
+
+  @@map("channel_type")
+  @@schema("public")
+}
+
+enum ConversationStatus {
+  ACTIVE
+  CLOSED
+  ARCHIVED
+
+  @@map("conversation_status")
+  @@schema("public")
+}
+
+enum SenderType {
+  USER
+  AI
+  SYSTEM
+
+  @@map("sender_type")
+  @@schema("public")
+}
+
+enum ContentType {
+  TEXT
+  IMAGE
+  AUDIO
+  VIDEO
+  FILE
+  TOOL_CALL
+  TOOL_RESULT
+  ERROR
+
+  @@map("content_type")
+  @@schema("public")
+}
+
+enum MessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  EDITED
+  DELETED
+
+  @@map("message_status")
+  @@schema("public")
+}
+
+enum ToolCallStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+
+  @@map("tool_call_status")
+  @@schema("public")
+}
+
+enum ContextType {
+  SUMMARY
+  MEMORY
+  EMBEDDING
+  JOB_SNAPSHOT
+  SYSTEM_PROMPT
+
+  @@map("context_type")
+  @@schema("public")
+}

@@ -1,0 +1,42 @@
+{
+  "name": "technician-copilot",
+  "version": "1.0.0",
+  "description": "Technician Copilot - AI-powered assistant for technicians",
+  "main": "server.js",
+  "scripts": {
+    "start": "tsc && node dist/server.js",
+    "dev": "npx tsx watch src/server.ts",
+    "build": "tsc",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "db:seed": "prisma db seed",
+    "postinstall": "prisma generate"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@openai/agents": "^0.3.4",
+    "@prisma/client": "^6.19.0",
+    "@types/cors": "^2.8.19",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "openai": "^6.9.1",
+    "ws": "^8.18.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.5",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.10",
+    "prisma": "^6.19.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  }
+}
