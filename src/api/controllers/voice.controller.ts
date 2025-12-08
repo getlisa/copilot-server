@@ -112,14 +112,20 @@ export class VoiceController {
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
 
+    const flush = () => {
+      (res as any).flush?.();
+    };
+
     // Heartbeat to keep idle connections alive behind proxies
     const heartbeat = setInterval(() => {
       res.write(":\n\n");
+      flush();
     }, 25000);
 
     const send = (event: string, data: unknown) => {
       res.write(`event: ${event}\n`);
       res.write(`data: ${JSON.stringify(data)}\n\n`);
+      flush();
     };
 
     const onPartial = (payload: any) => send("transcript_partial", payload);

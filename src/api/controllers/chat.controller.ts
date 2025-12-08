@@ -94,6 +94,10 @@ export class ChatController {
 
     logger.info("Chat stream started", { conversationId, senderId });
 
+    const flush = () => {
+      (res as any).flush?.();
+    };
+
     try {
       // Verify conversation exists
       const conversation = await conversationRepository.getById(conversationId);
@@ -124,10 +128,12 @@ export class ChatController {
       // Heartbeat to keep idle connections alive behind proxies
       const heartbeat = setInterval(() => {
         res.write(":\n\n");
+        flush();
       }, 25000);
 
       // Send user message ID
       res.write(`data: ${JSON.stringify({ type: "user_message", data: userMessage })}\n\n`);
+      flush();
 
       // Get Clara agent
       const agent = await getClaraAgent();
@@ -137,16 +143,20 @@ export class ChatController {
       const callbacks: AgentStreamCallbacks = {
         onThinking: () => {
           res.write(`data: ${JSON.stringify({ type: "thinking" })}\n\n`);
+          flush();
         },
         onTextChunk: (chunk: string, fullText: string) => {
           fullResponse = fullText;
           res.write(`data: ${JSON.stringify({ type: "chunk", content: chunk })}\n\n`);
+          flush();
         },
         onToolCall: (toolName: string) => {
           res.write(`data: ${JSON.stringify({ type: "tool_call", tool: toolName })}\n\n`);
+          flush();
         },
         onError: (error: Error) => {
           res.write(`data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`);
+          flush();
         },
       };
 
@@ -173,6 +183,7 @@ export class ChatController {
 
       // Send completion event
       res.write(`data: ${JSON.stringify({ type: "done", data: aiMessage })}\n\n`);
+      flush();
       res.end();
       clearInterval(heartbeat);
 
@@ -184,6 +195,7 @@ export class ChatController {
       });
 
       res.write(`data: ${JSON.stringify({ type: "error", error: "Stream failed" })}\n\n`);
+      flush();
       res.end();
     }
   }

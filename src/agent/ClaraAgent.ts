@@ -130,6 +130,8 @@ export class ClaraAgent implements AIAgent {
         typeof stream.finalOutput === "string" && stream.finalOutput.length > 0
           ? stream.finalOutput
           : fullText;
+        
+      console.log(`Final output: ${finalOutput}`);
 
       const response: AgentResponse = {
         messageId: `msg-${Date.now()}`,
