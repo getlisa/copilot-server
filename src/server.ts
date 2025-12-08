@@ -15,7 +15,7 @@ app.use(express.static(path.join(__dirname, "../public")));
 
 app.use(
   cors({
-    origin: process.env.ALLOW_ORIGIN || "http://localhost:8080",
+    origin: process.env.ALLOW_ORIGIN,
     credentials: true,
     allowedHeaders: "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Dev-Bypass, X-User-Id, X-User-Email, X-User-Role, X-Company-Id",
     preflightContinue: false,
