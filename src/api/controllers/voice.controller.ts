@@ -108,7 +108,14 @@ export class VoiceController {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
+    // Hint proxies/CDNs not to buffer SSE
+    res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders();
+
+    // Heartbeat to keep idle connections alive behind proxies
+    const heartbeat = setInterval(() => {
+      res.write(":\n\n");
+    }, 25000);
 
     const send = (event: string, data: unknown) => {
       res.write(`event: ${event}\n`);
@@ -127,6 +134,7 @@ export class VoiceController {
       state.emitter.off("transcript_partial", onPartial);
       state.emitter.off("transcript_final", onFinal);
       state.emitter.off("audio", onAudio);
+      clearInterval(heartbeat);
     });
   }
 

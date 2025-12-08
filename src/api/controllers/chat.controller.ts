@@ -117,7 +117,14 @@ export class ChatController {
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
+      // Hint proxies/CDNs not to buffer SSE
+      res.setHeader("X-Accel-Buffering", "no");
       res.flushHeaders();
+
+      // Heartbeat to keep idle connections alive behind proxies
+      const heartbeat = setInterval(() => {
+        res.write(":\n\n");
+      }, 25000);
 
       // Send user message ID
       res.write(`data: ${JSON.stringify({ type: "user_message", data: userMessage })}\n\n`);
@@ -167,6 +174,7 @@ export class ChatController {
       // Send completion event
       res.write(`data: ${JSON.stringify({ type: "done", data: aiMessage })}\n\n`);
       res.end();
+      clearInterval(heartbeat);
 
       logger.info("Chat stream completed", { conversationId, messageId: aiMessage.id });
     } catch (error) {
