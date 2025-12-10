@@ -8,6 +8,12 @@ import { voiceRoute } from "./api/routes/voice.route";
 import logger from "./lib/logger";
 
 dotenv.config();
+
+// Enable BigInt JSON serialization (converts to string)
+(BigInt.prototype as any).toJSON = function () {
+  return this.toString();
+};
+
 const app = express();
 
 // Serve static files from public directory

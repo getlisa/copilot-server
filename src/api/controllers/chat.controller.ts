@@ -15,7 +15,11 @@ export class ChatController {
     const { conversationId } = req.params;
     const { content, senderId } = req.body;
 
-    logger.info("Chat message received", { conversationId, senderId, contentLength: content?.length });
+    logger.info("Chat message received", {
+      conversationId,
+      senderId: senderId ? String(senderId) : undefined,
+      contentLength: content?.length,
+    });
 
     try {
       // 1. Verify conversation exists
@@ -31,7 +35,7 @@ export class ChatController {
       const userMessage = await messageRepository.create({
         conversationId,
         senderType: "USER",
-        senderId: senderId || "user",
+        senderId: senderId ? BigInt(senderId) : null,
         content,
         contentType: "TEXT",
       });
@@ -43,15 +47,15 @@ export class ChatController {
 
       const response = await agent.processMessage(content, {
         conversationId,
-        userId: senderId || "user",
-        jobId: conversation.jobId || undefined,
+        userId: senderId ? String(senderId) : "user",
+        jobId: conversation.jobId ? String(conversation.jobId) : undefined,
       });
 
       // 4. Save AI response
       const aiMessage = await messageRepository.create({
         conversationId,
         senderType: "AI",
-        senderId: "clara",
+        senderId: null,
         content: response.content,
         contentType: "TEXT",
         metadata: response.metadata,
@@ -92,7 +96,10 @@ export class ChatController {
     const { conversationId } = req.params;
     const { content, senderId } = req.body;
 
-    logger.info("Chat stream started", { conversationId, senderId });
+    logger.info("Chat stream started", {
+      conversationId,
+      senderId: senderId ? String(senderId) : undefined,
+    });
 
     const flush = () => {
       (res as any).flush?.();
@@ -112,7 +119,7 @@ export class ChatController {
       const userMessage = await messageRepository.create({
         conversationId,
         senderType: "USER",
-        senderId: senderId || "user",
+        senderId: senderId ? BigInt(senderId) : null,
         content,
         contentType: "TEXT",
       });
@@ -165,8 +172,8 @@ export class ChatController {
         content,
         {
           conversationId,
-          userId: senderId || "user",
-          jobId: conversation.jobId || undefined,
+          userId: senderId ? String(senderId) : "user",
+          jobId: conversation.jobId ? String(conversation.jobId) : undefined,
         },
         callbacks
       );
@@ -175,7 +182,7 @@ export class ChatController {
       const aiMessage = await messageRepository.create({
         conversationId,
         senderType: "AI",
-        senderId: "clara",
+        senderId: null,
         content: response.content,
         contentType: "TEXT",
         metadata: response.metadata,

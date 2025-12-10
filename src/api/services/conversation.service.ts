@@ -24,20 +24,24 @@ export class ConversationService {
    * Start a new conversation for a technician
    */
   async startConversation(
-    userId: string,
+    userId: string | bigint,
     options?: {
-      jobId?: string;
+      jobId: string | bigint;
       channelType?: ChannelType;
       conversationId?: string;
       metadata?: Record<string, unknown>;
     }
   ): Promise<Conversation> {
+    const jobId = options?.jobId ?? (() => { throw new Error("jobId is required"); })();
+    const userIdBigInt = typeof userId === "bigint" ? userId : BigInt(userId);
+    const jobIdBigInt = typeof jobId === "bigint" ? jobId : BigInt(jobId);
+
     const conversation = await conversationRepository.create({
-      userId,
-      jobId: options?.jobId,
+      userId: userIdBigInt,
+      jobId: jobIdBigInt,
       channelType: options?.channelType ?? "MESSAGING",
       conversationId: options?.conversationId,
-      members: [userId, "copilot_ai"],
+      members: [String(userIdBigInt), "copilot_ai"],
       metadata: options?.metadata,
     });
 
@@ -70,14 +74,16 @@ export class ConversationService {
    * Get or create a conversation for a user and job
    */
   async getOrCreateConversation(
-    userId: string,
-    jobId: string,
+    userId: string | bigint,
+    jobId: string | bigint,
     channelType: ChannelType = "MESSAGING"
   ): Promise<Conversation> {
+    const userIdBigInt = typeof userId === "bigint" ? userId : BigInt(userId);
+    const jobIdBigInt = typeof jobId === "bigint" ? jobId : BigInt(jobId);
     // Try to find existing active conversation
     const existing = await conversationRepository.list({
-      userId,
-      jobId,
+      userId: userIdBigInt,
+      jobId: jobIdBigInt,
       status: "ACTIVE" as any,
     });
 
@@ -86,7 +92,7 @@ export class ConversationService {
     }
 
     // Create new conversation
-    return this.startConversation(userId, { jobId, channelType });
+    return this.startConversation(userIdBigInt, { jobId: jobIdBigInt, channelType });
   }
 
   /**
@@ -122,7 +128,7 @@ export class ConversationService {
    */
   async sendUserMessage(
     conversationId: string,
-    userId: string,
+    userId: string | bigint,
     content: string,
     options?: {
       contentType?: ContentType;
@@ -133,7 +139,7 @@ export class ConversationService {
     return messageRepository.createWithConversationUpdate({
       conversationId,
       senderType: "USER",
-      senderId: userId,
+      senderId: typeof userId === "bigint" ? userId : BigInt(userId),
       content,
       contentType: options?.contentType ?? "TEXT",
       attachments: options?.attachments,
@@ -159,7 +165,7 @@ export class ConversationService {
     return messageRepository.createWithConversationUpdate({
       conversationId,
       senderType: "AI",
-      senderId: "copilot_ai",
+      senderId: null,
       content,
       contentType: "TEXT",
       metadata,

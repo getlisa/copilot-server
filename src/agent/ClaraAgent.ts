@@ -3,7 +3,7 @@ import {
   AgentInputItem,
   run,
   RunItemStreamEvent,
-  RunRawModelStreamEvent,
+  RunRawModelStreamEvent
 } from "@openai/agents";
 import {
   fileSearchTool,
@@ -19,6 +19,7 @@ import {
 import { messageRepository } from "../api/repositories/message.repository";
 import logger from "../lib/logger";
 import { systemPrompt } from "../config/systemPrompt";
+import { fieldServiceQuestionGuardrail } from "./guardrailAgent";
 
 type AgentRunContext = {
   conversationId: string;
@@ -32,6 +33,7 @@ const HISTORY_LIMIT = 15;
 export class ClaraAgent implements AIAgent {
   private agent: Agent<AgentRunContext>;
   private lastInteractionTs = Date.now();
+
 
   constructor() {
     this.agent = this.buildAgent();
@@ -62,6 +64,7 @@ export class ClaraAgent implements AIAgent {
       instructions: systemPrompt,
       model: DEFAULT_MODEL,
       tools,
+      inputGuardrails: [fieldServiceQuestionGuardrail],
     });
   }
 

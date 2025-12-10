@@ -86,8 +86,8 @@ export interface Attachment {
 
 export interface Conversation {
   id: string;
-  userId: string;
-  jobId: string | null;
+  userId: bigint | string | null;
+  jobId: bigint | string;
   channelType: ChannelType;
   conversationId: string | null;
   members: string[];
@@ -109,7 +109,7 @@ export interface Message {
   id: string;
   conversationId: string;
   senderType: SenderType;
-  senderId: string | null;
+  senderId: bigint | string | null;
   content: string;
   contentType: ContentType;
   attachments: Attachment[];
@@ -154,8 +154,8 @@ export interface ConversationContext {
 // ============================================
 
 export interface CreateConversationInput {
-  userId: string;
-  jobId?: string | null;
+  userId: string | bigint | null;
+  jobId: string | bigint;
   channelType: ChannelType;
   conversationId?: string | null;
   members?: string[];
@@ -172,7 +172,7 @@ export interface UpdateConversationInput {
 export interface CreateMessageInput {
   conversationId: string;
   senderType: SenderType;
-  senderId?: string | null;
+  senderId?: bigint | string | null;
   content: string;
   contentType?: ContentType;
   attachments?: Attachment[];
@@ -212,8 +212,8 @@ export interface CreateContextInput {
 // ============================================
 
 export interface ConversationFilters {
-  userId?: string;
-  jobId?: string;
+  userId?: string | bigint;
+  jobId?: string | bigint;
   channelType?: ChannelType;
   status?: ConversationStatus;
   createdAfter?: Date;
@@ -223,7 +223,7 @@ export interface ConversationFilters {
 export interface MessageFilters {
   conversationId: string;
   senderType?: SenderType;
-  senderId?: string;
+  senderId?: bigint | string;
   contentType?: ContentType;
   status?: MessageStatus;
   createdAfter?: Date;

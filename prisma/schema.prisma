@@ -60,31 +60,24 @@ model company_configs {
   @@schema("public")
 }
 
-model documents {
-  id        BigInt                 @id @default(autoincrement())
-  content   String?
-  metadata  Json?
-  embedding Unsupported("vector")?
-
-  @@schema("public")
-}
-
 model jobs {
-  id              BigInt          @id @default(autoincrement())
-  company_id      Int
-  technician_id   BigInt?
-  start_timestamp DateTime        @db.Timestamp(6)
-  address         String          @db.VarChar
-  geocoded_lat    Float?
-  geocoded_lng    Float?
-  description     String?
-  job_target_name String          @db.VarChar
-  created_at      DateTime        @default(now()) @db.Timestamp(6)
-  updated_at      DateTime        @default(now()) @db.Timestamp(6)
-  status          job_status      @default(scheduled)
-  companies       companies       @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  users           users?          @relation(fields: [technician_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
-  visit_sessions  visit_sessions?
+  id                    BigInt                 @id @default(autoincrement())
+  company_id            Int
+  technician_id         BigInt?
+  start_timestamp       DateTime               @db.Timestamp(6)
+  address               String                 @db.VarChar
+  geocoded_lat          Float?
+  geocoded_lng          Float?
+  description           String?
+  job_target_name       String                 @db.VarChar
+  created_at            DateTime               @default(now()) @db.Timestamp(6)
+  updated_at            DateTime               @default(now()) @db.Timestamp(6)
+  status                job_status             @default(scheduled)
+  conversations         Conversation[]
+  companies             companies              @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users                 users?                 @relation(fields: [technician_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  visit_session_metrics visit_session_metrics?
+  visit_sessions        visit_sessions?
 
   @@schema("public")
 }
@@ -144,21 +137,25 @@ model transcription_turns {
 }
 
 model users {
-  id              BigInt           @id @default(autoincrement())
-  first_name      String           @db.VarChar(100)
-  last_name       String           @db.VarChar(100)
-  job_title       String?          @db.VarChar(150)
-  email           String           @unique @db.VarChar(200)
-  role            user_role        @default(technician)
-  hashed_password String           @db.VarChar(255)
-  created_at      DateTime         @default(now()) @db.Timestamp(6)
-  updated_at      DateTime         @default(now()) @db.Timestamp(6)
-  company_id      Int
-  address         Json?            @default("{}")
-  jobs            jobs[]
-  sessions        sessions[]
-  companies       companies        @relation(fields: [company_id], references: [id], onUpdate: NoAction, map: "fk_users_company")
-  visit_sessions  visit_sessions[]
+  id                    BigInt                  @id @default(autoincrement())
+  first_name            String                  @db.VarChar(100)
+  last_name             String                  @db.VarChar(100)
+  job_title             String?                 @db.VarChar(150)
+  email                 String                  @unique @db.VarChar(200)
+  role                  user_role               @default(technician)
+  hashed_password       String                  @db.VarChar(255)
+  created_at            DateTime                @default(now()) @db.Timestamp(6)
+  updated_at            DateTime                @default(now()) @db.Timestamp(6)
+  company_id            Int
+  address               Json?                   @default("{}")
+  phone_number          String?                 @db.VarChar(20)
+  conversations         Conversation[]
+  jobs                  jobs[]
+  messages              Message[]
+  sessions              sessions[]
+  companies             companies               @relation(fields: [company_id], references: [id], onUpdate: NoAction, map: "fk_users_company")
+  visit_session_metrics visit_session_metrics[]
+  visit_sessions        visit_sessions[]
 
   @@schema("public")
 }
@@ -173,7 +170,7 @@ model visit_sessions {
   meta_data              Json?                    @default("{}")
   created_at             DateTime                 @default(now()) @db.Timestamp(6)
   updated_at             DateTime                 @default(now()) @db.Timestamp(6)
-  checklists             Json?                    @default("{}")
+  checklists             Json                     @default("{}")
   job_summary            String?
   audio_files            audio_files[]
   transcription_sessions transcription_sessions[]
@@ -185,23 +182,25 @@ model visit_sessions {
 }
 
 model Conversation {
-  id             String                @id @default(uuid())
-  userId         String                @map("user_id")
-  jobId          String?               @unique @map("job_id")
-  channelType    ChannelType           @map("channel_type")
+  id             String             @id @default(uuid())
+  userId         BigInt?            @map("user_id")
+  jobId          BigInt             @map("job_id")
+  channelType    ChannelType        @map("channel_type")
   members        String[]
-  status         ConversationStatus    @default(ACTIVE)
-  metadata       Json?                 @default("{}")
-  createdAt      DateTime              @default(now()) @map("created_at")
-  updatedAt      DateTime              @updatedAt @map("updated_at")
-  conversationId String?               @map("openai_conversation_id")
-  context        ConversationContext[]
+  status         ConversationStatus @default(ACTIVE)
+  metadata       Json?              @default("{}")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  conversationId String?            @map("openai_conversation_id")
+  jobs           jobs               @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  users          users?             @relation(fields: [userId], references: [id], onDelete: Cascade)
   messages       Message[]
 
   @@index([userId])
   @@index([conversationId])
   @@index([status])
   @@index([createdAt])
+  @@unique([jobId, userId])
   @@map("conversations")
   @@schema("public")
 }
@@ -210,7 +209,7 @@ model Message {
   id             String        @id @default(uuid())
   conversationId String        @map("conversation_id")
   senderType     SenderType    @map("sender_type")
-  senderId       String?       @map("sender_id")
+  senderId       BigInt?       @map("sender_id")
   content        String
   contentType    ContentType   @default(TEXT) @map("content_type")
   attachments    Json?         @default("[]")
@@ -219,6 +218,7 @@ model Message {
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
   conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  users          users?        @relation(fields: [senderId], references: [id], onDelete: Cascade)
   toolCalls      ToolCall[]
 
   @@index([conversationId])
@@ -249,23 +249,22 @@ model ToolCall {
   @@schema("public")
 }
 
-model ConversationContext {
-  id             String       @id @default(uuid())
-  conversationId String       @map("conversation_id")
-  contextType    ContextType  @map("context_type")
-  content        String
-  embedding      Float[]      @default([])
-  tokenCount     Int?         @map("token_count")
-  metadata       Json?        @default("{}")
-  createdAt      DateTime     @default(now()) @map("created_at")
-  updatedAt      DateTime     @updatedAt @map("updated_at")
-  expiresAt      DateTime?    @map("expires_at")
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+model visit_session_metrics {
+  id                        BigInt   @id @default(autoincrement())
+  job_id                    BigInt   @unique
+  technician_id             BigInt
+  technician_talk_time_sec  Int
+  customer_talk_time_sec    Int
+  technician_talk_ratio_pct Decimal  @db.Decimal(5, 2)
+  total_exchanges           Int
+  talk_speed_wpm            Int
+  checklist_score_pct       Decimal  @db.Decimal(5, 2)
+  star_rating               Decimal  @db.Decimal(2, 1)
+  calculated_at             DateTime @default(now()) @db.Timestamp(6)
+  meta_data                 Json     @default("{}")
+  jobs                      jobs     @relation(fields: [job_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_vsm_job")
+  users                     users    @relation(fields: [technician_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_vsm_technician")
 
-  @@index([conversationId])
-  @@index([contextType])
-  @@index([createdAt])
-  @@map("conversation_contexts")
   @@schema("public")
 }
 

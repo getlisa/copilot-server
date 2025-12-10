@@ -1,257 +1,52 @@
-import { Prisma } from "@prisma/client";
-import prisma from "../../lib/prisma";
-import {
-  ConversationContext,
-  CreateContextInput,
-  ContextType,
-} from "../../types/conversation.types";
-
 export class ContextRepository {
-  /**
-   * Create a new context entry
-   */
-  async create(data: CreateContextInput): Promise<ConversationContext> {
-    return prisma.conversationContext.create({
-      data: {
-        conversationId: data.conversationId,
-        contextType: data.contextType,
-        content: data.content,
-        embedding: data.embedding,
-        tokenCount: data.tokenCount,
-        metadata: (data.metadata ?? {}) as Prisma.InputJsonValue,
-        expiresAt: data.expiresAt,
-      },
-    }) as unknown as ConversationContext;
+  private notImplemented<T>(): Promise<T> {
+    return Promise.reject(new Error("Context repository not implemented"));
   }
 
-  /**
-   * Get context by ID
-   */
-  async getById(id: string): Promise<ConversationContext | null> {
-    return prisma.conversationContext.findUnique({
-      where: { id },
-    }) as unknown as ConversationContext | null;
+  async create(..._args: any[]): Promise<any> {
+    return this.notImplemented();
   }
-
-  /**
-   * Get all contexts for a conversation
-   */
-  async getByConversationId(
-    conversationId: string
-  ): Promise<ConversationContext[]> {
-    return prisma.conversationContext.findMany({
-      where: {
-        conversationId,
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-      },
-      orderBy: { createdAt: "desc" },
-    }) as unknown as ConversationContext[];
+  async getById(..._args: any[]): Promise<any> {
+    return this.notImplemented();
   }
-
-  /**
-   * Get contexts by type for a conversation
-   */
-  async getByType(
-    conversationId: string,
-    contextType: ContextType
-  ): Promise<ConversationContext[]> {
-    return prisma.conversationContext.findMany({
-      where: {
-        conversationId,
-        contextType,
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-      },
-      orderBy: { createdAt: "desc" },
-    }) as unknown as ConversationContext[];
+  async getByConversationId(..._args: any[]): Promise<any[]> {
+    return this.notImplemented();
   }
-
-  /**
-   * Get the latest context of a specific type
-   */
-  async getLatestByType(
-    conversationId: string,
-    contextType: ContextType
-  ): Promise<ConversationContext | null> {
-    return prisma.conversationContext.findFirst({
-      where: {
-        conversationId,
-        contextType,
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-      },
-      orderBy: { createdAt: "desc" },
-    }) as unknown as ConversationContext | null;
+  async getByType(..._args: any[]): Promise<any[]> {
+    return this.notImplemented();
   }
-
-  /**
-   * Update context content
-   */
-  async updateContent(
-    id: string,
-    content: string,
-    tokenCount?: number
-  ): Promise<ConversationContext> {
-    return prisma.conversationContext.update({
-      where: { id },
-      data: {
-        content,
-        ...(tokenCount !== undefined && { tokenCount }),
-      },
-    }) as unknown as ConversationContext;
+  async getLatestByType(..._args: any[]): Promise<any> {
+    return this.notImplemented();
   }
-
-  /**
-   * Update context embedding
-   */
-  async updateEmbedding(
-    id: string,
-    embedding: number[]
-  ): Promise<ConversationContext> {
-    return prisma.conversationContext.update({
-      where: { id },
-      data: { embedding },
-    }) as unknown as ConversationContext;
+  async updateContent(..._args: any[]): Promise<any> {
+    return this.notImplemented();
   }
-
-  /**
-   * Delete a context entry
-   */
-  async delete(id: string): Promise<void> {
-    await prisma.conversationContext.delete({
-      where: { id },
-    });
+  async updateEmbedding(..._args: any[]): Promise<any> {
+    return this.notImplemented();
   }
-
-  /**
-   * Delete all contexts for a conversation
-   */
-  async deleteByConversationId(conversationId: string): Promise<void> {
-    await prisma.conversationContext.deleteMany({
-      where: { conversationId },
-    });
+  async delete(..._args: any[]): Promise<void> {
+    return this.notImplemented();
   }
-
-  /**
-   * Delete expired contexts
-   */
-  async deleteExpired(): Promise<number> {
-    const result = await prisma.conversationContext.deleteMany({
-      where: {
-        expiresAt: { lt: new Date() },
-      },
-    });
-    return result.count;
+  async deleteByConversationId(..._args: any[]): Promise<void> {
+    return this.notImplemented();
   }
-
-  /**
-   * Upsert a context by type (replace the latest of same type)
-   */
-  async upsertByType(
-    conversationId: string,
-    contextType: ContextType,
-    content: string,
-    options?: {
-      embedding?: number[];
-      tokenCount?: number;
-      metadata?: Record<string, unknown>;
-      expiresAt?: Date;
-    }
-  ): Promise<ConversationContext> {
-    // Find existing context of the same type
-    const existing = await this.getLatestByType(conversationId, contextType);
-
-    if (existing) {
-      // Update existing
-      return prisma.conversationContext.update({
-        where: { id: existing.id },
-        data: {
-          content,
-          ...(options?.embedding && { embedding: options.embedding }),
-          ...(options?.tokenCount !== undefined && {
-            tokenCount: options.tokenCount,
-          }),
-          ...(options?.metadata && {
-            metadata: options.metadata as Prisma.InputJsonValue,
-          }),
-          ...(options?.expiresAt && { expiresAt: options.expiresAt }),
-        },
-      }) as unknown as ConversationContext;
-    } else {
-      // Create new
-      return this.create({
-        conversationId,
-        contextType,
-        content,
-        embedding: options?.embedding,
-        tokenCount: options?.tokenCount,
-        metadata: options?.metadata,
-        expiresAt: options?.expiresAt,
-      });
-    }
+  async deleteExpired(..._args: any[]): Promise<number> {
+    return this.notImplemented();
   }
-
-  /**
-   * Get total token count for a conversation's contexts
-   */
-  async getTotalTokenCount(conversationId: string): Promise<number> {
-    const result = await prisma.conversationContext.aggregate({
-      where: {
-        conversationId,
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-      },
-      _sum: { tokenCount: true },
-    });
-    return result._sum.tokenCount ?? 0;
+  async upsertByType(..._args: any[]): Promise<any> {
+    return this.notImplemented();
   }
-
-  /**
-   * Store a job snapshot context
-   */
-  async storeJobSnapshot(
-    conversationId: string,
-    jobData: Record<string, unknown>
-  ): Promise<ConversationContext> {
-    return this.upsertByType(
-      conversationId,
-      "JOB_SNAPSHOT",
-      JSON.stringify(jobData),
-      { metadata: { capturedAt: new Date().toISOString() } }
-    );
+  async getTotalTokenCount(..._args: any[]): Promise<number> {
+    return this.notImplemented();
   }
-
-  /**
-   * Store a conversation summary
-   */
-  async storeSummary(
-    conversationId: string,
-    summary: string,
-    tokenCount?: number
-  ): Promise<ConversationContext> {
-    return this.upsertByType(conversationId, "SUMMARY", summary, {
-      tokenCount,
-      metadata: { generatedAt: new Date().toISOString() },
-    });
+  async storeJobSnapshot(..._args: any[]): Promise<any> {
+    return this.notImplemented();
   }
-
-  /**
-   * Store a memory chunk
-   */
-  async storeMemory(
-    conversationId: string,
-    memory: string,
-    options?: {
-      embedding?: number[];
-      tokenCount?: number;
-      expiresAt?: Date;
-    }
-  ): Promise<ConversationContext> {
-    return this.create({
-      conversationId,
-      contextType: "MEMORY",
-      content: memory,
-      embedding: options?.embedding,
-      tokenCount: options?.tokenCount,
-      expiresAt: options?.expiresAt,
-    });
+  async storeSummary(..._args: any[]): Promise<any> {
+    return this.notImplemented();
+  }
+  async storeMemory(..._args: any[]): Promise<any> {
+    return this.notImplemented();
   }
 }
 

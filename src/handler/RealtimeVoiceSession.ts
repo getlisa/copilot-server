@@ -6,7 +6,7 @@ import {
   TransportLayerAudio,
 } from "@openai/agents/realtime";
 import logger from "../lib/logger";
-import { systemPrompt } from "../config/systemPrompt";
+import { voiceSystemPrompt } from "../config/systemPrompt";
 
 export interface RealtimeVoiceOptions {
   onTranscriptionPartial?: (text: string) => void;
@@ -71,7 +71,7 @@ export class RealtimeVoiceSession {
 
     this.agent = new RealtimeAgent({
       name: "Clara Voice",
-      instructions: systemPrompt,
+      instructions: voiceSystemPrompt,
     });
 
     this.session = new RealtimeSession(this.agent, {
@@ -134,8 +134,12 @@ export class RealtimeVoiceSession {
    * Send audio (ArrayBuffer) to the session for STT; commit triggers transcription/response.
    */
   sendAudioBase64(audioBase64: string, commit = false): void {
-    if (!this.session || !this.connected) return;
+    if (!this.session || !this.connected) {
+      logger.warn("sendAudioBase64: session not connected, ignoring audio");
+      return;
+    }
     const buffer = this.base64ToArrayBuffer(audioBase64);
+    logger.debug("Sending audio chunk", { bytes: buffer.byteLength, commit });
     this.session.sendAudio(buffer, { commit });
   }
 
@@ -186,10 +190,24 @@ export class RealtimeVoiceSession {
       }
     });
 
-    // Transport events (e.g., partial transcripts)
+    // Transport events (e.g., partial transcripts, turn detection)
     this.session.on("transport_event", (event: any) => {
+      // Log all transport events for debugging turn detection
+      logger.debug("Transport event", { type: event?.type });
+      
       if (event?.type === "audio_transcript_delta" && this.options.onTranscriptionPartial) {
         this.options.onTranscriptionPartial(event.delta as string);
+      }
+      
+      // Log turn detection events
+      if (event?.type === "input_audio_buffer.speech_started") {
+        logger.info("Speech started - user is speaking");
+      }
+      if (event?.type === "input_audio_buffer.speech_stopped") {
+        logger.info("Speech stopped - user finished speaking");
+      }
+      if (event?.type === "response.done") {
+        logger.info("Assistant response complete");
       }
     });
 

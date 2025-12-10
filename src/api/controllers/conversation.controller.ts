@@ -55,7 +55,17 @@ export class ConversationController {
     logger.info('Creating conversation', logContext);
 
     try {
-      const { conversation, created } = await conversationRepository.getOrCreateByJobId(req.validated.body);
+      if (req.validated.body.jobId === null) {
+        return res.status(400).json({
+          success: false,
+          error: "jobId is required",
+        });
+      }
+
+      const { conversation, created } = await conversationRepository.getOrCreateByJobIdAndUserId({
+        ...req.validated.body,
+        jobId: req.validated.body.jobId,
+      });
       
       if (created) {
         logger.info('Conversation created successfully', {

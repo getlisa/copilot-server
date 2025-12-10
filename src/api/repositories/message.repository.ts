@@ -22,7 +22,12 @@ export class MessageRepository {
       data: {
         conversationId: data.conversationId,
         senderType: data.senderType,
-        senderId: data.senderId ?? null,
+        senderId:
+          data.senderId === null || data.senderId === undefined
+            ? null
+            : typeof data.senderId === "bigint"
+            ? data.senderId
+            : BigInt(data.senderId),
         content: data.content,
         contentType: data.contentType ?? "TEXT",
         attachments: (data.attachments ?? []) as unknown as Prisma.InputJsonValue,
@@ -40,7 +45,12 @@ export class MessageRepository {
         data: {
           conversationId: data.conversationId,
           senderType: data.senderType,
-          senderId: data.senderId ?? null,
+          senderId:
+            data.senderId === null || data.senderId === undefined
+              ? null
+              : typeof data.senderId === "bigint"
+              ? data.senderId
+              : BigInt(data.senderId),
           content: data.content,
           contentType: data.contentType ?? "TEXT",
           attachments: (data.attachments ?? []) as unknown as Prisma.InputJsonValue,
@@ -171,7 +181,10 @@ export class MessageRepository {
     const where = {
       conversationId: filters.conversationId,
       ...(filters.senderType && { senderType: filters.senderType }),
-      ...(filters.senderId && { senderId: filters.senderId }),
+      ...(filters.senderId !== undefined &&
+        filters.senderId !== null && {
+          senderId: typeof filters.senderId === "bigint" ? filters.senderId : BigInt(filters.senderId),
+        }),
       ...(filters.contentType && { contentType: filters.contentType }),
       ...(filters.status && { status: filters.status }),
       ...(filters.createdAfter || filters.createdBefore

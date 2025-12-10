@@ -11,15 +11,38 @@ import {
 } from "../../types/conversation.types";
 
 export class ConversationRepository {
+  private toBigIntOrThrow(val: string | number | bigint | null | undefined, field: string): bigint {
+    if (val === null || val === undefined) {
+      throw new Error(`${field} is required`);
+    }
+    return typeof val === "bigint" ? val : BigInt(val);
+  }
+
+  private toBigIntOptional(val: string | number | bigint | null | undefined): bigint | null {
+    if (val === null || val === undefined) return null;
+    return typeof val === "bigint" ? val : BigInt(val);
+  }
+
   /**
    * Create a new conversation
    */
   async create(data: CreateConversationInput): Promise<Conversation> {
-    const members = data.members ?? [data.userId, "clara"];
+    const jobId = this.toBigIntOrThrow(data.jobId, "jobId");
+    const userId = this.toBigIntOptional(data.userId);
+
+    // Enforce uniqueness for a given user + jobId at repository level
+    if (userId !== null) {
+      const existing = await this.getByJobIdUniqueAndUserId(jobId, userId);
+      if (existing) {
+        throw new Error("Conversation already exists for this job and user");
+      }
+    }
+
+    const members = (data.members ?? [data.userId ?? "", "clara"]).map((m) => String(m));
     return prisma.conversation.create({
       data: {
-        userId: data.userId,
-        jobId: data.jobId ?? null,
+        userId,
+        jobId,
         channelType: data.channelType,
         ...(data.conversationId !== undefined && { conversationId: data.conversationId }),
         members,
@@ -61,9 +84,11 @@ export class ConversationRepository {
   /**
    * Get conversation by job ID (unique - one conversation per job)
    */
-  async getByJobIdUnique(jobId: string): Promise<Conversation | null> {
+  async getByJobIdUniqueAndUserId(jobId: string | number | bigint, userId: string | number | bigint): Promise<Conversation | null> {
+    const j = this.toBigIntOrThrow(jobId, "jobId");
+    const u = this.toBigIntOrThrow(userId, "userId");
     return prisma.conversation.findUnique({
-      where: { jobId },
+      where: { jobId_userId: { jobId: j, userId: u } },
     }) as unknown as Conversation | null;
   }
 
@@ -71,15 +96,15 @@ export class ConversationRepository {
    * Get or create a conversation for a job
    * Returns existing conversation if one exists for the job, otherwise creates new
    */
-  async getOrCreateByJobId(data: CreateConversationInput): Promise<{ conversation: Conversation; created: boolean }> {
-    if (!data.jobId) {
+  async getOrCreateByJobIdAndUserId(data: CreateConversationInput): Promise<{ conversation: Conversation; created: boolean }> {
+    if (!data.jobId || !data.userId) {
       // No jobId, always create new
       const conversation = await this.create(data);
       return { conversation, created: true };
     }
 
     // Check if conversation exists for this job
-    const existing = await this.getByJobIdUnique(data.jobId);
+    const existing = await this.getByJobIdUniqueAndUserId(data.jobId, data.userId);
     if (existing) {
       return { conversation: existing, created: false };
     }
@@ -130,8 +155,8 @@ export class ConversationRepository {
     const { cursor, limit = 20, orderBy = "desc" } = pagination;
 
     const where = {
-      ...(filters.userId && { userId: filters.userId }),
-      ...(filters.jobId && { jobId: filters.jobId }),
+      ...(filters.userId && { userId: this.toBigIntOrThrow(filters.userId, "userId") }),
+      ...(filters.jobId && { jobId: this.toBigIntOrThrow(filters.jobId, "jobId") }),
       ...(filters.channelType && { channelType: filters.channelType }),
       ...(filters.status && { status: filters.status }),
       ...(filters.createdAfter || filters.createdBefore
@@ -172,7 +197,7 @@ export class ConversationRepository {
    * Get conversations for a user
    */
   async getByUserId(
-    userId: string,
+    userId: string | bigint,
     pagination?: PaginationParams
   ): Promise<PaginatedResult<Conversation>> {
     return this.list({ userId }, pagination);
@@ -182,7 +207,7 @@ export class ConversationRepository {
    * Get conversations for a job
    */
   async getByJobId(
-    jobId: string,
+    jobId: string | bigint,
     pagination?: PaginationParams
   ): Promise<PaginatedResult<Conversation>> {
     return this.list({ jobId }, pagination);
@@ -191,10 +216,11 @@ export class ConversationRepository {
   /**
    * Get active conversations for a user
    */
-  async getActiveByUserId(userId: string): Promise<Conversation[]> {
+  async getActiveByUserId(userId: string | bigint): Promise<Conversation[]> {
+    const userIdBig = typeof userId === "bigint" ? userId : BigInt(userId);
     return prisma.conversation.findMany({
       where: {
-        userId,
+        userId: userIdBig,
         status: "ACTIVE",
       },
       orderBy: { updatedAt: "desc" },
