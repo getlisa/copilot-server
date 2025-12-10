@@ -64,7 +64,7 @@ export class ClaraAgent implements AIAgent {
       instructions: systemPrompt,
       model: DEFAULT_MODEL,
       tools,
-      inputGuardrails: [fieldServiceQuestionGuardrail],
+      // inputGuardrails: [fieldServiceQuestionGuardrail],
     });
   }
 
