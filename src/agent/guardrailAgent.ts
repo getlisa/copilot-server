@@ -15,15 +15,19 @@ import {
     }),
   });
   
-  export const fieldServiceQuestionGuardrail: InputGuardrail = {
-    name: 'Field Service Question Guardrail',
-    // Set runInParallel to false to block the model until the guardrail completes.
-    runInParallel: false,
-    execute: async ({ input, context }) => {
-      const result = await run(guardrailAgent, input, { context });
-      return {
-        outputInfo: result.finalOutput,
-        tripwireTriggered: result.finalOutput?.isFieldServiceQuestion ?? false,
-      };
-    },
-  };
+export const fieldServiceQuestionGuardrail: InputGuardrail = {
+  name: 'Field Service Question Guardrail',
+  // Set runInParallel to false to block the model until the guardrail completes.
+  runInParallel: false,
+  execute: async ({ input, context }) => {
+    const result = await run(guardrailAgent, input, { context });
+    const isFieldService = result.finalOutput?.isFieldServiceQuestion ?? false;
+
+    // We only want to block NON field-service questions.
+    // Tripwire should trigger when the question is outside our domain.
+    return {
+      outputInfo: result.finalOutput,
+      tripwireTriggered: !isFieldService,
+    };
+  },
+};

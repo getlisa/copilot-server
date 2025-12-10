@@ -14,6 +14,7 @@ export class ChatController {
     const startTime = Date.now();
     const { conversationId } = req.params;
     const { content, senderId } = req.body;
+    const senderType = senderId ? "USER" : "AI";
 
     logger.info("Chat message received", {
       conversationId,
@@ -34,13 +35,24 @@ export class ChatController {
       // 2. Save user message
       const userMessage = await messageRepository.create({
         conversationId,
-        senderType: "USER",
+        senderType,
         senderId: senderId ? BigInt(senderId) : null,
         content,
         contentType: "TEXT",
       });
 
-      logger.info("User message saved", { messageId: userMessage.id });
+      logger.info("Message saved", { messageId: userMessage.id, senderType });
+
+      // If this is an AI-authored message (senderId is null), just persist it.
+      if (senderType === "AI") {
+        return res.status(200).json({
+          success: true,
+          data: {
+            userMessage,
+            aiMessage: userMessage,
+          },
+        });
+      }
 
       // 3. Get Clara agent and process message
       const agent = await getClaraAgent();
@@ -95,10 +107,12 @@ export class ChatController {
   static async streamMessage(req: Request, res: Response) {
     const { conversationId } = req.params;
     const { content, senderId } = req.body;
+    const senderType = senderId ? "USER" : "AI";
 
     logger.info("Chat stream started", {
       conversationId,
       senderId: senderId ? String(senderId) : undefined,
+      senderType,
     });
 
     const flush = () => {
@@ -118,11 +132,23 @@ export class ChatController {
       // Save user message
       const userMessage = await messageRepository.create({
         conversationId,
-        senderType: "USER",
+        senderType,
         senderId: senderId ? BigInt(senderId) : null,
         content,
         contentType: "TEXT",
       });
+
+      // If this is an AI-authored message (senderId is null), just stream it back and end.
+      if (senderType === "AI") {
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.flushHeaders();
+        res.write(`data: ${JSON.stringify({ type: "done", data: userMessage })}\n\n`);
+        res.end();
+        return;
+      }
 
       // Set up SSE
       res.setHeader("Content-Type", "text/event-stream");
