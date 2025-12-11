@@ -27,11 +27,10 @@ export class ConversationRepository {
    * Create a new conversation
    */
   async create(data: CreateConversationInput): Promise<Conversation> {
-    const jobId = this.toBigIntOrThrow(data.jobId, "jobId");
-    const userId = this.toBigIntOrThrow(data.userId, "userId" );
-
+    const userIdBigInt = typeof data.userId === "bigint" ? data.userId : BigInt(data.userId ?? "");
+    const jobIdBigInt = typeof data.jobId === "bigint" ? data.jobId : BigInt(data.jobId);
     // Enforce uniqueness for a given user + jobId at repository level
-    const existing = await this.getByJobIdUniqueAndUserId(jobId, userId);
+    const existing = await this.getByJobIdUniqueAndUserId(jobIdBigInt, userIdBigInt);
     if (existing) {
       throw new Error("Conversation already exists for this job and user");
     }
@@ -39,8 +38,8 @@ export class ConversationRepository {
     const members = (data.members ?? [data.userId ?? "", "clara"]).map((m) => String(m));
     return prisma.conversation.create({
       data: {
-        userId,
-        jobId,
+        userId: userIdBigInt,
+        jobId: jobIdBigInt,
         channelType: data.channelType,
         ...(data.conversationId !== undefined && { conversationId: data.conversationId }),
         members,
@@ -83,12 +82,10 @@ export class ConversationRepository {
    * Get conversation by job ID (unique - one conversation per job)
    */
   async getByJobIdUniqueAndUserId(jobId: string | number | bigint, userId: string | number | bigint): Promise<Conversation | null> {
-    const j = this.toBigIntOrThrow(jobId, "jobId");
-    const u = this.toBigIntOrThrow(userId, "userId");
-    console.log("j", j);
-    console.log("u", u);
+    const jobIdBigInt = typeof jobId === "bigint" ? jobId : BigInt(jobId);
+    const userIdBigInt = typeof userId === "bigint" ? userId : BigInt(userId);
     return prisma.conversation.findFirst({
-      where: { jobId: j, userId: u },
+      where: { jobId: jobIdBigInt, userId: userIdBigInt},
     }) as unknown as Conversation | null;
   }
 
