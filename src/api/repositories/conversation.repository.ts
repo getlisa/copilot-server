@@ -275,9 +275,9 @@ export class ConversationRepository {
   }> {
     const [messageCount, userMessageCount, aiMessageCount, firstMessage, lastMessage] =
       await Promise.all([
-        prisma.message.count({ where: { conversationId } }),
+        prisma.message.count({ where: { conversationId: conversationId } }),
         prisma.message.count({
-          where: { conversationId, senderType: "USER" },
+          where: { conversationId: conversationId, senderType: "USER" },
         }),
         prisma.message.count({
           where: { conversationId, senderType: "AI" },

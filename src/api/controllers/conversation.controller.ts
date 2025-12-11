@@ -1,9 +1,13 @@
 import { Response } from "express";
+import { randomUUID } from "crypto";
 import { ValidatedRequest } from "../middlewares/validate";
 import { conversationRepository } from "../repositories/conversation.repository";
 import { messageRepository } from "../repositories/message.repository";
 import { contextRepository } from "../repositories/context.repository";
 import logger from "../../lib/logger";
+import prisma from "../../lib/prisma";
+import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
+import { RequestWithUser } from "../middlewares/auth";
 import {
   createConversationSchema,
   getConversationSchema,
@@ -23,6 +27,7 @@ import {
   createContextSchema,
   getContextsSchema,
   getConversationStatsSchema,
+  uploadImagesSchema,
 } from "../schemas/conversation.schema";
 
 // Helper to extract error details
@@ -176,6 +181,45 @@ export class ConversationController {
         conversationId,
         messageLimit
       );
+
+      // Refresh image attachments with fresh presigned URLs
+      if (conversation && Array.isArray((conversation as any).messages)) {
+        const imageMessages = (conversation as any).messages.filter(
+          (m: any) => m.contentType === "IMAGE"
+        );
+
+        if (imageMessages.length > 0) {
+        const imageFiles = await (prisma as any).imageFile.findMany({
+            where: { messageId: { in: imageMessages.map((m: any) => m.id) } },
+          });
+
+        const byMessage: Record<string, any[]> = imageFiles.reduce(
+          (acc: Record<string, any[]>, rec: any) => {
+            const arr = acc[rec.messageId] || [];
+            arr.push(rec);
+            acc[rec.messageId] = arr;
+            return acc;
+          },
+          {}
+        );
+
+          for (const msg of imageMessages) {
+            const files = byMessage[msg.id] || [];
+            if (files.length === 0) continue;
+
+            msg.attachments = await Promise.all(
+              files.map(async (f: any) => ({
+                id: f.id,
+                url: await getPresignedUrlForKey(f.s3Key),
+                type: f.mimeType,
+                filename: f.filename ?? undefined,
+                size: f.sizeBytes ? Number(f.sizeBytes) : undefined,
+                metadata: { s3Key: f.s3Key },
+              }))
+            );
+          }
+        }
+      }
 
       if (!conversation) {
         logger.warn('Conversation not found', logContext);
@@ -433,6 +477,152 @@ export class ConversationController {
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : "Failed to remove member",
+      });
+    }
+  }
+
+  /**
+   * Upload images to a conversation, create an IMAGE message, and return presigned URLs
+   * POST /conversations/:conversationId/images
+   */
+  static async uploadImages(
+    req: ValidatedRequest<typeof uploadImagesSchema> &
+      RequestWithUser & { files?: Express.Multer.File[] },
+    res: Response
+  ) {
+    const startTime = Date.now();
+    const { conversationId } = req.validated.params;
+    const files = req.files ?? [];
+    const logContext = {
+      endpoint: "uploadImages",
+      conversationId,
+      fileCount: files.length,
+    };
+
+    logger.info("Uploading images", logContext);
+
+    try {
+      if (files.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "No images were uploaded",
+        });
+      }
+
+      const conversation = await conversationRepository.getById(conversationId);
+      if (!conversation) {
+        logger.warn("Conversation not found for upload", logContext);
+        return res.status(404).json({
+          success: false,
+          error: "Conversation not found",
+        });
+      }
+
+      const senderId =
+        req.user?.userId && /^\d+$/.test(req.user.userId) ? req.user.userId : null;
+
+      const messageId = randomUUID();
+      const companyId =
+        req.user?.companyId !== undefined && req.user?.companyId !== null
+          ? String(req.user.companyId)
+          : "unknown-company";
+
+      const uploads = await Promise.all(
+        files.map(async (file) => {
+          const extMatch = file.originalname.match(/\.[^.]+$/);
+          const ext = extMatch ? extMatch[0] : "";
+          const safeBase = file.originalname
+            .replace(/\.[^.]+$/, "")
+            .replace(/[^a-zA-Z0-9-_]/g, "-")
+            .replace(/-+/g, "-")
+            .replace(/^-+|-+$/g, "") || "image";
+          const key = `companies/${companyId}/conversations/${conversationId}/${messageId}/${randomUUID()}-${safeBase}${ext}`;
+
+          await uploadBufferToS3({
+            key,
+            buffer: file.buffer,
+            contentType: file.mimetype,
+          });
+
+          const presignedUrl = await getPresignedUrlForKey(key);
+
+          return {
+            imageFile: {
+              id: randomUUID(),
+              conversationId,
+              messageId: "", // set after message creation
+              s3Key: key,
+              mimeType: file.mimetype,
+              sizeBytes: BigInt(file.size),
+              filename: file.originalname,
+            },
+            attachment: {
+              id: randomUUID(),
+              url: presignedUrl,
+              type: file.mimetype,
+              filename: file.originalname,
+              size: file.size,
+              metadata: {
+                s3Key: key,
+              },
+            },
+          };
+        })
+      );
+
+      const content = req.validated.body.question.trim();
+      const attachments = uploads.map((u) => u.attachment);
+
+      const message = await messageRepository.createWithConversationUpdate({
+        id: messageId,
+        conversationId,
+        senderType: "USER",
+        senderId,
+        content,
+        contentType: "IMAGE",
+        attachments,
+        metadata: {
+          uploadCount: files.length,
+        },
+      });
+
+      await (prisma as any).imageFile.createMany({
+        data: uploads.map((u) => ({
+          id: u.imageFile.id,
+          conversationId,
+          messageId: message.id,
+          s3Key: u.imageFile.s3Key,
+          mimeType: u.imageFile.mimeType,
+          sizeBytes: u.imageFile.sizeBytes,
+          filename: u.imageFile.filename,
+        })),
+      });
+
+      logger.info("Images uploaded", {
+        ...logContext,
+        messageId: message.id,
+        durationMs: Date.now() - startTime,
+      });
+
+      res.status(201).json({
+        success: true,
+        data: {
+          message: {
+            ...message,
+            attachments,
+          },
+        },
+      });
+    } catch (error) {
+      logger.error("Failed to upload images", {
+        ...logContext,
+        error: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - startTime,
+      });
+
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to upload images",
       });
     }
   }

@@ -170,6 +170,7 @@ export interface UpdateConversationInput {
 }
 
 export interface CreateMessageInput {
+  id?: string;
   conversationId: string;
   senderType: SenderType;
   senderId?: bigint | string | null;

@@ -3,7 +3,8 @@ import {
   AgentInputItem,
   run,
   RunItemStreamEvent,
-  RunRawModelStreamEvent
+  RunRawModelStreamEvent,
+  InputGuardrailTripwireTriggered,
 } from "@openai/agents";
 import {
   fileSearchTool,
@@ -64,7 +65,7 @@ export class ClaraAgent implements AIAgent {
       instructions: systemPrompt,
       model: DEFAULT_MODEL,
       tools,
-      // inputGuardrails: [fieldServiceQuestionGuardrail],
+      inputGuardrails: [fieldServiceQuestionGuardrail],
     });
   }
 
@@ -149,6 +150,18 @@ export class ClaraAgent implements AIAgent {
       callbacks?.onComplete?.(response);
       return response;
     } catch (error) {
+      if (error instanceof InputGuardrailTripwireTriggered) {
+        const guardrailOutput = (error as any).result?.output ?? (error as any).output ?? {};
+        const guidance =
+          guardrailOutput?.outputInfo?.guidance ??
+          guardrailOutput?.guidance ??
+          "I’m focused on field service (HVAC, plumbing, electrical, fire protection). Please ask about the job or equipment you’re working on.";
+        return {
+          messageId: `guardrail-${Date.now()}`,
+          content: guidance,
+        };
+      }
+
       logger.error("ClaraAgent processing error", { error });
       callbacks?.onError?.(error as Error);
       throw error;
@@ -199,6 +212,23 @@ export class ClaraAgent implements AIAgent {
         },
       ],
     };
+  }
+
+  /**
+   * Vision-style question using presigned image URLs.
+   * We pass the image URLs in the user message so the model can fetch them.
+   */
+  async processVisionQuestion(
+    question: string,
+    imageUrls: string[],
+    context: AgentContext,
+    callbacks?: AgentStreamCallbacks
+  ): Promise<AgentResponse> {
+    const visionPrompt = `${question}\n\nImage URLs:\n${imageUrls
+      .map((u, idx) => `${idx + 1}. ${u}`)
+      .join("\n")}\n\nPlease inspect the images above and answer the question.`;
+
+    return this.processMessage(visionPrompt, context, callbacks);
   }
 }
 

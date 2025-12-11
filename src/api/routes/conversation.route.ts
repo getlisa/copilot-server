@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authMiddleware } from "../middlewares/auth";
 import { validate } from "../middlewares/validate";
 import { ConversationController } from "../controllers/conversation.controller";
+import { imageUpload } from "../middlewares/imageUpload";
 import {
   createConversationSchema,
   getConversationSchema,
@@ -21,6 +22,7 @@ import {
   createContextSchema,
   getContextsSchema,
   getConversationStatsSchema,
+  uploadImagesSchema,
 } from "../schemas/conversation.schema";
 import { withValidatedRequest } from "../middlewares/withValidatedRequest";
 
@@ -139,6 +141,18 @@ conversationRoute.delete(
 // ============================================
 // MESSAGE ROUTES
 // ============================================
+
+/**
+ * @route   POST /conversations/:conversationId/images
+ * @desc    Upload up to 4 images, store in S3, attach to message
+ * @access  Private
+ */
+conversationRoute.post(
+  "/:conversationId/images",
+  imageUpload.array("images", 4),
+  validate(uploadImagesSchema),
+  withValidatedRequest(ConversationController.uploadImages)
+);
 
 /**
  * @route   GET /conversations/:conversationId/messages

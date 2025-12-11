@@ -20,6 +20,7 @@ export class MessageRepository {
   async create(data: CreateMessageInput): Promise<Message> {
     return prisma.message.create({
       data: {
+        ...(data.id && { id: data.id }),
         conversationId: data.conversationId,
         senderType: data.senderType,
         senderId:
@@ -43,6 +44,7 @@ export class MessageRepository {
     const [message] = await prisma.$transaction([
       prisma.message.create({
         data: {
+          ...(data.id && { id: data.id }),
           conversationId: data.conversationId,
           senderType: data.senderType,
           senderId:

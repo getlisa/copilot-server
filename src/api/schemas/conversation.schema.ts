@@ -199,6 +199,18 @@ export const createMessageSchema = z.object({
   }),
 });
 
+// Upload images (multipart)
+export const uploadImagesSchema = z.object({
+  params: z.object({
+    conversationId: z.string().uuid("Invalid conversation ID"),
+  }),
+  body: z
+    .object({
+      question: z.string().min(1, "Message is required"),
+    })
+    .passthrough(),
+});
+
 // Get message by ID
 export const getMessageSchema = z.object({
   params: z.object({
@@ -328,4 +340,5 @@ export type CreateToolCallInput = z.infer<typeof createToolCallSchema>;
 export type CompleteToolCallInput = z.infer<typeof completeToolCallSchema>;
 export type CreateContextInput = z.infer<typeof createContextSchema>;
 export type GetContextsInput = z.infer<typeof getContextsSchema>;
+export type UploadImagesInput = z.infer<typeof uploadImagesSchema>;
 

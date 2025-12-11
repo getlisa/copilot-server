@@ -4,6 +4,8 @@ import { messageRepository } from "../repositories/message.repository";
 import logger from "../../lib/logger";
 import { getClaraAgent } from "../../agent/ClaraAgent";
 import { AgentStreamCallbacks } from "../../types/agent.types";
+import { getRecentImagesWithPresignedUrls } from "../../lib/imageAccess";
+import prisma from "../../lib/prisma";
 
 export class ChatController {
   /**
@@ -32,14 +34,42 @@ export class ChatController {
         });
       }
 
-      // 2. Save user message
-      const userMessage = await messageRepository.create({
-        conversationId,
-        senderType,
-        senderId: senderId ? BigInt(senderId) : null,
-        content,
-        contentType: "TEXT",
-      });
+      // 2. Deduplicate: if the last user IMAGE message has the same content, reuse it
+      let userMessage = null as any;
+      if (senderType === "USER") {
+        const lastImage = await prisma.message.findFirst({
+          where: {
+            conversationId,
+            senderType: "USER",
+            contentType: "IMAGE",
+          },
+          orderBy: { createdAt: "desc" },
+        });
+
+        if (
+          lastImage &&
+          lastImage.content === content &&
+          (lastImage.senderId === null ||
+            (senderId && String(lastImage.senderId) === String(senderId)))
+        ) {
+          userMessage = lastImage;
+          logger.info("Reusing last image message to avoid duplicate text", {
+            conversationId,
+            messageId: lastImage.id,
+          });
+        }
+      }
+
+      // If not reused, create the user text message
+      if (!userMessage) {
+        userMessage = await messageRepository.create({
+          conversationId,
+          senderType,
+          senderId: senderId ? BigInt(senderId) : null,
+          content,
+          contentType: "TEXT",
+        });
+      }
 
       logger.info("Message saved", { messageId: userMessage.id, senderType });
 
@@ -54,14 +84,26 @@ export class ChatController {
         });
       }
 
-      // 3. Get Clara agent and process message
+      // 3. Get Clara agent and process message (with images if available)
       const agent = await getClaraAgent();
-
-      const response = await agent.processMessage(content, {
+      const recentImages = await getRecentImagesWithPresignedUrls({
         conversationId,
-        userId: senderId ? String(senderId) : "user",
-        jobId: conversation.jobId ? String(conversation.jobId) : undefined,
+        limit: 4,
       });
+      const imageUrls = recentImages.map((img) => img.url);
+
+      const response =
+        imageUrls.length > 0
+          ? await agent.processVisionQuestion(content, imageUrls, {
+              conversationId,
+              userId: senderId ? String(senderId) : "user",
+              jobId: conversation.jobId ? String(conversation.jobId) : undefined,
+            })
+          : await agent.processMessage(content, {
+              conversationId,
+              userId: senderId ? String(senderId) : "user",
+              jobId: conversation.jobId ? String(conversation.jobId) : undefined,
+            });
 
       // 4. Save AI response
       const aiMessage = await messageRepository.create({
@@ -70,7 +112,10 @@ export class ChatController {
         senderId: null,
         content: response.content,
         contentType: "TEXT",
-        metadata: response.metadata,
+        metadata: {
+          ...response.metadata,
+          imageFileIds: recentImages.map((img) => img.id),
+        },
       });
 
       logger.info("AI response saved", {
@@ -129,14 +174,42 @@ export class ChatController {
         });
       }
 
-      // Save user message
-      const userMessage = await messageRepository.create({
-        conversationId,
-        senderType,
-        senderId: senderId ? BigInt(senderId) : null,
-        content,
-        contentType: "TEXT",
-      });
+      // Deduplicate: if the last user IMAGE message has the same content, reuse it
+      let userMessage = null as any;
+      if (senderType === "USER") {
+        const lastImage = await prisma.message.findFirst({
+          where: {
+            conversationId,
+            senderType: "USER",
+            contentType: "IMAGE",
+          },
+          orderBy: { createdAt: "desc" },
+        });
+
+        if (
+          lastImage &&
+          lastImage.content === content &&
+          (lastImage.senderId === null ||
+            (senderId && String(lastImage.senderId) === String(senderId)))
+        ) {
+          userMessage = lastImage;
+          logger.info("Reusing last image message to avoid duplicate text (stream)", {
+            conversationId,
+            messageId: lastImage.id,
+          });
+        }
+      }
+
+      // If not reused, create the user text message
+      if (!userMessage) {
+        userMessage = await messageRepository.create({
+          conversationId,
+          senderType,
+          senderId: senderId ? BigInt(senderId) : null,
+          content,
+          contentType: "TEXT",
+        });
+      }
 
       // If this is an AI-authored message (senderId is null), just stream it back and end.
       if (senderType === "AI") {
@@ -168,8 +241,13 @@ export class ChatController {
       res.write(`data: ${JSON.stringify({ type: "user_message", data: userMessage })}\n\n`);
       flush();
 
-      // Get Clara agent
+      // Get Clara agent and prepare image context
       const agent = await getClaraAgent();
+      const recentImages = await getRecentImagesWithPresignedUrls({
+        conversationId,
+        limit: 4,
+      });
+      const imageUrls = recentImages.map((img) => img.url);
 
       let fullResponse = "";
 
@@ -193,16 +271,28 @@ export class ChatController {
         },
       };
 
-      // Process with streaming callbacks
-      const response = await agent.processMessage(
-        content,
-        {
-          conversationId,
-          userId: senderId ? String(senderId) : "user",
-          jobId: conversation.jobId ? String(conversation.jobId) : undefined,
-        },
-        callbacks
-      );
+      // Process with streaming callbacks (vision if images available)
+      const response =
+        imageUrls.length > 0
+          ? await agent.processVisionQuestion(
+              content,
+              imageUrls,
+              {
+                conversationId,
+                userId: senderId ? String(senderId) : "user",
+                jobId: conversation.jobId ? String(conversation.jobId) : undefined,
+              },
+              callbacks
+            )
+          : await agent.processMessage(
+              content,
+              {
+                conversationId,
+                userId: senderId ? String(senderId) : "user",
+                jobId: conversation.jobId ? String(conversation.jobId) : undefined,
+              },
+              callbacks
+            );
 
       // Save complete AI response
       const aiMessage = await messageRepository.create({
@@ -211,7 +301,10 @@ export class ChatController {
         senderId: null,
         content: response.content,
         contentType: "TEXT",
-        metadata: response.metadata,
+        metadata: {
+          ...response.metadata,
+          imageFileIds: recentImages.map((img) => img.id),
+        },
       });
 
       // Send completion event
