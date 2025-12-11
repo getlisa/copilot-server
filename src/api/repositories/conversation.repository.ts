@@ -28,14 +28,12 @@ export class ConversationRepository {
    */
   async create(data: CreateConversationInput): Promise<Conversation> {
     const jobId = this.toBigIntOrThrow(data.jobId, "jobId");
-    const userId = this.toBigIntOptional(data.userId);
+    const userId = this.toBigIntOrThrow(data.userId, "userId" );
 
     // Enforce uniqueness for a given user + jobId at repository level
-    if (userId !== null) {
-      const existing = await this.getByJobIdUniqueAndUserId(jobId, userId);
-      if (existing) {
-        throw new Error("Conversation already exists for this job and user");
-      }
+    const existing = await this.getByJobIdUniqueAndUserId(jobId, userId);
+    if (existing) {
+      throw new Error("Conversation already exists for this job and user");
     }
 
     const members = (data.members ?? [data.userId ?? "", "clara"]).map((m) => String(m));
@@ -56,7 +54,7 @@ export class ConversationRepository {
    */
   async getById(id: string): Promise<Conversation | null> {
     return prisma.conversation.findUnique({
-      where: { id },
+      where: { id:id },
     }) as unknown as Conversation | null;
   }
 
@@ -87,8 +85,10 @@ export class ConversationRepository {
   async getByJobIdUniqueAndUserId(jobId: string | number | bigint, userId: string | number | bigint): Promise<Conversation | null> {
     const j = this.toBigIntOrThrow(jobId, "jobId");
     const u = this.toBigIntOrThrow(userId, "userId");
-    return prisma.conversation.findUnique({
-      where: { jobId_userId: { jobId: j, userId: u } },
+    console.log("j", j);
+    console.log("u", u);
+    return prisma.conversation.findFirst({
+      where: { jobId: j, userId: u },
     }) as unknown as Conversation | null;
   }
 
@@ -105,6 +105,7 @@ export class ConversationRepository {
 
     // Check if conversation exists for this job
     const existing = await this.getByJobIdUniqueAndUserId(data.jobId, data.userId);
+    console.log("existing", existing);
     if (existing) {
       return { conversation: existing, created: false };
     }

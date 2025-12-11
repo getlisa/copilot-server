@@ -200,7 +200,7 @@ model Conversation {
   @@index([conversationId])
   @@index([status])
   @@index([createdAt])
-  @@unique([jobId, userId])
+  @@index([jobId], map: "conversations_job_id_key")
   @@map("conversations")
   @@schema("public")
 }
