@@ -616,6 +616,13 @@ export class ConversationController {
         },
       });
 
+      // Log uploaded image URLs
+      logger.info("Images uploaded with URLs", {
+        ...logContext,
+        messageId: message.id,
+        urls: attachments.map((att) => att.url),
+      });
+
       await prisma.imageFile.createMany({
         data: uploads.map((u) => ({
           id: u.imageFile.id,
