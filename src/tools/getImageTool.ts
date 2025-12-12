@@ -54,7 +54,7 @@ export const getImageTool = tool({
             try {
               if (s3Key) {
                 // Always re-sign when we have the s3Key to avoid expired URLs
-                const url = await getPresignedUrlForKey(s3Key);
+                const url = await getPresignedUrlForKey(s3Key, 3600);
                 images.push({
                   id: att.id ?? msg.id,
                   url,
@@ -102,12 +102,14 @@ export const getImageTool = tool({
       if (images.length === 0) {
         return {
           message: "No images found for this conversation.",
+          count: 0,
           images: [],
         };
       }
 
       return {
         message: `Fetched ${images.length} image(s).`,
+        count: images.length,
         images,
       };
     } catch (error) {
@@ -118,6 +120,7 @@ export const getImageTool = tool({
       return {
         message:
           "Failed to fetch images for this conversation. Please try again or upload the images again.",
+        count: 0,
         images: [],
       };
     }

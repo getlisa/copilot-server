@@ -22,10 +22,16 @@ import logger from "../lib/logger";
 import { systemPrompt } from "../config/systemPrompt";
 import { fieldServiceQuestionGuardrail } from "./guardrailAgent";
 import { getImageTool } from "../tools/getImageTool";
+import { imageAnalyzerAgent } from "./imageAnalyzer";
 
 type AgentRunContext = {
   conversationId: string;
   userId: string;
+};
+
+type InlineImageInput = {
+  data: string;
+  mimeType?: string;
 };
 
 const DEFAULT_MODEL = process.env.OPENAI_AGENT_MODEL ?? "gpt-4o-mini";
@@ -67,6 +73,7 @@ export class ClaraAgent implements AIAgent {
       model: DEFAULT_MODEL,
       tools,
       inputGuardrails: [fieldServiceQuestionGuardrail],
+      handoffs: [imageAnalyzerAgent],
     });
   }
 
@@ -79,11 +86,107 @@ export class ClaraAgent implements AIAgent {
       throw new Error("Empty message");
     }
 
-    this.lastInteractionTs = Date.now();
-    const startTime = Date.now();
-
     const history = await this.buildHistory(context.conversationId);
     const input: AgentInputItem[] = [...history, this.toUserItem(text)];
+    return this.runAgent(input, context, callbacks);
+  }
+
+  /**
+   * Accepts inline image data (base64 or data URLs) to avoid external hosting.
+   */
+  async processMessageWithImages(
+    text: string,
+    images: InlineImageInput[],
+    context: AgentContext,
+    callbacks?: AgentStreamCallbacks
+  ): Promise<AgentResponse> {
+    if (!text.trim()) {
+      throw new Error("Empty message");
+    }
+
+    const history = await this.buildHistory(context.conversationId);
+    const input: AgentInputItem[] = [...history, this.toUserItemWithImages(text, images)];
+    return this.runAgent(input, context, callbacks);
+  }
+
+  async dispose(): Promise<void> {
+    logger.info("Clara agent disposed");
+  }
+
+  getLastInteraction(): number {
+    return this.lastInteractionTs;
+  }
+
+  getAssistantId(): string | undefined {
+    return undefined;
+  }
+
+  private async buildHistory(conversationId: string): Promise<AgentInputItem[]> {
+    const recent = await messageRepository.getLastMessages(conversationId, HISTORY_LIMIT);
+    return recent.map((msg) =>
+      msg.senderType === "AI" ? this.toAssistantItem(msg.content) : this.toUserItem(msg.content)
+    );
+  }
+
+  private toUserItem(content: string): AgentInputItem {
+    return {
+      role: "user",
+      type: "message",
+      content: [
+        {
+          type: "input_text",
+          text: content,
+        },
+      ],
+    };
+  }
+
+  private toAssistantItem(content: string): AgentInputItem {
+    return {
+      role: "assistant",
+      type: "message",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          text: content,
+        },
+      ],
+    };
+  }
+
+  private toUserItemWithImages(content: string, images: InlineImageInput[]): AgentInputItem {
+    const imageContents = images.map((img) => {
+      const hasDataPrefix = img.data.startsWith("data:");
+      const imageUrl = hasDataPrefix
+        ? img.data
+        : `data:${img.mimeType ?? "image/png"};base64,${img.data}`;
+      return {
+        type: "input_image",
+        image_url: imageUrl,
+      } as const;
+    });
+
+    return {
+      role: "user",
+      type: "message",
+      content: [
+        {
+          type: "input_text",
+          text: content,
+        },
+        ...imageContents,
+      ],
+    };
+  }
+
+  private async runAgent(
+    input: AgentInputItem[],
+    context: AgentContext,
+    callbacks?: AgentStreamCallbacks
+  ): Promise<AgentResponse> {
+    this.lastInteractionTs = Date.now();
+    const startTime = Date.now();
 
     callbacks?.onThinking?.();
 
@@ -135,7 +238,7 @@ export class ClaraAgent implements AIAgent {
         typeof stream.finalOutput === "string" && stream.finalOutput.length > 0
           ? stream.finalOutput
           : fullText;
-        
+
       console.log(`Final output: ${finalOutput}`);
 
       const response: AgentResponse = {
@@ -167,52 +270,6 @@ export class ClaraAgent implements AIAgent {
       callbacks?.onError?.(error as Error);
       throw error;
     }
-  }
-
-  async dispose(): Promise<void> {
-    logger.info("Clara agent disposed");
-  }
-
-  getLastInteraction(): number {
-    return this.lastInteractionTs;
-  }
-
-  getAssistantId(): string | undefined {
-    return undefined;
-  }
-
-  private async buildHistory(conversationId: string): Promise<AgentInputItem[]> {
-    const recent = await messageRepository.getLastMessages(conversationId, HISTORY_LIMIT);
-    return recent.map((msg) =>
-      msg.senderType === "AI" ? this.toAssistantItem(msg.content) : this.toUserItem(msg.content)
-    );
-  }
-
-  private toUserItem(content: string): AgentInputItem {
-    return {
-      role: "user",
-      type: "message",
-      content: [
-        {
-          type: "input_text",
-          text: content,
-        },
-      ],
-    };
-  }
-
-  private toAssistantItem(content: string): AgentInputItem {
-    return {
-      role: "assistant",
-      type: "message",
-      status: "completed",
-      content: [
-        {
-          type: "output_text",
-          text: content,
-        },
-      ],
-    };
   }
 
   /**

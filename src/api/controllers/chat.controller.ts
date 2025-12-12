@@ -54,6 +54,11 @@ const fetchImagesForConversation = async (conversationId: string, limit = 4) => 
         });
       } else if (att && att.metadata && att.metadata.s3Key) {
         const url = await getPresignedUrlForKey(att.metadata.s3Key);
+        console.log({
+          "att.metadata.s3Key": att.metadata.s3Key,
+          "url": url,
+          
+        })
         images.push({
           id: att.id ?? msg.id,
           url,
@@ -95,6 +100,28 @@ const logToolCallsForMessage = async (
   }
 };
 
+type InlineImageInput = { data: string; mimeType?: string };
+
+const parseInlineImages = (raw: unknown): InlineImageInput[] => {
+  if (!Array.isArray(raw)) return [];
+
+  return raw
+    .map((item) => {
+      if (typeof item === "string") {
+        return { data: item } satisfies InlineImageInput;
+      }
+      if (item && typeof item === "object") {
+        const data = (item as any).data ?? (item as any).base64 ?? (item as any).url;
+        const mimeType = (item as any).mimeType ?? (item as any).type;
+        if (typeof data === "string" && data.trim()) {
+          return { data, mimeType } satisfies InlineImageInput;
+        }
+      }
+      return null;
+    })
+    .filter((v): v is InlineImageInput => Boolean(v && typeof v.data === "string"));
+};
+
 export class ChatController {
   /**
    * Send a message and get AI response (non-streaming)
@@ -104,12 +131,14 @@ export class ChatController {
     const startTime = Date.now();
     const { conversationId } = req.params;
     const { content, senderId } = req.body;
+    const inlineImages = parseInlineImages(req.body.images ?? req.body.inlineImages);
     const senderType = senderId ? "USER" : "AI";
 
     logger.info("Chat message received", {
       conversationId,
       senderId: senderId ? String(senderId) : undefined,
       contentLength: content?.length,
+      inlineImageCount: inlineImages.length,
     });
 
     try {
@@ -174,7 +203,8 @@ export class ChatController {
 
       // 3. Get Clara agent and process message (with images if available)
       const agent = await getClaraAgent();
-      const visionImages = await fetchImagesForConversation(conversationId, 4);
+      const visionImages =
+        inlineImages.length === 0 ? await fetchImagesForConversation(conversationId, 4) : [];
       const imageUrls = visionImages.map((img) => img.url);
 
       if (imageUrls.length > 0) {
@@ -185,18 +215,18 @@ export class ChatController {
         });
       }
 
+      const baseContext = {
+        conversationId,
+        userId: senderId ? String(senderId) : "user",
+        jobId: conversation.jobId ? String(conversation.jobId) : undefined,
+      };
+
       const response =
-        imageUrls.length > 0
-          ? await agent.processVisionQuestion(content, imageUrls, {
-              conversationId,
-              userId: senderId ? String(senderId) : "user",
-              jobId: conversation.jobId ? String(conversation.jobId) : undefined,
-            })
-          : await agent.processMessage(content, {
-              conversationId,
-              userId: senderId ? String(senderId) : "user",
-              jobId: conversation.jobId ? String(conversation.jobId) : undefined,
-            });
+        inlineImages.length > 0
+          ? await agent.processMessageWithImages(content, inlineImages, baseContext)
+          : imageUrls.length > 0
+            ? await agent.processVisionQuestion(content, imageUrls, baseContext)
+            : await agent.processMessage(content, baseContext);
 
       // 4. Save AI response
       const aiMessage = await messageRepository.create({
@@ -207,6 +237,7 @@ export class ChatController {
         contentType: "TEXT",
         metadata: {
           ...response.metadata,
+          inlineImageCount: inlineImages.length,
           imageFileIds: visionImages.map((img) => img.id),
         },
       });
@@ -248,12 +279,14 @@ export class ChatController {
   static async streamMessage(req: Request, res: Response) {
     const { conversationId } = req.params;
     const { content, senderId } = req.body;
+    const inlineImages = parseInlineImages(req.body.images ?? req.body.inlineImages);
     const senderType = senderId ? "USER" : "AI";
 
     logger.info("Chat stream started", {
       conversationId,
       senderId: senderId ? String(senderId) : undefined,
       senderType,
+      inlineImageCount: inlineImages.length,
     });
 
     const flush = () => {
@@ -339,7 +372,8 @@ export class ChatController {
 
       // Get Clara agent and prepare image context
       const agent = await getClaraAgent();
-      const visionImages = await fetchImagesForConversation(conversationId, 4);
+      const visionImages =
+        inlineImages.length === 0 ? await fetchImagesForConversation(conversationId, 4) : [];
       const imageUrls = visionImages.map((img) => img.url);
 
       if (imageUrls.length > 0) {
@@ -373,27 +407,18 @@ export class ChatController {
       };
 
       // Process with streaming callbacks (vision if images available)
+      const baseContext = {
+        conversationId,
+        userId: senderId ? String(senderId) : "user",
+        jobId: conversation.jobId ? String(conversation.jobId) : undefined,
+      };
+
       const response =
-        imageUrls.length > 0
-          ? await agent.processVisionQuestion(
-              content,
-              imageUrls,
-              {
-                conversationId,
-                userId: senderId ? String(senderId) : "user",
-                jobId: conversation.jobId ? String(conversation.jobId) : undefined,
-              },
-              callbacks
-            )
-          : await agent.processMessage(
-              content,
-              {
-                conversationId,
-                userId: senderId ? String(senderId) : "user",
-                jobId: conversation.jobId ? String(conversation.jobId) : undefined,
-              },
-              callbacks
-            );
+        inlineImages.length > 0
+          ? await agent.processMessageWithImages(content, inlineImages, baseContext, callbacks)
+          : imageUrls.length > 0
+            ? await agent.processVisionQuestion(content, imageUrls, baseContext, callbacks)
+            : await agent.processMessage(content, baseContext, callbacks);
 
       // Save complete AI response
       const aiMessage = await messageRepository.create({
@@ -404,6 +429,7 @@ export class ChatController {
         contentType: "TEXT",
         metadata: {
           ...response.metadata,
+          inlineImageCount: inlineImages.length,
           imageFileIds: visionImages.map((img) => img.id),
         },
       });
