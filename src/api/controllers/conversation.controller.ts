@@ -183,8 +183,6 @@ export class ConversationController {
       requesterUserId,
     };
 
-    logger.info('Getting conversation with messages', logContext);
-
     try {
       const conversations: ConversationWithMessages[] = [];
 
@@ -256,12 +254,12 @@ export class ConversationController {
 
       const messages = conversations.flatMap((c) => c.messages ?? []);
 
-      logger.info('Conversation with messages retrieved', {
-        ...logContext,
-        conversationCount: conversations.length,
-        durationMs: Date.now() - startTime,
-        messageCount: messages.length,
-      });
+      // logger.info('Conversation with messages retrieved', {
+      //   ...logContext,
+      //   conversationCount: conversations.length,
+      //   durationMs: Date.now() - startTime,
+      //   messageCount: messages.length,
+      // });
 
       res.status(200).json({
         success: true,
