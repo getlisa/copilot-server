@@ -7,7 +7,7 @@ const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
 const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
 const configuredTtl = Number(process.env.S3_SIGNED_URL_TTL ?? "900");
 const defaultTtl = Number.isFinite(configuredTtl) && configuredTtl > 0 ? configuredTtl : 900;
-const MAX_TTL = 60 * 60 * 24 * 30; // S3 presign hard limit: 7 days
+const MAX_TTL = 60 * 60 * 24 * 90; // S3 presign hard limit: 30 days
 
 if (!bucket) {
   // We keep this non-fatal to allow local dev without S3, but will throw if used without config.

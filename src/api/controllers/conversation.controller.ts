@@ -30,7 +30,7 @@ import {
   uploadImagesSchema,
 } from "../schemas/conversation.schema";
 import { ImageFile } from "@prisma/client";
-import { Message } from "../../types/conversation.types";
+import { Message, ConversationWithMessages } from "../../types/conversation.types";
 
 // Helper to extract error details
 const getErrorDetails = (error: unknown) => ({
@@ -168,62 +168,85 @@ export class ConversationController {
    * GET /conversations/:conversationId/full
    */
   static async getConversationWithMessages(
-    req: ValidatedRequest<typeof getConversationWithMessagesSchema>,
+    req: ValidatedRequest<typeof getConversationWithMessagesSchema> & RequestWithUser,
     res: Response
   ) {
     const startTime = Date.now();
-    const { conversationId } = req.validated.params;
+    const { conversationId, jobId } = req.validated.params;
     const { messageLimit } = req.validated.query;
-    const logContext = { endpoint: 'getConversationWithMessages', conversationId, messageLimit };
+    const requesterUserId = req.user?.userId ?? null;
+    const logContext = {
+      endpoint: 'getConversationWithMessages',
+      conversationId,
+      jobId,
+      messageLimit,
+      requesterUserId,
+    };
 
     logger.info('Getting conversation with messages', logContext);
 
     try {
-      const conversation = await conversationRepository.getByIdWithMessages(
-        conversationId,
-        messageLimit
-      );
+      const conversations: ConversationWithMessages[] = [];
+
+      if (conversationId) {
+        const conversation = await conversationRepository.getByIdWithMessages(
+          conversationId,
+          messageLimit
+        );
+        if (conversation) conversations.push(conversation);
+      } else if (jobId) {
+        const convoList =
+          await conversationRepository.getByJobIdForUserOrPublicWithMessages(
+            jobId,
+            requesterUserId,
+            messageLimit
+          );
+        conversations.push(...convoList);
+      }
 
       // Refresh image attachments with fresh presigned URLs
-      if (conversation && Array.isArray(conversation.messages)) {
-        const imageMessages = conversation.messages.filter(
-          (m: Message) => m.contentType === "IMAGE"
-        );
+      for (const conversation of conversations) {
+        if (conversation && Array.isArray(conversation.messages)) {
+          const imageMessages = conversation.messages.filter(
+            (m: Message) => m.contentType === "IMAGE"
+          );
 
-        if (imageMessages.length > 0) {
-        const imageFiles = await prisma.imageFile.findMany({
-            where: { messageId: { in: imageMessages.map((m: Message) => m.id) } },
-          });
+          if (imageMessages.length > 0) {
+            const imageFiles = await prisma.imageFile.findMany({
+              where: { messageId: { in: imageMessages.map((m: Message) => m.id) } },
+            });
 
-        const byMessage: Record<string, ImageFile[]> = imageFiles.reduce(
-          (acc: Record<string, ImageFile[]>, rec: ImageFile) => {
-            const arr = acc[rec.messageId] || [];
-            arr.push(rec);
-            acc[rec.messageId] = arr;
-            return acc;
-          },
-          {}
-        );
-
-          for (const msg of imageMessages) {
-            const files = byMessage[msg.id] || [];
-            if (files.length === 0) continue;
-
-            msg.attachments = await Promise.all(
-              files.map(async (f: ImageFile) => ({
-                id: f.id,
-                url: await getPresignedUrlForKey(f.s3Key),
-                type: f.mimeType,
-                filename: f.filename ?? undefined,
-                size: f.sizeBytes ? Number(f.sizeBytes) : undefined,
-                metadata: { s3Key: f.s3Key },
-              }))
+            const byMessage: Record<string, ImageFile[]> = imageFiles.reduce(
+              (acc: Record<string, ImageFile[]>, rec: ImageFile) => {
+                const arr = acc[rec.messageId] || [];
+                arr.push(rec);
+                acc[rec.messageId] = arr;
+                return acc;
+              },
+              {}
             );
+
+            for (const msg of imageMessages) {
+              const files = byMessage[msg.id] || [];
+              if (files.length === 0) continue;
+              const urls = await Promise.all(files.map(async (f: ImageFile) => await getPresignedUrlForKey(f.s3Key)));
+
+              msg.attachments = await Promise.all(
+                files.map(async (f: ImageFile, index: number) => ({
+                  id: f.id,
+                  url: urls[index],
+                  type: f.mimeType,
+                  filename: f.filename ?? undefined,
+                  size: f.sizeBytes ? Number(f.sizeBytes) : undefined,
+                  metadata: { s3Key: f.s3Key },
+                }))
+              );
+            }
           }
         }
       }
 
-      if (!conversation) {
+      if (conversations.length === 0) {
         logger.warn('Conversation not found', logContext);
         return res.status(404).json({
           success: false,
@@ -231,15 +254,20 @@ export class ConversationController {
         });
       }
 
+      const messages = conversations.flatMap((c) => c.messages ?? []);
+
       logger.info('Conversation with messages retrieved', {
         ...logContext,
-        messageCount: conversation.messages?.length ?? 0,
-        durationMs: Date.now() - startTime
+        conversationCount: conversations.length,
+        durationMs: Date.now() - startTime,
+        messageCount: messages.length,
       });
 
       res.status(200).json({
         success: true,
-        data: conversation,
+        data: {
+          messages,
+        },
       });
     } catch (error) {
       logger.error('Failed to get conversation with messages', {

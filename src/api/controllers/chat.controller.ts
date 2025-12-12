@@ -5,7 +5,95 @@ import logger from "../../lib/logger";
 import { getClaraAgent } from "../../agent/ClaraAgent";
 import { AgentStreamCallbacks } from "../../types/agent.types";
 import { getRecentImagesWithPresignedUrls } from "../../lib/imageAccess";
+import { getPresignedUrlForKey } from "../../lib/s3";
 import prisma from "../../lib/prisma";
+
+// Redact presigned URLs for logging (strip query params)
+const redactUrl = (url: string) => {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return url;
+  }
+};
+
+// Fetch images for vision: prefer ImageFile table; fallback to message attachments
+const fetchImagesForConversation = async (conversationId: string, limit = 4) => {
+  // Primary source: ImageFile rows
+  const primary = await getRecentImagesWithPresignedUrls({ conversationId, limit });
+  if (primary.length > 0) {
+    return primary.map((img) => ({
+      id: img.id,
+      url: img.url,
+      filename: img.filename ?? undefined,
+      mimeType: img.mimeType,
+    }));
+  }
+
+  // Fallback: recent IMAGE messages with attachments
+  const fallbackMessages = await prisma.message.findMany({
+    where: { conversationId, contentType: "IMAGE" },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    select: { id: true, attachments: true },
+  });
+
+  const images: { id: string; url: string; filename?: string; mimeType?: string }[] = [];
+
+  for (const msg of fallbackMessages) {
+    const attArr = Array.isArray(msg.attachments) ? msg.attachments : [];
+    for (const raw of attArr) {
+      const att = raw as Record<string, any>;
+      if (att?.url) {
+        images.push({
+          id: att.id ?? msg.id,
+          url: att.url,
+          filename: att.filename,
+          mimeType: att.type,
+        });
+      } else if (att && att.metadata && att.metadata.s3Key) {
+        const url = await getPresignedUrlForKey(att.metadata.s3Key);
+        images.push({
+          id: att.id ?? msg.id,
+          url,
+          filename: att.filename,
+          mimeType: att.type,
+        });
+      }
+    }
+  }
+
+  return images.slice(0, limit);
+};
+
+// Persist tool calls from agent metadata
+const logToolCallsForMessage = async (
+  messageId: string,
+  toolNames?: string[]
+) => {
+  if (!toolNames || toolNames.length === 0) return;
+  try {
+    await Promise.all(
+      toolNames.map(async (toolName) => {
+        const toolCall = await messageRepository.createToolCall({
+          messageId,
+          toolName,
+          toolInput: {}, // no structured input available from agent metadata
+        });
+        // Mark as completed immediately (agent tool executed locally)
+        await messageRepository.completeToolCall(toolCall.id, {
+          note: "auto-logged from agent metadata",
+        });
+      })
+    );
+  } catch (err) {
+    logger.warn("Failed to persist tool calls", {
+      messageId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+};
 
 export class ChatController {
   /**
@@ -86,11 +174,16 @@ export class ChatController {
 
       // 3. Get Clara agent and process message (with images if available)
       const agent = await getClaraAgent();
-      const recentImages = await getRecentImagesWithPresignedUrls({
-        conversationId,
-        limit: 4,
-      });
-      const imageUrls = recentImages.map((img) => img.url);
+      const visionImages = await fetchImagesForConversation(conversationId, 4);
+      const imageUrls = visionImages.map((img) => img.url);
+
+      if (imageUrls.length > 0) {
+        logger.info("Clara vision context (sendMessage)", {
+          conversationId,
+          imageCount: imageUrls.length,
+          urls: imageUrls.map((u) => redactUrl(u)),
+        });
+      }
 
       const response =
         imageUrls.length > 0
@@ -114,9 +207,12 @@ export class ChatController {
         contentType: "TEXT",
         metadata: {
           ...response.metadata,
-          imageFileIds: recentImages.map((img) => img.id),
+          imageFileIds: visionImages.map((img) => img.id),
         },
       });
+
+      // Persist tool calls (if any)
+      await logToolCallsForMessage(aiMessage.id, response.metadata?.toolsUsed);
 
       logger.info("AI response saved", {
         messageId: aiMessage.id,
@@ -243,11 +339,16 @@ export class ChatController {
 
       // Get Clara agent and prepare image context
       const agent = await getClaraAgent();
-      const recentImages = await getRecentImagesWithPresignedUrls({
-        conversationId,
-        limit: 4,
-      });
-      const imageUrls = recentImages.map((img) => img.url);
+      const visionImages = await fetchImagesForConversation(conversationId, 4);
+      const imageUrls = visionImages.map((img) => img.url);
+
+      if (imageUrls.length > 0) {
+        logger.info("Clara vision context (stream)", {
+          conversationId,
+          imageCount: imageUrls.length,
+          urls: imageUrls.map((u) => redactUrl(u)),
+        });
+      }
 
       let fullResponse = "";
 
@@ -303,9 +404,12 @@ export class ChatController {
         contentType: "TEXT",
         metadata: {
           ...response.metadata,
-          imageFileIds: recentImages.map((img) => img.id),
+          imageFileIds: visionImages.map((img) => img.id),
         },
       });
+
+      // Persist tool calls (if any)
+      await logToolCallsForMessage(aiMessage.id, response.metadata?.toolsUsed);
 
       // Send completion event
       res.write(`data: ${JSON.stringify({ type: "done", data: aiMessage })}\n\n`);

@@ -21,6 +21,7 @@ import { messageRepository } from "../api/repositories/message.repository";
 import logger from "../lib/logger";
 import { systemPrompt } from "../config/systemPrompt";
 import { fieldServiceQuestionGuardrail } from "./guardrailAgent";
+import { getImageTool } from "../tools/getImageTool";
 
 type AgentRunContext = {
   conversationId: string;
@@ -49,7 +50,7 @@ export class ClaraAgent implements AIAgent {
   }
 
   private buildAgent(): Agent<AgentRunContext> {
-    const tools = [webSearchTool({ searchContextSize: "medium" })];
+    const tools = [webSearchTool({ searchContextSize: "medium" }), getImageTool];
 
     if (VECTOR_STORE_ID) {
       const vectorStoreIds = VECTOR_STORE_ID.split(",")

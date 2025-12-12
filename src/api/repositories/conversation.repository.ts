@@ -79,6 +79,42 @@ export class ConversationRepository {
   }
 
   /**
+   * Get conversations for a job where userId matches OR is null, with messages
+   */
+  async getByJobIdForUserOrPublicWithMessages(
+    jobId: string | number | bigint,
+    userId: string | number | bigint | null | undefined,
+    messageLimit?: number
+  ): Promise<ConversationWithMessages[]> {
+    const jobIdBigInt = typeof jobId === "bigint" ? jobId : BigInt(jobId);
+    const userIdBigInt =
+      userId === null || userId === undefined
+        ? null
+        : typeof userId === "bigint"
+        ? userId
+        : BigInt(userId);
+
+    return prisma.conversation.findMany({
+      where: {
+        jobId: jobIdBigInt,
+        OR: [
+          { userId: userIdBigInt },
+          { userId: null },
+        ],
+      },
+      include: {
+        messages: {
+          orderBy: { createdAt: "asc" },
+          take: messageLimit,
+          include: {
+            toolCalls: true,
+          },
+        },
+      },
+    }) as unknown as ConversationWithMessages[];
+  }
+
+  /**
    * Get conversation by job ID (unique - one conversation per job)
    */
   async getByJobIdUniqueAndUserId(jobId: string | number | bigint, userId: string | number | bigint): Promise<Conversation | null> {

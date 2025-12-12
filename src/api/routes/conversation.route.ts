@@ -74,7 +74,7 @@ conversationRoute.get(
  * @access  Private
  */
 conversationRoute.get(
-  "/:conversationId/full",
+  "/:jobId/full",
   validate(getConversationWithMessagesSchema),
   withValidatedRequest(ConversationController.getConversationWithMessages)
 );

@@ -109,7 +109,11 @@ export const getConversationSchema = z.object({
 // Get conversation with messages
 export const getConversationWithMessagesSchema = z.object({
   params: z.object({
-    conversationId: z.string().uuid("Invalid conversation ID"),
+    conversationId: z.string().uuid("Invalid conversation ID").optional(),
+    jobId: z.string().optional(),
+  }).refine((data) => data.conversationId || data.jobId, {
+    message: "conversationId or jobId is required",
+    path: ["conversationId"],
   }),
   query: z.object({
     messageLimit: z.coerce.number().min(1).max(1000).optional(),
