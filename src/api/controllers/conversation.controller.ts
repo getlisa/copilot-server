@@ -29,6 +29,8 @@ import {
   getConversationStatsSchema,
   uploadImagesSchema,
 } from "../schemas/conversation.schema";
+import { ImageFile } from "@prisma/client";
+import { Message } from "../../types/conversation.types";
 
 // Helper to extract error details
 const getErrorDetails = (error: unknown) => ({
@@ -183,18 +185,18 @@ export class ConversationController {
       );
 
       // Refresh image attachments with fresh presigned URLs
-      if (conversation && Array.isArray((conversation as any).messages)) {
-        const imageMessages = (conversation as any).messages.filter(
-          (m: any) => m.contentType === "IMAGE"
+      if (conversation && Array.isArray(conversation.messages)) {
+        const imageMessages = conversation.messages.filter(
+          (m: Message) => m.contentType === "IMAGE"
         );
 
         if (imageMessages.length > 0) {
-        const imageFiles = await (prisma as any).imageFile.findMany({
-            where: { messageId: { in: imageMessages.map((m: any) => m.id) } },
+        const imageFiles = await prisma.imageFile.findMany({
+            where: { messageId: { in: imageMessages.map((m: Message) => m.id) } },
           });
 
-        const byMessage: Record<string, any[]> = imageFiles.reduce(
-          (acc: Record<string, any[]>, rec: any) => {
+        const byMessage: Record<string, ImageFile[]> = imageFiles.reduce(
+          (acc: Record<string, ImageFile[]>, rec: ImageFile) => {
             const arr = acc[rec.messageId] || [];
             arr.push(rec);
             acc[rec.messageId] = arr;
@@ -208,7 +210,7 @@ export class ConversationController {
             if (files.length === 0) continue;
 
             msg.attachments = await Promise.all(
-              files.map(async (f: any) => ({
+              files.map(async (f: ImageFile) => ({
                 id: f.id,
                 url: await getPresignedUrlForKey(f.s3Key),
                 type: f.mimeType,
@@ -536,7 +538,7 @@ export class ConversationController {
             .replace(/[^a-zA-Z0-9-_]/g, "-")
             .replace(/-+/g, "-")
             .replace(/^-+|-+$/g, "") || "image";
-          const key = `companies/${companyId}/conversations/${conversationId}/${messageId}/${randomUUID()}-${safeBase}${ext}`;
+          const key = `companies/${companyId}/conversations/${conversationId}/messages/${messageId}/${Date.now()}-${safeBase}${ext}`;
 
           await uploadBufferToS3({
             key,
@@ -586,7 +588,7 @@ export class ConversationController {
         },
       });
 
-      await (prisma as any).imageFile.createMany({
+      await prisma.imageFile.createMany({
         data: uploads.map((u) => ({
           id: u.imageFile.id,
           conversationId,

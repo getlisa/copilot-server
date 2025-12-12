@@ -194,8 +194,8 @@ model Conversation {
   conversationId String?            @map("openai_conversation_id")
   jobs           jobs               @relation(fields: [jobId], references: [id], onDelete: Cascade)
   users          users?             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  messages       Message[]
   imageFiles     ImageFile[]
+  messages       Message[]
 
   @@index([userId])
   @@index([conversationId])
@@ -218,10 +218,10 @@ model Message {
   status         MessageStatus @default(SENT)
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
+  imageFiles     ImageFile[]
   conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   users          users?        @relation(fields: [senderId], references: [id], onDelete: Cascade)
   toolCalls      ToolCall[]
-  imageFiles    ImageFile[]
 
   @@index([conversationId])
   @@index([senderType])
@@ -232,18 +232,17 @@ model Message {
 }
 
 model ImageFile {
-  id             String        @id @default(uuid())
-  conversationId String        @map("conversation_id")
-  messageId      String        @map("message_id")
-  s3Key          String        @map("s3_key")
-  mimeType       String        @map("mime_type")
-  sizeBytes      BigInt?       @map("size_bytes")
+  id             String       @id @default(uuid())
+  conversationId String       @map("conversation_id")
+  messageId      String       @map("message_id")
+  s3Key          String       @map("s3_key")
+  mimeType       String       @map("mime_type")
+  sizeBytes      BigInt?      @map("size_bytes")
   filename       String?
-  createdAt      DateTime      @default(now()) @map("created_at")
-  updatedAt      DateTime      @updatedAt @map("updated_at")
-
-  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  message        Message       @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  message        Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
   @@index([conversationId])
   @@index([messageId])

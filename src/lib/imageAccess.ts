@@ -31,7 +31,7 @@ export async function getRecentImagesWithPresignedUrls(options: {
   const limit = options.limit ?? 4;
   const expiresInSeconds = options.expiresInSeconds ?? 900;
 
-  const records: ImageRecord[] = (await (prisma as any).imageFile.findMany({
+  const records: ImageRecord[] = (await prisma.imageFile.findMany({
     where: { conversationId: options.conversationId },
     orderBy: { createdAt: "desc" },
     take: limit,
