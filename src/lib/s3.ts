@@ -17,7 +17,13 @@ if (!bucket) {
 }
 
 export const s3Client = new S3Client({
-  region
+  region,
+  credentials: accessKeyId && secretAccessKey
+    ? {
+        accessKeyId,
+        secretAccessKey,
+      }
+    : undefined,
 });
 
 // Normalize keys that may include protocol/bucket prefixes to a bare object key.
