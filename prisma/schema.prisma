@@ -8,6 +8,7 @@ datasource db {
   url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
   schemas   = ["public"]
+  extensions = [vector]
 }
 
 model audio_files {
