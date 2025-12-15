@@ -73,7 +73,7 @@ export class ClaraAgent implements AIAgent {
       model: DEFAULT_MODEL,
       tools,
       inputGuardrails: [fieldServiceQuestionGuardrail],
-      handoffs: [imageAnalyzerAgent],
+      // handoffs: [imageAnalyzerAgent],
     });
   }
 
