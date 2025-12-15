@@ -7,6 +7,9 @@ import { contextRepository } from "../repositories/context.repository";
 import logger from "../../lib/logger";
 import prisma from "../../lib/prisma";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
+import { trackFileEvent } from "../../lib/events";
+import { getClaraAgent } from "../../agent/ClaraAgent";
+import { generateImageEmbedding } from "../../lib/embeddings";
 import { RequestWithUser } from "../middlewares/auth";
 import {
   createConversationSchema,
@@ -29,7 +32,6 @@ import {
   getConversationStatsSchema,
   uploadImagesSchema,
 } from "../schemas/conversation.schema";
-import { ImageFile } from "@prisma/client";
 import { Message, ConversationWithMessages } from "../../types/conversation.types";
 
 // Helper to extract error details
@@ -38,6 +40,18 @@ const getErrorDetails = (error: unknown) => ({
   name: error instanceof Error ? error.name : 'Unknown',
   stack: error instanceof Error ? error.stack : undefined,
 });
+
+type ImageFile = {
+  id: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+  conversationId: string;
+  messageId: string;
+  s3Key: string;
+  mimeType: string;
+  sizeBytes: bigint | null;
+  filename: string | null;
+};
 
 export class ConversationController {
   // ============================================
@@ -173,7 +187,9 @@ export class ConversationController {
   ) {
     const startTime = Date.now();
     const { conversationId, jobId } = req.validated.params;
+    // Cap history to the last 10 messages unless a smaller limit is provided.
     const { messageLimit } = req.validated.query;
+    const effectiveLimit = Math.min(messageLimit ?? 10, 10);
     const requesterUserId = req.user?.userId ?? null;
     const logContext = {
       endpoint: 'getConversationWithMessages',
@@ -189,7 +205,7 @@ export class ConversationController {
       if (conversationId) {
         const conversation = await conversationRepository.getByIdWithMessages(
           conversationId,
-          messageLimit
+          effectiveLimit
         );
         if (conversation) conversations.push(conversation);
       } else if (jobId) {
@@ -197,7 +213,7 @@ export class ConversationController {
           await conversationRepository.getByJobIdForUserOrPublicWithMessages(
             jobId,
             requesterUserId,
-            messageLimit
+            effectiveLimit
           );
         conversations.push(...convoList);
       }
@@ -253,14 +269,6 @@ export class ConversationController {
       }
 
       const messages = conversations.flatMap((c) => c.messages ?? []);
-
-      // logger.info('Conversation with messages retrieved', {
-      //   ...logContext,
-      //   conversationCount: conversations.length,
-      //   durationMs: Date.now() - startTime,
-      //   messageCount: messages.length,
-      // });
-
       res.status(200).json({
         success: true,
         data: {
@@ -281,233 +289,8 @@ export class ConversationController {
     }
   }
 
-  /**
-   * Update a conversation
-   * PATCH /conversations/:conversationId
-   */
-  static async updateConversation(
-    req: ValidatedRequest<typeof updateConversationSchema>,
-    res: Response
-  ) {
-    const startTime = Date.now();
-    const { conversationId } = req.validated.params;
-    const logContext = { 
-      endpoint: 'updateConversation', 
-      conversationId,
-      updates: req.validated.body 
-    };
 
-    logger.info('Updating conversation', logContext);
 
-    try {
-      const conversation = await conversationRepository.update(
-        conversationId,
-        req.validated.body
-      );
-
-      logger.info('Conversation updated', {
-        ...logContext,
-        durationMs: Date.now() - startTime
-      });
-
-      res.status(200).json({
-        success: true,
-        data: conversation,
-      });
-    } catch (error) {
-      logger.error('Failed to update conversation', {
-        ...logContext,
-        ...getErrorDetails(error),
-        durationMs: Date.now() - startTime
-      });
-
-      res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to update conversation",
-      });
-    }
-  }
-
-  /**
-   * List conversations with filters
-   * GET /conversations
-   */
-  static async listConversations(
-    req: ValidatedRequest<typeof listConversationsSchema>,
-    res: Response
-  ) {
-    const startTime = Date.now();
-    const { cursor, limit, orderBy, ...filters } = req.validated.query;
-    const logContext = { endpoint: 'listConversations', filters, cursor, limit, orderBy };
-
-    logger.info('Listing conversations', logContext);
-
-    try {
-      const result = await conversationRepository.list(filters, {
-        cursor,
-        limit,
-        orderBy,
-      });
-
-      logger.info('Conversations listed', {
-        ...logContext,
-        resultCount: result.items.length,
-        total: result.total,
-        hasMore: result.hasMore,
-        durationMs: Date.now() - startTime
-      });
-
-      res.status(200).json({
-        success: true,
-        data: result.items,
-        pagination: {
-          nextCursor: result.nextCursor,
-          hasMore: result.hasMore,
-          total: result.total,
-        },
-      });
-    } catch (error) {
-      logger.error('Failed to list conversations', {
-        ...logContext,
-        ...getErrorDetails(error),
-        durationMs: Date.now() - startTime
-      });
-
-      res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to list conversations",
-      });
-    }
-  }
-
-  /**
-   * Close a conversation
-   * POST /conversations/:conversationId/close
-   */
-  static async closeConversation(
-    req: ValidatedRequest<typeof closeConversationSchema>,
-    res: Response
-  ) {
-    const startTime = Date.now();
-    const { conversationId } = req.validated.params;
-    const logContext = { endpoint: 'closeConversation', conversationId };
-
-    logger.info('Closing conversation', logContext);
-
-    try {
-      const conversation = await conversationRepository.close(conversationId);
-
-      logger.info('Conversation closed', {
-        ...logContext,
-        durationMs: Date.now() - startTime
-      });
-
-      res.status(200).json({
-        success: true,
-        data: conversation,
-      });
-    } catch (error) {
-      logger.error('Failed to close conversation', {
-        ...logContext,
-        ...getErrorDetails(error),
-        durationMs: Date.now() - startTime
-      });
-
-      res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to close conversation",
-      });
-    }
-  }
-
-  /**
-   * Add a member to conversation
-   * POST /conversations/:conversationId/members
-   */
-  static async addMember(
-    req: ValidatedRequest<typeof addMemberSchema>,
-    res: Response
-  ) {
-    const startTime = Date.now();
-    const { conversationId } = req.validated.params;
-    const { memberId } = req.validated.body;
-    const logContext = { endpoint: 'addMember', conversationId, memberId };
-
-    logger.info('Adding member to conversation', logContext);
-
-    try {
-      const conversation = await conversationRepository.addMember(
-        conversationId,
-        memberId
-      );
-
-      logger.info('Member added', {
-        ...logContext,
-        memberCount: conversation.members.length,
-        durationMs: Date.now() - startTime
-      });
-
-      res.status(200).json({
-        success: true,
-        data: conversation,
-      });
-    } catch (error) {
-      logger.error('Failed to add member', {
-        ...logContext,
-        ...getErrorDetails(error),
-        durationMs: Date.now() - startTime
-      });
-
-      res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to add member",
-      });
-    }
-  }
-
-  /**
-   * Remove a member from conversation
-   * DELETE /conversations/:conversationId/members/:memberId
-   */
-  static async removeMember(
-    req: ValidatedRequest<typeof removeMemberSchema>,
-    res: Response
-  ) {
-    const startTime = Date.now();
-    const { conversationId, memberId } = req.validated.params;
-    const logContext = { endpoint: 'removeMember', conversationId, memberId };
-
-    logger.info('Removing member from conversation', logContext);
-
-    try {
-      const conversation = await conversationRepository.removeMember(
-        conversationId,
-        memberId
-      );
-
-      logger.info('Member removed', {
-        ...logContext,
-        memberCount: conversation.members.length,
-        durationMs: Date.now() - startTime
-      });
-
-      res.status(200).json({
-        success: true,
-        data: conversation,
-      });
-    } catch (error) {
-      logger.error('Failed to remove member', {
-        ...logContext,
-        ...getErrorDetails(error),
-        durationMs: Date.now() - startTime
-      });
-
-      res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : "Failed to remove member",
-      });
-    }
-  }
 
   /**
    * Upload images to a conversation, create an IMAGE message, and return presigned URLs
@@ -521,6 +304,8 @@ export class ConversationController {
     const startTime = Date.now();
     const { conversationId } = req.validated.params;
     const files = req.files ?? [];
+    const origin = req.validated.body.origin ?? "chat";
+    const client = req.validated.body.client ?? "web";
     const logContext = {
       endpoint: "uploadImages",
       conversationId,
@@ -531,6 +316,12 @@ export class ConversationController {
 
     try {
       if (files.length === 0) {
+        trackFileEvent("Upload File Initiated", {
+          conversationId,
+          origin,
+          client,
+          status: "no_files",
+        });
         return res.status(400).json({
           success: false,
           error: "No images were uploaded",
@@ -540,6 +331,12 @@ export class ConversationController {
       const conversation = await conversationRepository.getById(conversationId);
       if (!conversation) {
         logger.warn("Conversation not found for upload", logContext);
+        trackFileEvent("Upload File Initiated", {
+          conversationId,
+          origin,
+          client,
+          status: "conversation_not_found",
+        });
         return res.status(404).json({
           success: false,
           error: "Conversation not found",
@@ -555,8 +352,20 @@ export class ConversationController {
           ? String(req.user.companyId)
           : "unknown-company";
 
+      // High-level "upload initiated" event for analytics
+      trackFileEvent("Upload File Initiated", {
+        conversationId,
+        messageId,
+        origin,
+        client,
+        status: "initiated",
+      });
+
       const uploads = await Promise.all(
         files.map(async (file) => {
+          const imageFileId = randomUUID();
+          const attachmentId = randomUUID();
+
           const extMatch = file.originalname.match(/\.[^.]+$/);
           const ext = extMatch ? extMatch[0] : "";
           const safeBase = file.originalname
@@ -566,26 +375,56 @@ export class ConversationController {
             .replace(/^-+|-+$/g, "") || "image";
           const key = `companies/${companyId}/conversations/${conversationId}/messages/${messageId}/${Date.now()}-${safeBase}${ext}`;
 
+          // Emit granular blob-store lifecycle events around S3 upload
+          trackFileEvent("Blob Store Upload Started", {
+            conversationId,
+            messageId,
+            fileId: imageFileId,
+            fileName: file.originalname,
+            fileSize: file.size,
+            mimeType: file.mimetype,
+            origin,
+            client,
+            status: "uploading",
+            useCase: "multimodal",
+            uploadEntry: "local",
+          });
+
           await uploadBufferToS3({
             key,
             buffer: file.buffer,
             contentType: file.mimetype,
           });
 
+          trackFileEvent("Blob Store Upload Completed", {
+            conversationId,
+            messageId,
+            fileId: imageFileId,
+            fileName: file.originalname,
+            fileSize: file.size,
+            mimeType: file.mimetype,
+            origin,
+            client,
+            status: "uploaded",
+            useCase: "multimodal",
+            uploadEntry: "local",
+          });
+
           const presignedUrl = await getPresignedUrlForKey(key);
 
           return {
             imageFile: {
-              id: randomUUID(),
+              id: imageFileId,
               conversationId,
               messageId: "", // set after message creation
               s3Key: key,
               mimeType: file.mimetype,
               sizeBytes: BigInt(file.size),
               filename: file.originalname,
+              embedding: await generateImageEmbedding(file.buffer),
             },
             attachment: {
-              id: randomUUID(),
+              id: attachmentId,
               url: presignedUrl,
               type: file.mimetype,
               filename: file.originalname,
@@ -598,7 +437,7 @@ export class ConversationController {
         })
       );
 
-      const content = req.validated.body.question.trim();
+      const content = (req.validated.body.question ?? "").trim();
       const attachments = uploads.map((u) => u.attachment);
 
       const message = await messageRepository.createWithConversationUpdate({
@@ -633,11 +472,93 @@ export class ConversationController {
         })),
       });
 
+      // Persist embeddings (if available) using raw SQL (avoids Prisma type mismatch on vector)
+      for (const u of uploads) {
+        if (u.imageFile.embedding && Array.isArray(u.imageFile.embedding) && u.imageFile.embedding.length > 0) {
+          const vectorLiteral = `[${u.imageFile.embedding.join(",")}]`;
+          try {
+            await prisma.$executeRawUnsafe(
+              vectorLiteral,
+              u.imageFile.id
+            );
+          } catch (err) {
+            logger.warn("Failed to persist image embedding", {
+              imageFileId: u.imageFile.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+
       logger.info("Images uploaded", {
         ...logContext,
         messageId: message.id,
         durationMs: Date.now() - startTime,
       });
+
+      // Final completion event for the upload lifecycle
+      uploads.forEach((u) => {
+        trackFileEvent("Upload File Completed", {
+          conversationId,
+          messageId: message.id,
+          fileId: u.imageFile.id,
+          fileName: u.imageFile.filename,
+          fileSize: Number(u.imageFile.sizeBytes),
+          mimeType: u.imageFile.mimeType,
+          origin,
+          client,
+          status: "ready",
+          useCase: "multimodal",
+          uploadEntry: "local",
+        });
+      });
+
+      // Immediately analyze the uploaded images with Clara (best-effort; non-blocking on failure)
+      let aiMessage = null as any;
+      try {
+        const agent = await getClaraAgent();
+        const imageUrls = attachments.map((att) => att.url);
+        const baseContext = {
+          conversationId,
+          userId: senderId ?? (req.user?.userId ?? "user"),
+          jobId: conversation.jobId ? String(conversation.jobId) : undefined,
+        };
+
+        // Small delay to ensure presigned URLs propagate (best-effort)
+        await new Promise((resolve) => setTimeout(resolve, 8000));
+        console.log({
+          "imageUrls": imageUrls,
+          "baseContext": baseContext,
+          "content": content,
+        })
+
+        logger.info("Calling vision with presigned URLs", { imageUrls });
+        const aiResponse = await agent.processVisionQuestion(content, imageUrls, baseContext);
+
+        aiMessage = await messageRepository.create({
+          conversationId,
+          senderType: "AI",
+          senderId: null,
+          content: aiResponse.content,
+          contentType: "TEXT",
+          metadata: {
+            ...aiResponse.metadata,
+            imageFileIds: uploads.map((u) => u.imageFile.id),
+            inlineImageCount: 0,
+          },
+        });
+
+        logger.info("AI vision analysis completed for uploaded images", {
+          ...logContext,
+          aiMessageId: aiMessage.id,
+          aiResponseSnippet: aiResponse.content?.slice(0, 500),
+        });
+      } catch (analysisError) {
+        logger.warn("AI vision analysis failed after upload", {
+          ...logContext,
+          error: analysisError instanceof Error ? analysisError.message : String(analysisError),
+        });
+      }
 
       res.status(201).json({
         success: true,
@@ -646,6 +567,7 @@ export class ConversationController {
             ...message,
             attachments,
           },
+          aiMessage: aiMessage ?? undefined,
         },
       });
     } catch (error) {

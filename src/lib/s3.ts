@@ -17,15 +17,19 @@ if (!bucket) {
 }
 
 export const s3Client = new S3Client({
-  region,
-  credentials:
-    accessKeyId && secretAccessKey
-      ? {
-          accessKeyId,
-          secretAccessKey,
-        }
-      : undefined,
+  region
 });
+
+// Normalize keys that may include protocol/bucket prefixes to a bare object key.
+function normalizeS3Key(key: string): string {
+  if (!key) return key;
+  let normalized = key.trim();
+  // Strip s3://bucket/
+  normalized = normalized.replace(/^s3:\/\/[^/]+\/+/i, "");
+  // Strip https://bucket.s3.../
+  normalized = normalized.replace(/^https?:\/\/[^/]+\/+/i, "");
+  return normalized;
+}
 
 export async function uploadBufferToS3(params: {
   key: string;
@@ -35,17 +39,18 @@ export async function uploadBufferToS3(params: {
   if (!bucket) {
     throw new Error("S3 bucket not configured (S3_BUCKET missing)");
   }
+  const key = normalizeS3Key(params.key);
 
   await s3Client.send(
     new PutObjectCommand({
       Bucket: bucket,
-      Key: params.key,
+      Key: key,
       Body: params.buffer,
       ContentType: params.contentType,
     })
   );
 
-  return { key: params.key };
+  return { key };
 }
 
 export async function getPresignedUrlForKey(
@@ -55,8 +60,9 @@ export async function getPresignedUrlForKey(
   if (!bucket) {
     throw new Error("S3 bucket not configured (S3_BUCKET missing)");
   }
+  const normalizedKey = normalizeS3Key(key);
   console.log({
-    "key": key,
+    "key": normalizedKey,
     "expiresInSeconds": expiresInSeconds,
     "defaultTtl": defaultTtl,
     "MAX_TTL": MAX_TTL,
@@ -68,8 +74,10 @@ export async function getPresignedUrlForKey(
 
   const command = new GetObjectCommand({
     Bucket: bucket,
-    Key: key,
+    Key: normalizedKey,
   });
 
   return getSignedUrl(s3Client, command, { expiresIn: safeTtl });
 }
+
+export { normalizeS3Key };

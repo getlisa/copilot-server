@@ -1,8 +1,3 @@
-/**
- * Simple structured logger for API debugging
- * Outputs JSON format for easy parsing in production
- */
-
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 interface LogContext {

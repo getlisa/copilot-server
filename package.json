@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "tsc && node dist/server.js",
-    "dev": "npx tsx watch src/server.ts",
+    "dev": "AWS_PROFILE=copilot-dev nodemon --watch src --exec tsx src/server.ts",
     "build": "tsc",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
@@ -39,6 +39,7 @@
     "@types/jsonwebtoken": "^9.0.5",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.5.10",
+    "nodemon": "^3.1.11",
     "prisma": "^6.19.0",
     "tsx": "^4.19.0",
     "typescript": "^5.9.3"

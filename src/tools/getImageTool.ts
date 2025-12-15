@@ -1,9 +1,10 @@
 import { tool } from "@openai/agents";
 import { z } from "zod";
-import { getRecentImagesWithPresignedUrls } from "../lib/imageAccess";
+import { getImagesByEmbeddingWithPresignedUrls, getRecentImagesWithPresignedUrls } from "../lib/imageAccess";
 import { getPresignedUrlForKey } from "../lib/s3";
 import prisma from "../lib/prisma";
 import logger from "../lib/logger";
+// import { generateTextEmbedding } from "../lib/embeddings";
 
 /**
  * Tool: get_images

@@ -36,17 +36,6 @@ conversationRoute.use(authMiddleware);
 // ============================================
 
 /**
- * @route   GET /conversations
- * @desc    List conversations with filters and pagination
- * @access  Private
- */
-conversationRoute.get(
-  "/",
-  validate(listConversationsSchema),
-  withValidatedRequest(ConversationController.listConversations)
-);
-
-/**
  * @route   POST /conversations
  * @desc    Create a new conversation
  * @access  Private
@@ -80,28 +69,6 @@ conversationRoute.get(
 );
 
 /**
- * @route   PATCH /conversations/:conversationId
- * @desc    Update a conversation
- * @access  Private
- */
-conversationRoute.patch(
-  "/:conversationId",
-  validate(updateConversationSchema),
-  withValidatedRequest(ConversationController.updateConversation)
-);
-
-/**
- * @route   POST /conversations/:conversationId/close
- * @desc    Close a conversation
- * @access  Private
- */
-conversationRoute.post(
-  "/:conversationId/close",
-  validate(closeConversationSchema),
-  withValidatedRequest(ConversationController.closeConversation)
-);
-
-/**
  * @route   GET /conversations/:conversationId/stats
  * @desc    Get conversation statistics
  * @access  Private
@@ -110,32 +77,6 @@ conversationRoute.get(
   "/:conversationId/stats",
   validate(getConversationStatsSchema),
   withValidatedRequest(ConversationController.getConversationStats)
-);
-
-// ============================================
-// MEMBER ROUTES
-// ============================================
-
-/**
- * @route   POST /conversations/:conversationId/members
- * @desc    Add a member to conversation
- * @access  Private
- */
-conversationRoute.post(
-  "/:conversationId/members",
-  validate(addMemberSchema),
-  withValidatedRequest(ConversationController.addMember)
-);
-
-/**
- * @route   DELETE /conversations/:conversationId/members/:memberId
- * @desc    Remove a member from conversation
- * @access  Private
- */
-conversationRoute.delete(
-  "/:conversationId/members/:memberId",
-  validate(removeMemberSchema),
-  withValidatedRequest(ConversationController.removeMember)
 );
 
 // ============================================

@@ -19,11 +19,13 @@ const redactUrl = (url: string) => {
 };
 
 // Fetch images for vision: prefer ImageFile table; fallback to message attachments
-const fetchImagesForConversation = async (conversationId: string, limit = 4) => {
+// Default limit is 1 (latest only) to avoid mixing older context unless the client
+// explicitly opts in via selectedImageIds or inlineImages.
+const fetchImagesForConversation = async (conversationId: string, limit?: number) => {
   // Primary source: ImageFile rows
   const primary = await getRecentImagesWithPresignedUrls({ conversationId, limit });
   if (primary.length > 0) {
-    return primary.map((img) => ({
+    return primary.map((img: any) => ({
       id: img.id,
       url: img.url,
       filename: img.filename ?? undefined,
@@ -72,6 +74,28 @@ const fetchImagesForConversation = async (conversationId: string, limit = 4) => 
   return images.slice(0, limit);
 };
 
+// Fetch specific images by their ImageFile IDs (within the same conversation)
+const fetchImagesByIds = async (conversationId: string, imageIds: string[]) => {
+  if (imageIds.length === 0) return [];
+
+  const files = await prisma.imageFile.findMany({
+    where: { conversationId, id: { in: imageIds } },
+  });
+
+  if (files.length === 0) return [];
+
+  const urls = await Promise.all(
+    files.map((f: { s3Key: string }) => getPresignedUrlForKey(f.s3Key))
+  );
+
+  return files.map((f: any, idx: number) => ({
+    id: f.id,
+    url: urls[idx],
+    filename: f.filename ?? undefined,
+    mimeType: f.mimeType,
+  }));
+};
+
 // Persist tool calls from agent metadata
 const logToolCallsForMessage = async (
   messageId: string,
@@ -106,7 +130,7 @@ const parseInlineImages = (raw: unknown): InlineImageInput[] => {
   if (!Array.isArray(raw)) return [];
 
   return raw
-    .map((item) => {
+    .map((item: any) => {
       if (typeof item === "string") {
         return { data: item } satisfies InlineImageInput;
       }
@@ -203,15 +227,24 @@ export class ChatController {
 
       // 3. Get Clara agent and process message (with images if available)
       const agent = await getClaraAgent();
+      // Allow explicit image selection from the client; otherwise, fall back to recent 2
+      const selectedImageIds = Array.isArray(req.body.selectedImageIds)
+        ? (req.body.selectedImageIds as string[]).filter((v) => typeof v === "string" && v.trim())
+        : [];
+
       const visionImages =
-        inlineImages.length === 0 ? await fetchImagesForConversation(conversationId, 4) : [];
-      const imageUrls = visionImages.map((img) => img.url);
+        inlineImages.length > 0
+          ? []
+          : selectedImageIds.length > 0
+            ? await fetchImagesByIds(conversationId, selectedImageIds)
+            : await fetchImagesForConversation(conversationId);
+      const imageUrls = visionImages.map((img: { url: string }) => img.url);
 
       if (imageUrls.length > 0) {
         logger.info("Clara vision context (sendMessage)", {
           conversationId,
           imageCount: imageUrls.length,
-          urls: imageUrls.map((u) => redactUrl(u)),
+          urls: imageUrls.map((u: string) => redactUrl(u)),
         });
       }
 
@@ -238,7 +271,7 @@ export class ChatController {
         metadata: {
           ...response.metadata,
           inlineImageCount: inlineImages.length,
-          imageFileIds: visionImages.map((img) => img.id),
+          imageFileIds: visionImages.map((img: { id: string }) => img.id),
         },
       });
 
@@ -372,15 +405,24 @@ export class ChatController {
 
       // Get Clara agent and prepare image context
       const agent = await getClaraAgent();
+      // Allow explicit image selection from the client; otherwise, fall back to recent 2
+      const selectedImageIds = Array.isArray(req.body.selectedImageIds)
+        ? (req.body.selectedImageIds as string[]).filter((v) => typeof v === "string" && v.trim())
+        : [];
+
       const visionImages =
-        inlineImages.length === 0 ? await fetchImagesForConversation(conversationId, 4) : [];
-      const imageUrls = visionImages.map((img) => img.url);
+        inlineImages.length > 0
+          ? []
+          : selectedImageIds.length > 0
+            ? await fetchImagesByIds(conversationId, selectedImageIds)
+            : await fetchImagesForConversation(conversationId, 1);
+      const imageUrls = visionImages.map((img: { url: string }) => img.url);
 
       if (imageUrls.length > 0) {
         logger.info("Clara vision context (stream)", {
           conversationId,
           imageCount: imageUrls.length,
-          urls: imageUrls.map((u) => redactUrl(u)),
+          urls: imageUrls.map((u: string) => redactUrl(u)),
         });
       }
 
@@ -430,7 +472,7 @@ export class ChatController {
         metadata: {
           ...response.metadata,
           inlineImageCount: inlineImages.length,
-          imageFileIds: visionImages.map((img) => img.id),
+          imageFileIds: visionImages.map((img: { id: string }) => img.id),
         },
       });
 
