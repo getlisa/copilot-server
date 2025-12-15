@@ -1,4 +1,6 @@
 import { Prisma } from "@prisma/client";
+
+type JsonValue = any;
 import prisma from "../../lib/prisma";
 import {
   Conversation,
@@ -43,7 +45,7 @@ export class ConversationRepository {
         channelType: data.channelType,
         ...(data.conversationId !== undefined && { conversationId: data.conversationId }),
         members,
-        metadata: (data.metadata ?? {}) as Prisma.InputJsonValue,
+        metadata: (data.metadata ?? {}) as JsonValue,
       },
     }) as unknown as Conversation;
   }
@@ -160,7 +162,7 @@ export class ConversationRepository {
       data: {
         ...(data.status && { status: data.status }),
         ...(data.members && { members: data.members }),
-        ...(data.metadata && { metadata: data.metadata as Prisma.InputJsonValue }),
+        ...(data.metadata && { metadata: data.metadata as JsonValue }),
       },
     }) as unknown as Conversation;
   }

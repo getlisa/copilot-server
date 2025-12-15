@@ -1,4 +1,6 @@
-import { Prisma, MessageStatus } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+
+type JsonValue = any;
 import prisma from "../../lib/prisma";
 import {
   Message,
@@ -31,8 +33,8 @@ export class MessageRepository {
             : BigInt(data.senderId),
         content: data.content,
         contentType: data.contentType ?? "TEXT",
-        attachments: (data.attachments ?? []) as unknown as Prisma.InputJsonValue,
-        metadata: (data.metadata ?? {}) as Prisma.InputJsonValue,
+        attachments: (data.attachments ?? []) as unknown as JsonValue,
+        metadata: (data.metadata ?? {}) as JsonValue,
       },
     }) as unknown as Message;
   }
@@ -55,8 +57,8 @@ export class MessageRepository {
               : BigInt(data.senderId),
           content: data.content,
           contentType: data.contentType ?? "TEXT",
-          attachments: (data.attachments ?? []) as unknown as Prisma.InputJsonValue,
-          metadata: (data.metadata ?? {}) as Prisma.InputJsonValue,
+          attachments: (data.attachments ?? []) as unknown as JsonValue,
+          metadata: (data.metadata ?? {}) as JsonValue,
         },
       }),
       prisma.conversation.update({
@@ -105,7 +107,7 @@ export class MessageRepository {
       updateData.status = data.status;
     }
     if (data.metadata !== undefined) {
-      updateData.metadata = data.metadata as Prisma.InputJsonValue;
+        updateData.metadata = data.metadata as JsonValue;
     }
 
     return prisma.message.update({
@@ -141,7 +143,7 @@ export class MessageRepository {
 
     const where = {
       conversationId,
-      status: { not: MessageStatus.DELETED },
+      status: { not: "DELETED" as any },
     };
 
     const [items, total] = await Promise.all([
@@ -233,7 +235,7 @@ export class MessageRepository {
     const messages = await prisma.message.findMany({
       where: {
         conversationId,
-        status: { not: MessageStatus.DELETED },
+        status: { not: "DELETED" },
       },
       orderBy: { createdAt: "desc" },
       take: count,
@@ -276,7 +278,7 @@ export class MessageRepository {
       data: {
         messageId: data.messageId,
         toolName: data.toolName,
-        toolInput: data.toolInput as Prisma.InputJsonValue,
+        toolInput: data.toolInput as JsonValue,
       },
     }) as unknown as ToolCall;
   }
@@ -288,7 +290,7 @@ export class MessageRepository {
     const updateData: Record<string, unknown> = {};
 
     if (data.toolOutput !== undefined) {
-      updateData.toolOutput = data.toolOutput as Prisma.InputJsonValue;
+      updateData.toolOutput = data.toolOutput as JsonValue;
     }
     if (data.status !== undefined) {
       updateData.status = data.status;
@@ -365,30 +367,30 @@ export class MessageRepository {
       where: { conversationId },
       select: { id: true },
     });
-    const messageIds = messages.map((m) => m.id);
+    const messageIds = messages.map((m: { id: string }) => m.id);
 
     const toolCalls = await prisma.toolCall.findMany({
       where: { messageId: { in: messageIds } },
     });
 
     const successfulCalls = toolCalls.filter(
-      (tc) => tc.status === "COMPLETED"
+      (tc: { status: string }) => tc.status === "COMPLETED"
     );
     const failedCalls = toolCalls.filter(
-      (tc) => tc.status === "FAILED"
+      (tc: { status: string }) => tc.status === "FAILED"
     );
 
     const durations = toolCalls
-      .filter((tc) => tc.durationMs !== null)
-      .map((tc) => tc.durationMs as number);
+      .filter((tc: { durationMs: number | null }) => tc.durationMs !== null)
+      .map((tc: { durationMs: number | null }) => tc.durationMs as number);
 
     const averageDurationMs =
       durations.length > 0
-        ? durations.reduce((a, b) => a + b, 0) / durations.length
+        ? durations.reduce((a: number, b: number) => a + b, 0) / durations.length
         : 0;
 
     const toolUsage = toolCalls.reduce(
-      (acc, tc) => {
+      (acc: any, tc: any) => {
         acc[tc.toolName] = (acc[tc.toolName] || 0) + 1;
         return acc;
       },

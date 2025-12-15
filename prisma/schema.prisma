@@ -1,7 +1,6 @@
 generator client {
   provider      = "prisma-client-js"
   binaryTargets = ["native", "debian-openssl-1.1.x"]
-  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
@@ -9,7 +8,6 @@ datasource db {
   url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
   schemas   = ["public"]
-  extensions = [vector]
 }
 
 model audio_files {
@@ -241,7 +239,7 @@ model ImageFile {
   mimeType       String       @map("mime_type")
   sizeBytes      BigInt?      @map("size_bytes")
   filename       String?
-  embeddings     Unsupported("vector(1536)")
+  embeddings     Unsupported("vector(512)")?
   createdAt      DateTime     @default(now()) @map("created_at")
   updatedAt      DateTime     @updatedAt @map("updated_at")
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)

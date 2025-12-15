@@ -460,17 +460,25 @@ export class ConversationController {
         urls: attachments.map((att) => att.url),
       });
 
-      await prisma.imageFile.createMany({
-        data: uploads.map((u) => ({
-          id: u.imageFile.id,
-          conversationId,
-          messageId: message.id,
-          s3Key: u.imageFile.s3Key,
-          mimeType: u.imageFile.mimeType,
-          sizeBytes: u.imageFile.sizeBytes,
-          filename: u.imageFile.filename,
-        })),
-      });
+      await prisma.$transaction(
+        uploads.map((u) =>
+          prisma.$executeRaw`
+            INSERT INTO image_files (id, conversation_id, message_id, s3_key, mime_type, size_bytes, filename, embeddings, created_at, updated_at)
+            VALUES (
+              ${u.imageFile.id},
+              ${conversationId},
+              ${message.id},
+              ${u.imageFile.s3Key},
+              ${u.imageFile.mimeType},
+              ${u.imageFile.sizeBytes ?? null},
+              ${u.imageFile.filename ?? null},
+              ${null},
+              NOW(),
+              NOW()
+            )
+          `
+        )
+      );
 
       // Persist embeddings (if available) using raw SQL (avoids Prisma type mismatch on vector)
       for (const u of uploads) {
