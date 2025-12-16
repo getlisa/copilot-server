@@ -23,10 +23,7 @@ export const fieldServiceQuestionGuardrail: InputGuardrail = {
     const isFieldService = result.finalOutput?.isFieldServiceQuestion ?? false;
 
     const playfulGuidance = [
-      "I’m on the clock for HVAC, plumbing, or electrical—got any leaky pipes or noisy vents for me?",
-      "I’m a field service brain. Ask me about gear, not geopolitics.",
-      "Happy to help with tools and troubleshooting—what’s the issue in front of you?",
-      "Nice try champ, let's focus on the job at the hand first."
+      "I can help you with the HVAC, plumbing, electrical, fire protection. Please ask something related to the job or equipment you’re working on."
     ];
     const guidance =
       playfulGuidance[Math.floor(Math.random() * playfulGuidance.length)] ??

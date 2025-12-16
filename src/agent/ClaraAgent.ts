@@ -61,7 +61,7 @@ export class ClaraAgent implements AIAgent {
   }
 
   private buildAgent(): Agent<AgentRunContext> {
-    const tools = [webSearchTool({ searchContextSize: "medium" }), getImageTool];
+    const tools = [webSearchTool({ searchContextSize: "medium" })];
 
     if (VECTOR_STORE_ID) {
       const vectorStoreIds = VECTOR_STORE_ID.split(",")
@@ -77,7 +77,7 @@ export class ClaraAgent implements AIAgent {
       instructions: systemPrompt,
       model: DEFAULT_MODEL,
       tools,
-      // inputGuardrails: [fieldServiceQuestionGuardrail],
+      inputGuardrails: [fieldServiceQuestionGuardrail],
       handoffs: [imageAnalyzerAgent],
     });
   }
@@ -178,28 +178,6 @@ export class ClaraAgent implements AIAgent {
   }
 
   private toUserItemWithImages(content: string, images: string[]): AgentInputItem[] {
-    // const imageContents = images.map((img) => {
-    //   const hasDataPrefix = img.data.startsWith("data:");
-    //   const imageUrl = hasDataPrefix
-    //     ? img.data
-    //     : `data:${img.mimeType ?? "image/png"};base64,${img.data}`;
-    //   return {
-    //     type: "input_image",
-    //     image_url: imageUrl,
-    //   } as const;
-    // });
-
-    // return {
-    //   role: "user",
-    //   type: "message",
-    //   content: [
-    //     {
-    //       type: "input_text",
-    //       text: content,
-    //     },
-    //     ...imageContents,
-    //   ],
-    // };
     const imageItems: ImageItem[] = images.map((img: string) => {
       console.log("Image URL:", img);
       return {
