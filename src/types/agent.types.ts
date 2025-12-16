@@ -57,12 +57,16 @@ export interface AIAgent {
   /** Initialize the agent (creates OpenAI assistant, thread, etc.) */
   init(): Promise<void>;
   
-  /** Process a text message and return AI response */
-  processMessage(
+  /** Process a text message with images and return AI response */
+  processMessageWithImages(
     text: string,
+    images: string[],
     context: AgentContext,
     callbacks?: AgentStreamCallbacks
   ): Promise<AgentResponse>;
+
+  /** Process a text message and return AI response */
+  processMessage(text: string, context: AgentContext, callbacks?: AgentStreamCallbacks): Promise<AgentResponse>;
   
   /** Clean up resources */
   dispose(): Promise<void>;

@@ -29,9 +29,14 @@ type AgentRunContext = {
   userId: string;
 };
 
-type InlineImageInput = {
-  data: string;
-  mimeType?: string;
+// type InlineImageInput = {
+//   data: string;
+//   mimeType?: string;
+// };
+
+type ImageItem = {
+  type: "input_image";
+  image: string;
 };
 
 const DEFAULT_MODEL = process.env.OPENAI_AGENT_MODEL ?? "gpt-4o-mini";
@@ -72,7 +77,7 @@ export class ClaraAgent implements AIAgent {
       instructions: systemPrompt,
       model: DEFAULT_MODEL,
       tools,
-      inputGuardrails: [fieldServiceQuestionGuardrail],
+      // inputGuardrails: [fieldServiceQuestionGuardrail],
       // handoffs: [imageAnalyzerAgent],
     });
   }
@@ -87,8 +92,8 @@ export class ClaraAgent implements AIAgent {
     }
 
     const history = await this.buildHistory(context.conversationId);
-    const input: AgentInputItem[] = [...history, this.toUserItem(text)];
-    return this.runAgent(input, context, callbacks);
+    const messages: AgentInputItem[] = [...history, this.toUserItem(text)] as AgentInputItem[];
+    return this.runAgent(messages, context, callbacks);
   }
 
   /**
@@ -96,7 +101,7 @@ export class ClaraAgent implements AIAgent {
    */
   async processMessageWithImages(
     text: string,
-    images: InlineImageInput[],
+    images: string[],
     context: AgentContext,
     callbacks?: AgentStreamCallbacks
   ): Promise<AgentResponse> {
@@ -104,9 +109,26 @@ export class ClaraAgent implements AIAgent {
       throw new Error("Empty message");
     }
 
-    const history = await this.buildHistory(context.conversationId);
-    const input: AgentInputItem[] = [...history, this.toUserItemWithImages(text, images)];
-    return this.runAgent(input, context, callbacks);
+    const imageItems = images
+      .filter(Boolean)
+      .map((url: string) => url.trim())
+      .filter((url: string) => url.length > 0)
+      .map((url: string) => ({ type: "input_image", image: url }) as ImageItem);
+
+    if (imageItems.length === 0) {
+      throw new Error("No valid image URLs provided");
+    }
+    const userMessage: AgentInputItem = {
+      role: "user",
+      content: [{ type: "input_text", text: text }, ...imageItems],
+    };
+
+    // const history = await this.buildHistory(context.conversationId);
+    const messages: AgentInputItem[] = [userMessage];
+
+    console.log("Messages SENT###:", JSON.stringify(messages, null, 2) );
+
+    return this.runAgent(messages, context, callbacks);
   }
 
   async dispose(): Promise<void> {
@@ -155,33 +177,51 @@ export class ClaraAgent implements AIAgent {
     };
   }
 
-  private toUserItemWithImages(content: string, images: InlineImageInput[]): AgentInputItem {
-    const imageContents = images.map((img) => {
-      const hasDataPrefix = img.data.startsWith("data:");
-      const imageUrl = hasDataPrefix
-        ? img.data
-        : `data:${img.mimeType ?? "image/png"};base64,${img.data}`;
+  private toUserItemWithImages(content: string, images: string[]): AgentInputItem[] {
+    // const imageContents = images.map((img) => {
+    //   const hasDataPrefix = img.data.startsWith("data:");
+    //   const imageUrl = hasDataPrefix
+    //     ? img.data
+    //     : `data:${img.mimeType ?? "image/png"};base64,${img.data}`;
+    //   return {
+    //     type: "input_image",
+    //     image_url: imageUrl,
+    //   } as const;
+    // });
+
+    // return {
+    //   role: "user",
+    //   type: "message",
+    //   content: [
+    //     {
+    //       type: "input_text",
+    //       text: content,
+    //     },
+    //     ...imageContents,
+    //   ],
+    // };
+    const imageItems: ImageItem[] = images.map((img: string) => {
+      console.log("Image URL:", img);
       return {
         type: "input_image",
-        image_url: imageUrl,
-      } as const;
-    });
-
-    return {
+        image: img
+      }
+    })
+    let messages: AgentInputItem[] = [{
       role: "user",
-      type: "message",
       content: [
-        {
-          type: "input_text",
-          text: content,
-        },
-        ...imageContents,
+        { type: "input_text", text: content },
+        ...imageItems,
       ],
-    };
+    } as AgentInputItem]
+
+    console.log("Messages SENT###:", JSON.stringify(messages, null, 2) );
+
+    return messages;
   }
 
   private async runAgent(
-    input: AgentInputItem[],
+    messages: AgentInputItem[],
     context: AgentContext,
     callbacks?: AgentStreamCallbacks
   ): Promise<AgentResponse> {
@@ -191,15 +231,18 @@ export class ClaraAgent implements AIAgent {
     callbacks?.onThinking?.();
 
     try {
-      const stream = await run(this.agent, input, {
+      const stream = await run(
+        this.agent,
+        messages,
+        {
         stream: true,
         context: { conversationId: context.conversationId, userId: context.userId },
       });
-
       let fullText = "";
       const toolsUsed: string[] = [];
 
       for await (const event of stream) {
+        console.log(`Event received:`, JSON.stringify(event, null, 2))
         if (event.type === "raw_model_stream_event") {
           const raw = event as RunRawModelStreamEvent;
           const delta = (raw.data as any)?.delta ?? (raw.data as any)?.text ?? "";
@@ -231,14 +274,12 @@ export class ClaraAgent implements AIAgent {
           }
         }
       }
-
       await stream.completed;
 
       const finalOutput =
         typeof stream.finalOutput === "string" && stream.finalOutput.length > 0
           ? stream.finalOutput
           : fullText;
-
       console.log(`Final output: ${finalOutput}`);
 
       const response: AgentResponse = {
@@ -282,11 +323,8 @@ export class ClaraAgent implements AIAgent {
     context: AgentContext,
     callbacks?: AgentStreamCallbacks
   ): Promise<AgentResponse> {
-    const visionPrompt = `${question}\n\nImage URLs:\n${imageUrls
-      .map((u, idx) => `${idx + 1}. ${u}`)
-      .join("\n")}\n\nPlease inspect the images above and answer the question.`;
-
-    return this.processMessage(visionPrompt, context, callbacks);
+    // Reuse the image-aware path to ensure image_url is present in the payload
+    return this.processMessageWithImages(question, imageUrls, context, callbacks);
   }
 }
 

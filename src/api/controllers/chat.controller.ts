@@ -155,7 +155,7 @@ export class ChatController {
     const startTime = Date.now();
     const { conversationId } = req.params;
     const { content, senderId } = req.body;
-    const inlineImages = parseInlineImages(req.body.images ?? req.body.inlineImages);
+    const inlineImages = parseInlineImages(req.body.images ?? req.body.inlineImages).map((img: InlineImageInput) => img.data);
     const senderType = senderId ? "USER" : "AI";
 
     logger.info("Chat message received", {
@@ -258,9 +258,8 @@ export class ChatController {
         inlineImages.length > 0
           ? await agent.processMessageWithImages(content, inlineImages, baseContext)
           : imageUrls.length > 0
-            ? await agent.processVisionQuestion(content, imageUrls, baseContext)
+            ? await agent.processMessageWithImages(content, imageUrls, baseContext)
             : await agent.processMessage(content, baseContext);
-
       // 4. Save AI response
       const aiMessage = await messageRepository.create({
         conversationId,
@@ -312,7 +311,7 @@ export class ChatController {
   static async streamMessage(req: Request, res: Response) {
     const { conversationId } = req.params;
     const { content, senderId } = req.body;
-    const inlineImages = parseInlineImages(req.body.images ?? req.body.inlineImages);
+    const inlineImages = parseInlineImages(req.body.images ?? req.body.inlineImages).map((img: InlineImageInput) => img.data);
     const senderType = senderId ? "USER" : "AI";
 
     logger.info("Chat stream started", {

@@ -533,16 +533,16 @@ export class ConversationController {
         };
 
         // Small delay to ensure presigned URLs propagate (best-effort)
-        await new Promise((resolve) => setTimeout(resolve, 8000));
-        console.log({
+        // await new Promise((resolve) => setTimeout(resolve, 8000));
+        console.log("Type of imageUrls", typeof imageUrls, {
           "imageUrls": imageUrls,
           "baseContext": baseContext,
           "content": content,
         })
 
         logger.info("Calling vision with presigned URLs", { imageUrls });
-        const aiResponse = await agent.processVisionQuestion(content, imageUrls, baseContext);
-
+        // const aiResponse = await agent.processVisionQuestion(content, imageUrls, baseContext);
+        const aiResponse = await agent.processMessageWithImages(content, imageUrls, baseContext);
         aiMessage = await messageRepository.create({
           conversationId,
           senderType: "AI",
@@ -555,7 +555,6 @@ export class ConversationController {
             inlineImageCount: 0,
           },
         });
-
         logger.info("AI vision analysis completed for uploaded images", {
           ...logContext,
           aiMessageId: aiMessage.id,
