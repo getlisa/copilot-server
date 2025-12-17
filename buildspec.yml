@@ -1,0 +1,43 @@
+version: 0.2
+
+env:
+  variables:
+    NODE_BASE_IMAGE_NAME: "node:22"
+    NODE_RUNTIME_IMAGE_NAME: "node:22-slim"
+
+phases:
+  pre_build:
+    commands:
+      - echo "Pre-build - resolving AWS account & ECR URI"
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - REPOSITORY_URI=${ACCOUNT_ID}.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$REPOSITORY_NAME
+      - NODE_BASE_IMAGE=${ACCOUNT_ID}.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$NODE_BASE_IMAGE_NAME
+      - NODE_RUNTIME_IMAGE=${ACCOUNT_ID}.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$NODE_RUNTIME_IMAGE_NAME
+      - IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - echo "REPOSITORY_URI=$REPOSITORY_URI"
+      - echo "NODE_BASE_IMAGE=$NODE_BASE_IMAGE"
+      - echo "NODE_RUNTIME_IMAGE=$NODE_RUNTIME_IMAGE"
+      # Login to main repository
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
+  build:
+    commands:
+      - echo "Building Docker image..."
+      - |
+        docker build \
+          --build-arg NODE_BASE_IMAGE="$NODE_BASE_IMAGE" \
+          --build-arg NODE_RUNTIME_IMAGE="$NODE_RUNTIME_IMAGE" \
+          -t $REPOSITORY_URI:$IMAGE_TAG .
+      - docker tag $REPOSITORY_URI:$IMAGE_TAG $REPOSITORY_URI:latest
+
+  post_build:
+    commands:
+      - echo "Pushing images..."
+      - docker push $REPOSITORY_URI:$IMAGE_TAG
+      - docker push $REPOSITORY_URI:latest
+      - echo "Writing imagedefinitions.json"
+      - printf '[{"name":"assistant","imageUri":"%s"}]' $REPOSITORY_URI:$IMAGE_TAG > imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json
