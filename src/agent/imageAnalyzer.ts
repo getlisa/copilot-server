@@ -16,27 +16,4 @@ export const imageAnalyzerAgent = new Agent({
   model: DEFAULT_MODEL
 });
 
-// export async function analyzeImages({
-//   prompt,
-//   conversationId
-// }: {
-//   prompt: string;
-//   conversationId: string;
-// }): Promise<string> {
-//   const input = [
-//     {
-//       role: "user",
-//       content: [{ type: "input_text", text: prompt }]
-//     }
-//   ]
-
-//   const start = Date.now();
-//   const resp = await imageAnalyzerAgent.run(
-//     input,
-//     {
-//       context: { conversationId }
-//     }
-//   )
-// }
-
 

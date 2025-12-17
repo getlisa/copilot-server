@@ -74,6 +74,36 @@ const fetchImagesForConversation = async (conversationId: string, limit?: number
   return images.slice(0, limit);
 };
 
+// Get presigned URLs from a specific IMAGE message's attachments
+const fetchImagesFromMessage = async (msg: any) => {
+  if (!msg || msg.contentType !== "IMAGE") return [];
+
+  const attArr = Array.isArray(msg.attachments) ? msg.attachments : [];
+  const images: { id: string; url: string; filename?: string; mimeType?: string }[] = [];
+
+  for (const raw of attArr) {
+    const att = raw as Record<string, any>;
+    if (att?.url) {
+      images.push({
+        id: att.id ?? msg.id,
+        url: att.url,
+        filename: att.filename,
+        mimeType: att.type,
+      });
+    } else if (att && att.metadata && att.metadata.s3Key) {
+      const url = await getPresignedUrlForKey(att.metadata.s3Key);
+      images.push({
+        id: att.id ?? msg.id,
+        url,
+        filename: att.filename,
+        mimeType: att.type,
+      });
+    }
+  }
+
+  return images;
+};
+
 // Fetch specific images by their ImageFile IDs (within the same conversation)
 const fetchImagesByIds = async (conversationId: string, imageIds: string[]) => {
   if (imageIds.length === 0) return [];
@@ -156,6 +186,7 @@ export class ChatController {
     const { conversationId } = req.params;
     const { content, senderId } = req.body;
     const inlineImages = parseInlineImages(req.body.images ?? req.body.inlineImages).map((img: InlineImageInput) => img.data);
+    const hasInlineImages = inlineImages.length > 0;
     const senderType = senderId ? "USER" : "AI";
 
     logger.info("Chat message received", {
@@ -232,12 +263,19 @@ export class ChatController {
         ? (req.body.selectedImageIds as string[]).filter((v) => typeof v === "string" && v.trim())
         : [];
 
+      // If we reused an IMAGE message, pull its attachments as vision inputs
+      const reusedImages =
+        !hasInlineImages && selectedImageIds.length === 0 && userMessage?.contentType === "IMAGE"
+          ? await fetchImagesFromMessage(userMessage)
+          : [];
+
+      // Only fetch images when explicitly attached/selected or reused from IMAGE message
       const visionImages =
-        inlineImages.length > 0
+        hasInlineImages
           ? []
           : selectedImageIds.length > 0
             ? await fetchImagesByIds(conversationId, selectedImageIds)
-            : await fetchImagesForConversation(conversationId);
+            : reusedImages;
       const imageUrls = visionImages.map((img: { url: string }) => img.url);
 
       if (imageUrls.length > 0) {
@@ -255,7 +293,7 @@ export class ChatController {
       };
 
       const response =
-        inlineImages.length > 0
+        hasInlineImages
           ? await agent.processMessageWithImages(content, inlineImages, baseContext)
           : imageUrls.length > 0
             ? await agent.processMessageWithImages(content, imageUrls, baseContext)
@@ -273,6 +311,28 @@ export class ChatController {
           imageFileIds: visionImages.map((img: { id: string }) => img.id),
         },
       });
+
+      // Save an image analysis summary for future context
+      const imageSources = hasInlineImages ? inlineImages : imageUrls;
+      if (imageSources.length > 0) {
+        const analysis = await agent.analyzeImages(imageSources, baseContext);
+        if (analysis?.summary) {
+          await messageRepository.create({
+            conversationId,
+            senderType: "AI",
+            senderId: null,
+            content: analysis.summary,
+            contentType: "TEXT",
+            metadata: {
+              kind: "image_analysis_summary",
+              sourceMessageId: aiMessage.id,
+              inlineImageCount: inlineImages.length,
+              imageFileIds: visionImages.map((img: { id: string }) => img.id),
+              toolsUsed: analysis.toolsUsed,
+            },
+          });
+        }
+      }
 
       // Persist tool calls (if any)
       await logToolCallsForMessage(aiMessage.id, response.metadata?.toolsUsed);
@@ -312,6 +372,7 @@ export class ChatController {
     const { conversationId } = req.params;
     const { content, senderId } = req.body;
     const inlineImages = parseInlineImages(req.body.images ?? req.body.inlineImages).map((img: InlineImageInput) => img.data);
+    const hasInlineImages = inlineImages.length > 0;
     const senderType = senderId ? "USER" : "AI";
 
     logger.info("Chat stream started", {
@@ -409,12 +470,19 @@ export class ChatController {
         ? (req.body.selectedImageIds as string[]).filter((v) => typeof v === "string" && v.trim())
         : [];
 
+      // If we reused an IMAGE message, pull its attachments as vision inputs
+      const reusedImages =
+        !hasInlineImages && selectedImageIds.length === 0 && userMessage?.contentType === "IMAGE"
+          ? await fetchImagesFromMessage(userMessage)
+          : [];
+
+      // Only fetch images when explicitly attached/selected or reused from IMAGE message
       const visionImages =
-        inlineImages.length > 0
+        hasInlineImages
           ? []
           : selectedImageIds.length > 0
             ? await fetchImagesByIds(conversationId, selectedImageIds)
-            : await fetchImagesForConversation(conversationId, 1);
+            : reusedImages;
       const imageUrls = visionImages.map((img: { url: string }) => img.url);
 
       if (imageUrls.length > 0) {
@@ -455,7 +523,7 @@ export class ChatController {
       };
 
       const response =
-        inlineImages.length > 0
+        hasInlineImages
           ? await agent.processMessageWithImages(content, inlineImages, baseContext, callbacks)
           : imageUrls.length > 0
             ? await agent.processVisionQuestion(content, imageUrls, baseContext, callbacks)
@@ -477,6 +545,28 @@ export class ChatController {
 
       // Persist tool calls (if any)
       await logToolCallsForMessage(aiMessage.id, response.metadata?.toolsUsed);
+
+      // Save an image analysis summary for future context
+      const imageSources = hasInlineImages ? inlineImages : imageUrls;
+      if (imageSources.length > 0) {
+        const analysis = await agent.analyzeImages(imageSources, baseContext);
+        if (analysis?.summary) {
+          await messageRepository.create({
+            conversationId,
+            senderType: "AI",
+            senderId: null,
+            content: analysis.summary,
+            contentType: "TEXT",
+            metadata: {
+              kind: "image_analysis_summary",
+              sourceMessageId: aiMessage.id,
+              inlineImageCount: inlineImages.length,
+              imageFileIds: visionImages.map((img: { id: string }) => img.id),
+              toolsUsed: analysis.toolsUsed,
+            },
+          });
+        }
+      }
 
       // Send completion event
       res.write(`data: ${JSON.stringify({ type: "done", data: aiMessage })}\n\n`);
