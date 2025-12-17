@@ -521,52 +521,6 @@ export class ConversationController {
         });
       });
 
-      // Immediately analyze the uploaded images with Clara (best-effort; non-blocking on failure)
-      let aiMessage = null as any;
-      try {
-        const agent = await getClaraAgent();
-        const imageUrls = attachments.map((att) => att.url);
-        const baseContext = {
-          conversationId,
-          userId: senderId ?? (req.user?.userId ?? "user"),
-          jobId: conversation.jobId ? String(conversation.jobId) : undefined,
-        };
-
-        // Small delay to ensure presigned URLs propagate (best-effort)
-        // await new Promise((resolve) => setTimeout(resolve, 8000));
-        console.log("Type of imageUrls", typeof imageUrls, {
-          "imageUrls": imageUrls,
-          "baseContext": baseContext,
-          "content": content,
-        })
-
-        logger.info("Calling vision with presigned URLs", { imageUrls });
-        // const aiResponse = await agent.processVisionQuestion(content, imageUrls, baseContext);
-        const aiResponse = await agent.processMessageWithImages(content, imageUrls, baseContext);
-        aiMessage = await messageRepository.create({
-          conversationId,
-          senderType: "AI",
-          senderId: null,
-          content: aiResponse.content,
-          contentType: "TEXT",
-          metadata: {
-            ...aiResponse.metadata,
-            imageFileIds: uploads.map((u) => u.imageFile.id),
-            inlineImageCount: 0,
-          },
-        });
-        logger.info("AI vision analysis completed for uploaded images", {
-          ...logContext,
-          aiMessageId: aiMessage.id,
-          aiResponseSnippet: aiResponse.content?.slice(0, 500),
-        });
-      } catch (analysisError) {
-        logger.warn("AI vision analysis failed after upload", {
-          ...logContext,
-          error: analysisError instanceof Error ? analysisError.message : String(analysisError),
-        });
-      }
-
       res.status(201).json({
         success: true,
         data: {
@@ -574,7 +528,6 @@ export class ConversationController {
             ...message,
             attachments,
           },
-          aiMessage: aiMessage ?? undefined,
         },
       });
     } catch (error) {

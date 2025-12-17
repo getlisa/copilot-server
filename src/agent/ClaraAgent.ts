@@ -21,8 +21,6 @@ import { messageRepository } from "../api/repositories/message.repository";
 import logger from "../lib/logger";
 import { systemPrompt } from "../config/systemPrompt";
 import { fieldServiceQuestionGuardrail } from "./guardrailAgent";
-import { getImageTool } from "../tools/getImageTool";
-import { imageAnalyzerAgent } from "./imageAnalyzer";
 
 type AgentRunContext = {
   conversationId: string;
@@ -78,7 +76,6 @@ export class ClaraAgent implements AIAgent {
       model: DEFAULT_MODEL,
       tools,
       inputGuardrails: [fieldServiceQuestionGuardrail],
-      handoffs: [imageAnalyzerAgent],
     });
   }
 
@@ -297,94 +294,6 @@ export class ClaraAgent implements AIAgent {
   /**
    * Run the dedicated image analyzer to produce a concise summary for history.
    */
-  async analyzeImages(
-    images: string[],
-    context: AgentContext
-  ): Promise<{ summary: string; toolsUsed: string[] } | null> {
-    const imageItems: ImageItem[] = images
-      .map((url) => url?.trim())
-      .filter(Boolean)
-      .map((url) => ({ type: "input_image", image: url as string }));
-
-    if (imageItems.length === 0) {
-      return null;
-    }
-
-    const messages: AgentInputItem[] = [
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: "Provide a concise, factual summary of the attached image(s) for future reference in this conversation.",
-          },
-          ...imageItems,
-        ],
-      },
-    ];
-
-    try {
-      const stream = await run(imageAnalyzerAgent, messages, {
-        stream: true,
-        context: { conversationId: context.conversationId, userId: context.userId },
-      });
-
-      let fullText = "";
-      const toolsUsed: string[] = [];
-
-      for await (const event of stream) {
-        if (event.type === "raw_model_stream_event") {
-          const raw = event as RunRawModelStreamEvent;
-          const delta = (raw.data as any)?.delta ?? (raw.data as any)?.text ?? "";
-          const isTextDelta = (raw.data as any)?.type === "output_text_delta";
-          if (isTextDelta && delta) {
-            fullText += delta;
-          }
-        } else if (event.type === "run_item_stream_event") {
-          const itemEvent = event as RunItemStreamEvent;
-          const rawItem: any = itemEvent.item.rawItem;
-
-          if (rawItem?.type === "hosted_tool_call" || rawItem?.type === "function_call") {
-            const toolName = rawItem.name ?? rawItem.type ?? "tool_call";
-            toolsUsed.push(toolName);
-          }
-
-          if (rawItem?.type === "message" && rawItem?.role === "assistant") {
-            const assistantText = Array.isArray(rawItem.content)
-              ? rawItem.content
-                  .filter((c: any) => c?.type === "output_text" && typeof c.text === "string")
-                  .map((c: any) => c.text)
-                  .join("")
-              : "";
-            if (assistantText && !fullText) {
-              fullText = assistantText;
-            }
-          }
-        }
-      }
-
-      await stream.completed;
-
-      const summary =
-        typeof stream.finalOutput === "string" && stream.finalOutput.length > 0
-          ? stream.finalOutput
-          : fullText;
-
-      const trimmed = summary.trim();
-      if (!trimmed) {
-        return null;
-      }
-
-      return { summary: trimmed, toolsUsed: Array.from(new Set(toolsUsed)) };
-    } catch (error) {
-      logger.warn("Image analysis failed", {
-        error: error instanceof Error ? error.message : String(error),
-        conversationId: context.conversationId,
-      });
-      return null;
-    }
-  }
-
   /**
    * Vision-style question using presigned image URLs.
    * We pass the image URLs in the user message so the model can fetch them.

@@ -312,28 +312,6 @@ export class ChatController {
         },
       });
 
-      // Save an image analysis summary for future context
-      const imageSources = hasInlineImages ? inlineImages : imageUrls;
-      if (imageSources.length > 0) {
-        const analysis = await agent.analyzeImages(imageSources, baseContext);
-        if (analysis?.summary) {
-          await messageRepository.create({
-            conversationId,
-            senderType: "AI",
-            senderId: null,
-            content: analysis.summary,
-            contentType: "TEXT",
-            metadata: {
-              kind: "image_analysis_summary",
-              sourceMessageId: aiMessage.id,
-              inlineImageCount: inlineImages.length,
-              imageFileIds: visionImages.map((img: { id: string }) => img.id),
-              toolsUsed: analysis.toolsUsed,
-            },
-          });
-        }
-      }
-
       // Persist tool calls (if any)
       await logToolCallsForMessage(aiMessage.id, response.metadata?.toolsUsed);
 
@@ -545,28 +523,6 @@ export class ChatController {
 
       // Persist tool calls (if any)
       await logToolCallsForMessage(aiMessage.id, response.metadata?.toolsUsed);
-
-      // Save an image analysis summary for future context
-      const imageSources = hasInlineImages ? inlineImages : imageUrls;
-      if (imageSources.length > 0) {
-        const analysis = await agent.analyzeImages(imageSources, baseContext);
-        if (analysis?.summary) {
-          await messageRepository.create({
-            conversationId,
-            senderType: "AI",
-            senderId: null,
-            content: analysis.summary,
-            contentType: "TEXT",
-            metadata: {
-              kind: "image_analysis_summary",
-              sourceMessageId: aiMessage.id,
-              inlineImageCount: inlineImages.length,
-              imageFileIds: visionImages.map((img: { id: string }) => img.id),
-              toolsUsed: analysis.toolsUsed,
-            },
-          });
-        }
-      }
 
       // Send completion event
       res.write(`data: ${JSON.stringify({ type: "done", data: aiMessage })}\n\n`);
