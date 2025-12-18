@@ -211,5 +211,39 @@ export class VoiceController {
       return res.status(500).json({ error: "Failed to transcribe audio" });
     }
   }
+
+  /**
+   * Body: { text: string, voice?: string }
+   * Uses gpt-4o-mini-tts and returns audio/mpeg binary.
+   */
+  static async tts(req: Request, res: Response) {
+    const { text, voice } = req.body as { text?: string; voice?: string };
+
+    if (!text || !text.trim()) {
+      return res.status(400).json({ error: "text is required" });
+    }
+
+    try {
+      const resp = await openai.audio.speech.create(
+        {
+          model: "gpt-4o-mini-tts",
+          voice: voice ?? "alloy",
+          input: text,
+        },
+        { maxRetries: 2 }
+      );
+
+      const audioBuffer = Buffer.from(await resp.arrayBuffer());
+
+      res.setHeader("Content-Type", "audio/mpeg");
+      res.setHeader("Content-Length", audioBuffer.length);
+      return res.status(200).send(audioBuffer);
+    } catch (error) {
+      logger.error("TTS failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return res.status(500).json({ error: "Failed to generate speech" });
+    }
+  }
 }
 
