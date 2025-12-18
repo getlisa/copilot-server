@@ -70,7 +70,7 @@ export class ConversationRepository {
       where: { id },
       include: {
         messages: {
-          orderBy: { createdAt: "asc" },
+          orderBy: { createdAt: "desc" },
           take: messageLimit,
           include: {
             toolCalls: true,
@@ -106,7 +106,7 @@ export class ConversationRepository {
       },
       include: {
         messages: {
-          orderBy: { createdAt: "asc" },
+          orderBy: { createdAt: "desc" },
           take: messageLimit,
           include: {
             toolCalls: true,

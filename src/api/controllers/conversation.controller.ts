@@ -179,7 +179,7 @@ export class ConversationController {
 
   /**
    * Get a conversation with messages
-   * GET /conversations/:conversationId/full
+   * GET /conversations/:jobId/full
    */
   static async getConversationWithMessages(
     req: ValidatedRequest<typeof getConversationWithMessagesSchema> & RequestWithUser,
@@ -189,7 +189,9 @@ export class ConversationController {
     const { conversationId, jobId } = req.validated.params;
     // Cap history to the last 10 messages unless a smaller limit is provided.
     const { messageLimit } = req.validated.query;
-    const effectiveLimit = Math.min(messageLimit ?? 10, 10);
+    // Allow callers to request larger histories; default to 50 if not provided.
+
+    const effectiveLimit = messageLimit ?? 50;
     const requesterUserId = req.user?.userId ?? null;
     const logContext = {
       endpoint: 'getConversationWithMessages',
