@@ -3,6 +3,10 @@ import { EventEmitter } from "events";
 import { randomUUID } from "crypto";
 import { RealtimeVoiceSession } from "../../handler/RealtimeVoiceSession";
 import logger from "../../lib/logger";
+import OpenAI from "openai";
+import { toFile } from "openai/uploads";
+
+const openai = new OpenAI();
 
 type VoiceSessionState = {
   session: RealtimeVoiceSession;
@@ -163,6 +167,49 @@ export class VoiceController {
     voiceSessions.delete(sessionId);
     logger.info("Voice session stopped", { sessionId });
     return res.status(200).json({ ok: true });
+  }
+
+  /**
+   * One-shot transcription for mic recordings.
+   * Body: { audioBase64: string, mimeType?: string, language?: string }
+   */
+  static async transcribe(req: Request, res: Response) {
+    const { audioBase64, mimeType, language } = req.body as {
+      audioBase64?: string;
+      mimeType?: string;
+      language?: string;
+    };
+
+    if (!audioBase64) {
+      return res.status(400).json({ error: "audioBase64 is required" });
+    }
+
+    try {
+      const buffer = Buffer.from(audioBase64, "base64");
+      const file = await toFile(buffer, "audio.webm", {
+        type: mimeType ?? "audio/webm",
+      });
+
+      const resp = await openai.audio.transcriptions.create(
+        {
+          file,
+          model: "gpt-4o-mini-transcribe",
+          language,
+        },
+        { maxRetries: 2 }
+      );
+
+      const text = (resp as any)?.text ?? "";
+      return res.status(200).json({
+        success: true,
+        text,
+      });
+    } catch (error) {
+      logger.error("Transcription failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return res.status(500).json({ error: "Failed to transcribe audio" });
+    }
   }
 }
 
