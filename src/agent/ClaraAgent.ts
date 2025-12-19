@@ -80,7 +80,7 @@ export class ClaraAgent implements AIAgent {
         topP: 0.8,
         maxTokens: 800,
         toolChoice: "auto",
-        promptCacheRetention: "24h",
+        // promptCacheRetention: "24h",
         // reasoning:{
         //   effort: "medium",
         //   summary: "auto"
