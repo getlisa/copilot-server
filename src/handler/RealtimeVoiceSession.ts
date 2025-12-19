@@ -6,7 +6,7 @@ import {
   TransportLayerAudio,
 } from "@openai/agents/realtime";
 import logger from "../lib/logger";
-import { voiceSystemPrompt } from "../config/systemPrompt";
+import { voiceSystemPrompt } from "../lib/systemPrompt";
 
 export interface RealtimeVoiceOptions {
   onTranscriptionPartial?: (text: string) => void;

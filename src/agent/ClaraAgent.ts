@@ -19,7 +19,7 @@ import {
 } from "../types/agent.types";
 import { messageRepository } from "../api/repositories/message.repository";
 import logger from "../lib/logger";
-import { systemPrompt } from "../config/systemPrompt";
+import { systemPrompt } from "../lib/systemPrompt";
 import { fieldServiceQuestionGuardrail } from "./guardrailAgent";
 import { Message } from "../types/conversation.types";
 import { countTokensForMessages } from "../lib/tokenizer";

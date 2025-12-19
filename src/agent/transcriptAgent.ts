@@ -1,5 +1,5 @@
 import { Agent } from "@openai/agents";
-import { transcriptSystemPrompt } from "../config/systemPrompt";
+import { transcriptSystemPrompt } from "../lib/systemPrompt";
 
 
 export const transcriptAgent = new Agent({
