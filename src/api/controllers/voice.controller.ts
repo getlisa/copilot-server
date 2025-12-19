@@ -227,6 +227,11 @@ export class VoiceController {
       const resp = await openai.audio.speech.create(
         {
           model: "gpt-4o-mini-tts",
+          instructions: `
+          You're an helpful speaking assistant. Speak naturally with enthusiasm and energy.
+          Keep your tone friendly, professional, and helpful.
+          Do not speak the links that are provided in the text, links like starting with https://, http://, www. etc. and ending with .com, .org, .net, .io, .etc.
+          `,
           voice: voice ?? "alloy",
           input: text,
         },

@@ -74,6 +74,16 @@ export class ClaraAgent implements AIAgent {
       name: "Clara - Technician Copilot",
       instructions: systemPrompt,
       model: DEFAULT_MODEL,
+      modelSettings:{
+        topP: 0.8,
+        maxTokens: 800,
+        toolChoice: "auto",
+        // reasoning:{
+        //   effort: "medium",
+        //   summary: "auto"
+        // },
+        truncation: "disabled",
+      },
       tools,
       inputGuardrails: [fieldServiceQuestionGuardrail],
     });
