@@ -45,11 +45,11 @@ export async function summarizeImageUrl(imageUrl: string): Promise<StructuredSum
               text: [
                 "You are an assistant helping field service technicians understand uploaded photos.",
                 "Return ONLY a single JSON object with keys:",
-                "summary (string, concise description),",
-                "objects (array of strings), observations (array of strings),",
+                "summary (string, 2-4 sentences description),",
+                "objects (array of strings), observations (array of strings): List detailed observation in 30-40 words",
                 "inferred_issue (string), confidence (0-1 number), linked_entities (array of strings),",
                 `source (string, default "user_upload").`,
-                "Keep it concise, factual, and do not include any extra text."
+                "Keep it **factual**, concise, and do not include any extra text."
               ].join(" ")
             },
             {
