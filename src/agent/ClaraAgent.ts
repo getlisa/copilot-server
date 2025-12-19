@@ -21,6 +21,8 @@ import { messageRepository } from "../api/repositories/message.repository";
 import logger from "../lib/logger";
 import { systemPrompt } from "../config/systemPrompt";
 import { fieldServiceQuestionGuardrail } from "./guardrailAgent";
+import { Message } from "../types/conversation.types";
+import { countTokensForMessages } from "../lib/tokenizer";
 
 type AgentRunContext = {
   conversationId: string;
@@ -78,11 +80,12 @@ export class ClaraAgent implements AIAgent {
         topP: 0.8,
         maxTokens: 800,
         toolChoice: "auto",
+        promptCacheRetention: "24h",
         // reasoning:{
         //   effort: "medium",
         //   summary: "auto"
         // },
-        truncation: "disabled",
+        truncation: "auto",
       },
       tools,
       inputGuardrails: [fieldServiceQuestionGuardrail],
@@ -103,6 +106,8 @@ export class ClaraAgent implements AIAgent {
     console.log("History:", JSON.stringify(history, null, 2));
 
     const messages: AgentInputItem[] = [...history, this.toUserItem(text)] as AgentInputItem[];
+    const promptTokens = countTokensForMessages(messages, DEFAULT_MODEL);
+    console.log("Prompt tokens:", promptTokens);
     return this.runAgent(messages, context, callbacks);
   }
 
@@ -135,10 +140,11 @@ export class ClaraAgent implements AIAgent {
 
     // const history = await this.buildHistory(context.conversationId);
     const messages: AgentInputItem[] = [userMessage];
+    const promptTokens = countTokensForMessages(messages, DEFAULT_MODEL);
 
     console.log("Messages SENT###:", JSON.stringify(messages, null, 2) );
 
-    return this.runAgent(messages, context, callbacks);
+    return this.runAgent(messages, context, callbacks, { promptTokens });
   }
 
   async dispose(): Promise<void> {
@@ -155,9 +161,63 @@ export class ClaraAgent implements AIAgent {
 
   private async buildHistory(conversationId: string): Promise<AgentInputItem[]> {
     const recent = await messageRepository.getLastMessages(conversationId, HISTORY_LIMIT);
-    return recent.map((msg) =>
-      msg.senderType === "AI" ? this.toAssistantItem(msg.content) : this.toUserItem(msg.content)
+    const history: AgentInputItem[] = [];
+    for (const msg of recent) {
+      history.push(...this.toImageSummaryItems(msg));
+      history.push(
+        msg.senderType === "AI" ? this.toAssistantItem(msg.content) : this.toUserItem(msg.content)
+      );
+    }
+    logger.debug("ClaraAgent history constructed", {
+      conversationId,
+      messageCount: recent.length,
+      historyItems: history.length,
+    });
+    console.log("History:", JSON.stringify(history, null, 2));
+    return history;
+  }
+
+  private toImageSummaryItems(message: Message): AgentInputItem[] {
+    const summaries = Array.isArray(message.metadata?.imageSummaries)
+      ? message.metadata.imageSummaries
+      : [];
+    logger.debug("ClaraAgent image summaries", {
+      messageId: message.id,
+      summaryCount: summaries.length,
+    });
+    console.log("Summaries:", JSON.stringify(summaries, null, 2));
+    return summaries.map((summary) => ({
+      role: "assistant",
+      type: "message",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          text: this.formatImageSummary(summary),
+        },
+      ],
+    }));
+  }
+
+  private formatImageSummary(summary: any): string {
+    const parts: string[] = [];
+    parts.push(
+      `Image summary (${summary.attachmentId ?? summary.imageFileId ?? summary.image_id ?? "image"}):`
     );
+    if (summary.summary) parts.push(summary.summary);
+    if (Array.isArray(summary.objects) && summary.objects.length > 0) {
+      parts.push(`Objects: ${summary.objects.join(", ")}`);
+    }
+    if (Array.isArray(summary.observations) && summary.observations.length > 0) {
+      parts.push(`Observations: ${summary.observations.join("; ")}`);
+    }
+    if (summary.inferred_issue) {
+      parts.push(`Inferred issue: ${summary.inferred_issue}`);
+    }
+    if (Array.isArray(summary.linked_entities) && summary.linked_entities.length > 0) {
+      parts.push(`Linked entities: ${summary.linked_entities.join(", ")}`);
+    }
+    return parts.join(" ");
   }
 
   private toUserItem(content: string): AgentInputItem {
@@ -211,7 +271,8 @@ export class ClaraAgent implements AIAgent {
   private async runAgent(
     messages: AgentInputItem[],
     context: AgentContext,
-    callbacks?: AgentStreamCallbacks
+    callbacks?: AgentStreamCallbacks,
+    usage?: { promptTokens?: number }
   ): Promise<AgentResponse> {
     this.lastInteractionTs = Date.now();
     const startTime = Date.now();

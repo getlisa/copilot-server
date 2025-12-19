@@ -239,7 +239,6 @@ model ImageFile {
   mimeType       String       @map("mime_type")
   sizeBytes      BigInt?      @map("size_bytes")
   filename       String?
-  embeddings     Unsupported("vector(512)")?
   createdAt      DateTime     @default(now()) @map("created_at")
   updatedAt      DateTime     @updatedAt @map("updated_at")
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)

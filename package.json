@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "tsc && node dist/server.js",
-    "dev": "tsc && AWS_PROFILE=copilot-dev nodemon --watch src --exec tsx src/server.ts",
+    "dev": "AWS_PROFILE=copilot-dev nodemon --watch src --exec 'tsc && tsx src/server.ts'",
     "build": "tsc",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
@@ -19,6 +19,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@dqbd/tiktoken": "^1.0.14",
     "@aws-sdk/client-s3": "^3.694.0",
     "@aws-sdk/s3-request-presigner": "^3.694.0",
     "@openai/agents": "^0.3.4",

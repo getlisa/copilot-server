@@ -68,6 +68,7 @@ export interface MessageMetadata {
   completionTokens?: number;
   totalCost?: number;
   temperature?: number;
+  imageSummaries?: ImageSummary[];
   [key: string]: unknown;
 }
 
@@ -78,6 +79,19 @@ export interface Attachment {
   filename?: string;
   size?: number;
   metadata?: Record<string, unknown>;
+}
+
+export interface ImageSummary {
+  imageFileId: string;
+  attachmentId: string;
+  source: "user_upload";
+  summary: string;
+  objects?: string[];
+  observations?: string[];
+  inferred_issue?: string;
+  confidence?: number;
+  linked_entities?: string[];
+  createdAt?: string;
 }
 
 // ============================================

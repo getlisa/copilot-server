@@ -9,7 +9,7 @@ import prisma from "../../lib/prisma";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
 import { trackFileEvent } from "../../lib/events";
 import { getClaraAgent } from "../../agent/ClaraAgent";
-import { generateImageEmbedding } from "../../lib/embeddings";
+import { summarizeImageUrl } from "../../lib/imageSummary";
 import { RequestWithUser } from "../middlewares/auth";
 import {
   createConversationSchema,
@@ -32,7 +32,12 @@ import {
   getConversationStatsSchema,
   uploadImagesSchema,
 } from "../schemas/conversation.schema";
-import { Message, ConversationWithMessages } from "../../types/conversation.types";
+import {
+  Message,
+  ConversationWithMessages,
+  ImageSummary,
+  MessageMetadata,
+} from "../../types/conversation.types";
 
 // Helper to extract error details
 const getErrorDetails = (error: unknown) => ({
@@ -423,7 +428,6 @@ export class ConversationController {
               mimeType: file.mimetype,
               sizeBytes: BigInt(file.size),
               filename: file.originalname,
-              embedding: await generateImageEmbedding(file.buffer),
             },
             attachment: {
               id: attachmentId,
@@ -455,6 +459,53 @@ export class ConversationController {
         },
       });
 
+      let responseMessage: Message = message;
+
+      const summaryEntries = await Promise.all(
+        attachments.map(async (attachment, index) => {
+          const structured = await summarizeImageUrl(attachment.url);
+          const nowIso = new Date().toISOString();
+
+          return {
+            imageFileId: uploads[index].imageFile.id,
+            attachmentId: attachment.id,
+            source: structured?.source ?? 'user_upload',
+            summary: structured?.summary ?? "",
+            objects: structured?.objects ?? [],
+            observations: structured?.observations ?? [],
+            inferred_issue: structured?.inferred_issue ?? "",
+            confidence: structured?.confidence ?? undefined,
+            linked_entities: structured?.linked_entities ?? [],
+            createdAt: nowIso,
+          } as ImageSummary;
+        })
+      );
+
+      const imageSummaries = summaryEntries.filter(
+        (entry): entry is ImageSummary => Boolean(entry)
+      );
+
+      if (imageSummaries.length > 0) {
+        const updatedMetadata: MessageMetadata = {
+          ...(message.metadata ?? {}),
+          uploadCount: (message.metadata as any)?.uploadCount ?? files.length,
+          imageSummaries,
+        };
+        await messageRepository.update(message.id, { metadata: updatedMetadata });
+        responseMessage = { ...message, metadata: updatedMetadata };
+        logger.info("Image summaries stored", {
+          ...logContext,
+          messageId: message.id,
+          summaryCount: imageSummaries.length,
+        });
+      } else {
+        logger.warn("Image summaries missing or failed to generate", {
+          ...logContext,
+          messageId: message.id,
+          attachments: attachments.length,
+        });
+      }
+
       // Log uploaded image URLs
       logger.info("Images uploaded with URLs", {
         ...logContext,
@@ -465,7 +516,7 @@ export class ConversationController {
       await prisma.$transaction(
         uploads.map((u) =>
           prisma.$executeRaw`
-            INSERT INTO image_files (id, conversation_id, message_id, s3_key, mime_type, size_bytes, filename, embeddings, created_at, updated_at)
+            INSERT INTO image_files (id, conversation_id, message_id, s3_key, mime_type, size_bytes, filename, created_at, updated_at)
             VALUES (
               ${u.imageFile.id},
               ${conversationId},
@@ -474,31 +525,12 @@ export class ConversationController {
               ${u.imageFile.mimeType},
               ${u.imageFile.sizeBytes ?? null},
               ${u.imageFile.filename ?? null},
-              ${null},
               NOW(),
               NOW()
             )
           `
         )
       );
-
-      // Persist embeddings (if available) using raw SQL (avoids Prisma type mismatch on vector)
-      for (const u of uploads) {
-        if (u.imageFile.embedding && Array.isArray(u.imageFile.embedding) && u.imageFile.embedding.length > 0) {
-          const vectorLiteral = `[${u.imageFile.embedding.join(",")}]`;
-          try {
-            await prisma.$executeRawUnsafe(
-              vectorLiteral,
-              u.imageFile.id
-            );
-          } catch (err) {
-            logger.warn("Failed to persist image embedding", {
-              imageFileId: u.imageFile.id,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
-      }
 
       logger.info("Images uploaded", {
         ...logContext,
@@ -527,7 +559,7 @@ export class ConversationController {
         success: true,
         data: {
           message: {
-            ...message,
+            ...responseMessage,
             attachments,
           },
         },
