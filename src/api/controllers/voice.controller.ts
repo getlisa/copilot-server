@@ -186,8 +186,54 @@ export class VoiceController {
 
     try {
       const buffer = Buffer.from(audioBase64, "base64");
-      const file = await toFile(buffer, "audio.webm", {
-        type: mimeType ?? "audio/webm",
+      const defaultMimeType = "audio/webm";
+      const actualMimeType = mimeType ?? defaultMimeType;
+      
+      // Map mime types to file extensions (OpenAI supports: mp3, mp4, mpeg, mpga, m4a, wav, webm)
+      const mimeToExt: Record<string, string> = {
+        "audio/webm": "webm",
+        "audio/m4a": "m4a",
+        "audio/x-m4a": "m4a",
+        "audio/mp4": "m4a", // mp4 audio files typically use .m4a extension
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/mpga": "mp3",
+        "audio/wav": "wav",
+        "audio/wave": "wav",
+        "audio/x-wav": "wav",
+        "audio/ogg": "ogg",
+        "audio/opus": "opus",
+      };
+      
+      // Normalize mimeType for OpenAI (some formats need specific mimeTypes)
+      const normalizedMimeType: Record<string, string> = {
+        "audio/m4a": "audio/m4a",
+        "audio/x-m4a": "audio/m4a",
+        "audio/mp4": "audio/m4a", // mp4 audio should be treated as m4a
+        "audio/mpeg": "audio/mpeg",
+        "audio/mp3": "audio/mpeg",
+        "audio/mpga": "audio/mpeg",
+        "audio/wav": "audio/wav",
+        "audio/wave": "audio/wav",
+        "audio/x-wav": "audio/wav",
+        "audio/webm": "audio/webm",
+        "audio/ogg": "audio/ogg",
+        "audio/opus": "audio/opus",
+      };
+      
+      const ext = mimeToExt[actualMimeType] ?? mimeToExt[defaultMimeType];
+      const filename = `audio.${ext}`;
+      const normalizedType = normalizedMimeType[actualMimeType] ?? actualMimeType;
+      
+      logger.debug("Transcribing audio", {
+        mimeType: actualMimeType,
+        normalizedMimeType: normalizedType,
+        filename,
+        bufferSize: buffer.length,
+      });
+      
+      const file = await toFile(buffer, filename, {
+        type: normalizedType,
       });
 
       const resp = await openai.audio.transcriptions.create(
@@ -205,10 +251,26 @@ export class VoiceController {
         text,
       });
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorDetails = error instanceof Error ? {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+      } : { error: String(error) };
+      
       logger.error("Transcription failed", {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
+        ...errorDetails,
+        mimeType,
+        bufferSize: audioBase64 ? Buffer.from(audioBase64, "base64").length : 0,
       });
-      return res.status(500).json({ error: "Failed to transcribe audio" });
+      
+      // Return more specific error message if available
+      const statusCode = (error as any)?.status ?? 500;
+      const apiError = (error as any)?.error;
+      return res.status(statusCode).json({ 
+        error: apiError?.message ?? errorMessage ?? "Failed to transcribe audio" 
+      });
     }
   }
 
