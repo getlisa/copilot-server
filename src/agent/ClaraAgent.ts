@@ -61,7 +61,7 @@ export class ClaraAgent implements AIAgent {
   }
 
   private buildAgent(): Agent<AgentRunContext> {
-    const tools = [webSearchTool({ searchContextSize: "medium" })];
+    const tools = [];
 
     if (VECTOR_STORE_ID) {
       const vectorStoreIds = VECTOR_STORE_ID.split(",")
@@ -71,6 +71,7 @@ export class ClaraAgent implements AIAgent {
         tools.push(fileSearchTool(vectorStoreIds));
       }
     }
+    tools.push(webSearchTool({ searchContextSize: "medium" }));
 
     return new Agent<AgentRunContext>({
       name: "Clara - Technician Copilot",
@@ -234,7 +235,7 @@ export class ClaraAgent implements AIAgent {
     role?: string | null;
     userId?: bigint | string | null;
   }): AgentInputItem {
-    
+
     const text = `
     # TECHNICIAN DETAILS
     - First Name: ${profile.firstName}
