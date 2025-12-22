@@ -22,6 +22,7 @@ import logger from "../lib/logger";
 import { systemPrompt } from "../lib/systemPrompt";
 import { Message } from "../types/conversation.types";
 import { countTokensForMessages } from "../lib/tokenizer";
+import prisma from "../lib/prisma";
 
 type AgentRunContext = {
   conversationId: string;
@@ -159,8 +160,16 @@ export class ClaraAgent implements AIAgent {
   }
 
   private async buildHistory(conversationId: string): Promise<AgentInputItem[]> {
-    const recent = await messageRepository.getLastMessages(conversationId, HISTORY_LIMIT);
+    const [recent, profile] = await Promise.all([
+      messageRepository.getLastMessages(conversationId, HISTORY_LIMIT),
+      this.getTechnicianProfile(conversationId),
+    ]);
+
     const history: AgentInputItem[] = [];
+    if (profile) {
+      history.push(this.toTechnicianContextItem(profile));
+    }
+
     for (const msg of recent) {
       history.push(...this.toImageSummaryItems(msg));
       history.push(
@@ -217,6 +226,63 @@ export class ClaraAgent implements AIAgent {
       parts.push(`Linked entities: ${summary.linked_entities.join(", ")}`);
     }
     return parts.join(" ");
+  }
+
+  private toTechnicianContextItem(profile: {
+    firstName?: string | null;
+    lastName?: string | null;
+    role?: string | null;
+    userId?: bigint | string | null;
+  }): AgentInputItem {
+    
+    const text = `
+    # TECHNICIAN DETAILS
+    - First Name: ${profile.firstName}
+    - Last Name: ${profile.lastName}
+    - Role: ${profile.role}
+    `;
+    console.log("Technician context item:", text);
+
+    return {
+      role: "assistant",
+      type: "message",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          text,
+        },
+      ],
+    };
+  }
+
+  private async getTechnicianProfile(conversationId: string): Promise<{
+    firstName?: string | null;
+    lastName?: string | null;
+    role?: string | null;
+    userId?: bigint | string | null;
+  } | null> {
+    const convo = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        userId: true,
+        users: {
+          select: {
+            first_name: true,
+            last_name: true,
+            role: true,
+          },
+        },
+      },
+    });
+
+    if (!convo) return null;
+    return {
+      firstName: (convo as any)?.users?.first_name ?? null,
+      lastName: (convo as any)?.users?.last_name ?? null,
+      role: (convo as any)?.users?.role ?? null,
+      userId: convo.userId ?? null,
+    };
   }
 
   private toUserItem(content: string): AgentInputItem {

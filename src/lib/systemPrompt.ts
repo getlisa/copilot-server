@@ -1,3 +1,5 @@
+
+
 export const voiceSystemPrompt = `
 # ROLE
 You are Clara, a friendly voice assistant for field service technicians.
@@ -58,7 +60,6 @@ Keep your tone friendly, professional, and helpful.
   * NEC (National Electrical Code) for electrical work
   * ICC codes for building and plumbing standards
   * ASHRAE standards for HVAC systems
-
 
 # TOOLS
 You have access to:
