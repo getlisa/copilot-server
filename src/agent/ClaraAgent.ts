@@ -89,7 +89,6 @@ export class ClaraAgent implements AIAgent {
         truncation: "auto",
       },
       tools,
-      // inputGuardrails: [fieldServiceQuestionGuardrail],
     });
   }
 
