@@ -80,7 +80,8 @@ export class ClaraAgent implements AIAgent {
       modelSettings:{
         topP: 0.8,
         maxTokens: 800,
-        toolChoice: "auto",
+        toolChoice: "required",
+        parallelToolCalls: true,
         // promptCacheRetention: "24h",
         // reasoning:{
         //   effort: "medium",
