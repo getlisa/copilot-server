@@ -290,8 +290,9 @@ export class VoiceController {
         {
           model: "gpt-4o-mini-tts",
           instructions: `
-          You're an helpful speaking assistant. Speak naturally with enthusiasm and energy.
+          You're an helpful speaking assistant.
           Keep your tone friendly, professional, and helpful.
+          Read all the units as complete words and not as abbreviations.
           Do not speak the links that are provided in the text, links like starting with https://, http://, www. etc. and ending with .com, .org, .net, .io, .etc.
           `,
           voice: voice ?? "alloy",
