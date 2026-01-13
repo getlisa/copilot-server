@@ -290,10 +290,15 @@ export class VoiceController {
         {
           model: "gpt-4o-mini-tts",
           instructions: `
-          You're an helpful speaking assistant.
-          Keep your tone friendly, professional, and helpful.
-          Read all the units as complete words and not as abbreviations.
-          Do not speak the links that are provided in the text, links like starting with https://, http://, www. etc. and ending with .com, .org, .net, .io, .etc.
+          * You're a helpful speaking assistant.
+          * Keep your tone friendly, professional, and helpful. You'll be provided complete sentences to speak. Read the entire sentence with correct intonation, punctuation and tone.
+          * There might be scenarios in the sentence where you need to use correct context to speak the sentence. Like,
+            For Example:
+              * the Mitsubishi PUZAK36NL indicates an "Indoor/outdoor unit communication error.
+                In the above example, you can speak "Indoor/outdoor" as "Indoor and outdoor" or "Indoor or outdoor" as per the context of the sentence that makes sense.
+                This is not a hard and fast rule, you can use your best judgment to speak the sentence.
+          * Read all the units as complete words and not as abbreviations.
+          * Do not speak the links that are provided in the text, links like starting with https://, http://, www. etc. and ending with .com, .org, .net, .io, .etc.
           `,
           voice: voice ?? "alloy",
           input: text,

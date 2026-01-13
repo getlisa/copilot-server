@@ -77,7 +77,7 @@ export class RealtimeVoiceSession {
     this.session = new RealtimeSession(this.agent, {
       transport: "websocket",
       model,
-      historyStoreAudio: false,
+      historyStoreAudio: true,
       config: {
         outputModalities: ["audio", "text"],
         audio: {
