@@ -285,6 +285,8 @@ export class VoiceController {
       return res.status(400).json({ error: "text is required" });
     }
 
+    console.log("TEXT CHUNK", text);
+
     try {
       const resp = await openai.audio.speech.create(
         {
