@@ -9,7 +9,7 @@ const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
 const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
 const configuredTtl = Number(process.env.S3_SIGNED_URL_TTL ?? "900");
 const defaultTtl = Number.isFinite(configuredTtl) && configuredTtl > 0 ? configuredTtl : 900;
-const MAX_TTL = 60 * 60 * 24 * 90; // S3 presign hard limit: 90 days
+const MAX_TTL = 60 * 60 * 24 * 7; // S3 presign hard limit: 7 days
 
 if (!bucket) {
   // We keep this non-fatal to allow local dev without S3, but will throw if used without config.
@@ -35,6 +35,49 @@ function normalizeS3Key(key: string): string {
   // Strip https://bucket.s3.../
   normalized = normalized.replace(/^https?:\/\/[^/]+\/+/i, "");
   return normalized;
+}
+
+function isPresignedUrl(rawUrl: string): boolean {
+  if (!rawUrl) return false;
+  const lower = rawUrl.toLowerCase();
+  return (
+    lower.includes("x-amz-signature=") ||
+    lower.includes("x-amz-algorithm=") ||
+    lower.includes("x-amz-credential=")
+  );
+}
+
+function parseS3Url(rawUrl: string): { bucket: string; key: string } | null {
+  if (!rawUrl) return null;
+  if (rawUrl.startsWith("s3://")) {
+    const withoutScheme = rawUrl.slice("s3://".length);
+    const [bucketName, ...keyParts] = withoutScheme.split("/");
+    if (!bucketName || keyParts.length === 0) return null;
+    return { bucket: bucketName, key: keyParts.join("/") };
+  }
+
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+
+  if (!url.hostname.endsWith("amazonaws.com")) return null;
+  const path = url.pathname.replace(/^\/+/, "");
+  if (!path) return null;
+
+  // Path-style: https://s3.<region>.amazonaws.com/<bucket>/<key>
+  if (url.hostname.startsWith("s3.")) {
+    const [bucketName, ...keyParts] = path.split("/");
+    if (!bucketName || keyParts.length === 0) return null;
+    return { bucket: bucketName, key: keyParts.join("/") };
+  }
+
+  // Virtual-hosted style: https://<bucket>.s3.<region>.amazonaws.com/<key>
+  const bucketName = url.hostname.split(".s3")[0];
+  if (!bucketName || bucketName === "s3") return null;
+  return { bucket: bucketName, key: path };
 }
 
 export async function uploadBufferToS3(params: {
@@ -87,3 +130,41 @@ export async function getPresignedUrlForKey(
 }
 
 export { normalizeS3Key };
+
+export async function presignS3UrlIfNeeded(
+  rawUrl: string,
+  expiresInSeconds: number = defaultTtl
+): Promise<string> {
+  if (!rawUrl || isPresignedUrl(rawUrl)) return rawUrl;
+  if (!bucket) return rawUrl;
+  const parsed = parseS3Url(rawUrl);
+  if (!parsed) return rawUrl;
+  if (parsed.bucket !== bucket) return rawUrl;
+  return getPresignedUrlForKey(parsed.key, expiresInSeconds);
+}
+
+export async function presignS3UrlsInText(
+  text: string,
+  expiresInSeconds: number = defaultTtl
+): Promise<string> {
+  if (!text) return text;
+  const pattern =
+    /(?:s3:\/\/[^\s\)\]\}]+|https?:\/\/[^\s\)\]\}]+amazonaws\.com[^\s\)\]\}]*)/gi;
+  const matches = text.match(pattern);
+  if (!matches || matches.length === 0) return text;
+
+  const replacements = new Map<string, string>();
+  for (const match of matches) {
+    if (replacements.has(match)) continue;
+    const presigned = await presignS3UrlIfNeeded(match, expiresInSeconds);
+    replacements.set(match, presigned);
+  }
+
+  let updated = text;
+  for (const [original, presigned] of replacements.entries()) {
+    if (original !== presigned) {
+      updated = updated.split(original).join(presigned);
+    }
+  }
+  return updated;
+}

@@ -275,11 +275,11 @@ export class VoiceController {
   }
 
   /**
-   * Body: { text: string, voice?: string }
+   * Body: { text: string }
    * Uses gpt-4o-mini-tts and returns audio/mpeg binary.
    */
   static async tts(req: Request, res: Response) {
-    const { text, voice } = req.body as { text?: string; voice?: string };
+    const { text } = req.body as { text?: string };
 
     if (!text || !text.trim()) {
       return res.status(400).json({ error: "text is required" });
@@ -300,9 +300,12 @@ export class VoiceController {
                 In the above example, you can speak "Indoor/outdoor" as "Indoor and outdoor" or "Indoor or outdoor" as per the context of the sentence that makes sense.
                 This is not a hard and fast rule, you can use your best judgment to speak the sentence.
           * Read all the units as complete words and not as abbreviations.
-          * Do not speak the links that are provided in the text, links like starting with https://, http://, www. etc. and ending with .com, .org, .net, .io, .etc.
+          * Do NOT read URLs, links, email addresses, or web domains.
+          * If a URL appears, skip it completely and continue reading the remaining text naturally.
+          * Do not spell or summarize the link.
+
           `,
-          voice: voice ?? "alloy",
+          voice: 'sage',
           input: text,
         },
         { maxRetries: 2 }
