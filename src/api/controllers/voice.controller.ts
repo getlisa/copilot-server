@@ -240,7 +240,8 @@ export class VoiceController {
         {
           file,
           model: "gpt-4o-mini-transcribe",
-          language,
+          language: "en",
+          prompt: `Transcribe the audio into text. Do not include any other text in the response. The response should be in the same language.`,
         },
         { maxRetries: 2 }
       );

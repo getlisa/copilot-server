@@ -44,6 +44,14 @@ export class ClaraAgent implements AIAgent {
   private agent: Agent<AgentRunContext>;
   private lastInteractionTs = Date.now();
 
+  private shouldIncludeDiagrams(text?: string): boolean {
+    if (!text) return false;
+    const needle = text.toLowerCase();
+    return /\b(diagram|schematic|wiring|wire|image|photo|picture|figure|illustration|visual|blueprint|layout|circuit|drawing)\b/.test(
+      needle
+    );
+  }
+
 
   constructor() {
     this.agent = this.buildAgent();
@@ -464,6 +472,14 @@ export class ClaraAgent implements AIAgent {
 
       const uniqueDiagrams = Array.from(new Set(diagrams));
       const uniqueReferences = Array.from(new Set(references));
+      const includeDiagrams = this.shouldIncludeDiagrams(latestUserText);
+      logger.info("Diagram inclusion decision", {
+        runId,
+        conversationId: context.conversationId,
+        includeDiagrams,
+        diagramCount: uniqueDiagrams.length,
+        latestUserTextPreview: latestUserText?.slice(0, 160),
+      });
 
       const buildImageLinks = (urls: string[]) =>
         urls.map((url) => {
@@ -479,10 +495,26 @@ export class ClaraAgent implements AIAgent {
         });
 
       let finalOutputWithMedia = finalOutputResolved;
-      if (uniqueDiagrams.length > 0 && !uniqueDiagrams.some((u) => finalOutputWithMedia.includes(u))) {
+      if (
+        includeDiagrams &&
+        uniqueDiagrams.length > 0 &&
+        !uniqueDiagrams.some((u) => finalOutputWithMedia.includes(u))
+      ) {
         finalOutputWithMedia += `\n\nDiagrams:\n${buildImageLinks(uniqueDiagrams)
           .map((link) => `- ${link}`)
           .join("\n")}`;
+        logger.info("Diagrams appended to response", {
+          runId,
+          conversationId: context.conversationId,
+          diagramCount: uniqueDiagrams.length,
+        });
+      } else if (uniqueDiagrams.length > 0) {
+        logger.info("Diagrams available but not appended", {
+          runId,
+          conversationId: context.conversationId,
+          includeDiagrams,
+          alreadyPresent: uniqueDiagrams.some((u) => finalOutputWithMedia.includes(u)),
+        });
       }
       if (uniqueReferences.length > 0 && !uniqueReferences.some((u) => finalOutputWithMedia.includes(u))) {
         finalOutputWithMedia += `\n\nReferences:\n${buildLinks(uniqueReferences)
@@ -499,7 +531,7 @@ export class ClaraAgent implements AIAgent {
           toolsUsed: Array.from(new Set(toolsUsed)),
           durationMs: Date.now() - startTime,
           sources: sources.length > 0 ? sources : undefined,
-          diagrams: uniqueDiagrams.length > 0 ? uniqueDiagrams : undefined,
+          diagrams: includeDiagrams && uniqueDiagrams.length > 0 ? uniqueDiagrams : undefined,
           references: uniqueReferences.length > 0 ? uniqueReferences : undefined,
         },
       };

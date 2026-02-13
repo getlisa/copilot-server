@@ -210,9 +210,10 @@ export const uploadImagesSchema = z.object({
   }),
   body: z
     .object({
-      question: z.string().min(1, "Message is optional"),
+      question: z.string().optional(),
       origin: z.string().optional(),
       client: z.string().optional(),
+      images: z.array(z.string()).optional(),
     })
     .passthrough(),
 });

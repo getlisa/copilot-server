@@ -44,14 +44,14 @@ export const technicalManualTool = tool({
       query: z
         .string()
         .describe('Detailed technical query (e.g., "Trane XV20i error code 126 troubleshooting")'),
-      // trade: z.enum(["HVAC", "Plumbing", "Fire", "Electrical"]).optional(),
-    })
-    .strict(),
+      trade: z.enum(["HVAC", "Plumbing", "Fire", "Electrical"]).describe('Determine the trade based on the brand, model, equipment. Example: "I am having this error in my AC system, Indoor-remote controller communication error" -> HVAC'),
+    }),
   async execute(
-    { query }: { query: string },
+    { query, trade }: { query: string; trade: Trade },
     runContext?: { context?: { conversationId?: string; userId?: string } }
   ) {
     console.log("QUERY:", query);
+    console.log("TRADE:", trade);
     const contextInfo = {
       conversationId: runContext?.context?.conversationId,
       userId: runContext?.context?.userId,
@@ -73,7 +73,8 @@ export const technicalManualTool = tool({
 
     logger.info("technical_manual_tool invoked", {
       ...contextInfo,
-      queryPreview: query.slice(0, 300)
+      queryPreview: query,
+      trade: trade,
     });
 
     const collection = process.env.QDRANT_COLLECTION_NAME;
@@ -105,11 +106,11 @@ export const technicalManualTool = tool({
       }
 
       // 2) Vector search in Qdrant (filter only when trade provided)
-      // const filter = trade
-      //   ? {
-      //       must: [{ key: "category", match: { value: trade } }],
-      //     }
-      //   : undefined;
+      const filter = trade
+        ? {
+            must: [{ key: "category", match: { value: trade } }],
+          }
+        : undefined;
 
       let searchResults: QdrantSearchResult[] = [];
       try {
@@ -118,7 +119,7 @@ export const technicalManualTool = tool({
             name: "text_embeddings",
             vector: queryVector,
           },
-          // filter,
+          filter,
           limit: 15,
           with_payload: true,
         })) as unknown as QdrantSearchResult[];
@@ -126,7 +127,8 @@ export const technicalManualTool = tool({
         logger.error("technical_manual_tool Qdrant search failed", {
           ...contextInfo,
           collection,
-          // filterApplied: Boolean(filter),
+          filterApplied: Boolean(filter),
+          trade: trade,
           ...formatError(error),
         });
         return { error: "Qdrant search failed. Check QDRANT credentials/permissions." };
@@ -155,14 +157,23 @@ export const technicalManualTool = tool({
       }
 
       console.log("RERANKED:", reranked);
-
+      const relevantRerankedDocuments = [];
+      for (let i = 0; i < reranked.results.length; i++) {
+        if (reranked.results[i].relevanceScore >= 0.85){
+          relevantRerankedDocuments.push(reranked.results[i]);
+        }
+      }
+      console.log("RELEVANT RERANKED DOCUMENTS:", relevantRerankedDocuments);
+      if (relevantRerankedDocuments.length === 0) {
+        return { results: [], message: "No relevant results found for the given query. Please try with more specficic query or use another tool." };
+      }
       // 4) Map top results back to payloads and include diagram URLs
       const exposeUrlsToModel = process.env.RAG_TOOL_EXPOSE_URLS_TO_MODEL !== "false";
       const runId = (runContext?.context as { runId?: string } | undefined)?.runId;
 
       const results = await Promise.all(
-        reranked.results.map(async (hit) => {
-          const point = searchResults[hit.index];
+        relevantRerankedDocuments.map(async (rerankedDocument) => {
+          const point = searchResults[rerankedDocument.index];
           const rawImages = point.payload?.image_s3_urls ?? [];
           const rawFileUrl = point.payload?.file_s3_url;
           const pageNumber = point.payload?.page_number;
@@ -187,7 +198,7 @@ export const technicalManualTool = tool({
           }
 
           return {
-            relevance: hit.relevanceScore,
+            relevance: rerankedDocument.relevanceScore,
             text: point.payload?.chunk_text,
             pageNumber: pageNumberString,
             diagrams: exposeUrlsToModel ? imageUrls : [],
