@@ -30,23 +30,23 @@ model audio_files {
 }
 
 model companies {
-  id                   Int                   @id @default(autoincrement())
-  name                 String                @db.VarChar
-  logo_url             String?
-  city                 String?               @db.VarChar
-  state                String?               @db.VarChar
-  country              String?               @db.VarChar
-  postal_code          String?               @db.VarChar
-  geocoded_lat         Float?
-  geocoded_lng         Float?
-  created_at           DateTime              @default(now()) @db.Timestamp(6)
-  updated_at           DateTime              @default(now()) @db.Timestamp(6)
-  address              Json?                 @default("{}")
-  company_configs      company_configs?
-  crm_connections      crm_connections?
-  crm_entity_links     crm_entity_links[]
-  jobs                 jobs[]
-  users                users[]
+  id               Int                @id @default(autoincrement())
+  name             String             @db.VarChar
+  logo_url         String?
+  city             String?            @db.VarChar
+  state            String?            @db.VarChar
+  country          String?            @db.VarChar
+  postal_code      String?            @db.VarChar
+  geocoded_lat     Float?
+  geocoded_lng     Float?
+  created_at       DateTime           @default(now()) @db.Timestamp(6)
+  updated_at       DateTime           @default(now()) @db.Timestamp(6)
+  address          Json?              @default("{}")
+  company_configs  company_configs?
+  crm_connections  crm_connections?
+  crm_entity_links crm_entity_links[]
+  jobs             jobs[]
+  users            users[]
 
   @@schema("public")
 }
@@ -76,6 +76,7 @@ model jobs {
   created_at            DateTime               @default(now()) @db.Timestamp(6)
   updated_at            DateTime               @default(now()) @db.Timestamp(6)
   status                job_status             @default(scheduled)
+  meta_data             Json?
   conversations         Conversation[]
   companies             companies              @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   users                 users?                 @relation(fields: [technician_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
@@ -277,7 +278,7 @@ model ToolCall {
 
 model visit_session_metrics {
   id                        BigInt   @id @default(autoincrement())
-  job_id                    BigInt   @unique(map: "idx_visit_session_metrics_job_id")
+  job_id                    BigInt   @unique
   technician_id             BigInt
   technician_talk_time_sec  Int
   customer_talk_time_sec    Int
@@ -324,11 +325,11 @@ model crm_entity_links {
   created_at                DateTime        @default(now()) @db.Timestamptz(6)
   updated_at                DateTime        @default(now()) @db.Timestamptz(6)
   parent_provider_entity_id String?         @db.VarChar(128)
+  provider_assignment_id    String?         @db.VarChar(128)
   companies                 companies       @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_crm_entity_links_company")
   crm_connections           crm_connections @relation(fields: [crm_connection_id], references: [id], onUpdate: NoAction, map: "fk_crm_entity_links_connection")
 
   @@unique([crm_connection_id, entity_type, canonical_id], map: "uq_canonical_entity")
-  @@unique([crm_connection_id, entity_type, provider_entity_id], map: "uq_provider_entity")
   @@index([crm_connection_id, entity_type, remote_modified_at(sort: Desc)], map: "idx_crm_entity_links_connection_entity_remote_modified")
   @@schema("public")
 }

@@ -7,6 +7,7 @@ import {
   InputGuardrailTripwireTriggered,
 } from "@openai/agents";
 import {
+  fileSearchTool,
   setDefaultOpenAIKey,
   webSearchTool,
 } from "@openai/agents-openai";
@@ -22,14 +23,16 @@ import { systemPrompt } from "../lib/systemPrompt";
 import { Message } from "../types/conversation.types";
 import { countTokensForMessages } from "../lib/tokenizer";
 import prisma from "../lib/prisma";
-import { technicalManualTool } from "./tools/RagTool";
-import { consumeRagSources } from "./tools/ragToolSources";
 
 type AgentRunContext = {
   conversationId: string;
   userId: string;
-  runId: string;
 };
+
+// type InlineImageInput = {
+//   data: string;
+//   mimeType?: string;
+// };
 
 type ImageItem = {
   type: "input_image";
@@ -43,14 +46,6 @@ const HISTORY_LIMIT = 15;
 export class ClaraAgent implements AIAgent {
   private agent: Agent<AgentRunContext>;
   private lastInteractionTs = Date.now();
-
-  private shouldIncludeDiagrams(text?: string): boolean {
-    if (!text) return false;
-    const needle = text.toLowerCase();
-    return /\b(diagram|schematic|wiring|wire|image|photo|picture|figure|illustration|visual|blueprint|layout|circuit|drawing)\b/.test(
-      needle
-    );
-  }
 
 
   constructor() {
@@ -66,21 +61,18 @@ export class ClaraAgent implements AIAgent {
   }
 
   private buildAgent(): Agent<AgentRunContext> {
-    const tools = [
-      technicalManualTool,
-    ];
+    const tools = [];
 
-    // if (VECTOR_STORE_ID) {
-    //   const vectorStoreIds = VECTOR_STORE_ID.split(",")
-    //     .map((id) => id.trim())
-    //     .filter(Boolean);
-    //   if (vectorStoreIds.length > 0) {
-    //     tools.push(fileSearchTool(vectorStoreIds));
-    //   }
-    // }
-    // tools.push(webSearchTool({ searchContextSize: "medium" }));
-  
-    
+    if (VECTOR_STORE_ID) {
+      const vectorStoreIds = VECTOR_STORE_ID.split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
+      if (vectorStoreIds.length > 0) {
+        tools.push(fileSearchTool(vectorStoreIds));
+      }
+    }
+    tools.push(webSearchTool({ searchContextSize: "medium" }));
+
     return new Agent<AgentRunContext>({
       name: "Clara - Technician Copilot",
       instructions: systemPrompt,
@@ -88,7 +80,7 @@ export class ClaraAgent implements AIAgent {
       modelSettings:{
         topP: 0.8,
         maxTokens: 800,
-        toolChoice: "auto",
+        toolChoice: "required",
         parallelToolCalls: true,
         // promptCacheRetention: "24h",
         // reasoning:{
@@ -169,15 +161,25 @@ export class ClaraAgent implements AIAgent {
   }
 
   private async buildHistory(conversationId: string): Promise<AgentInputItem[]> {
-    const [recent, profile] = await Promise.all([
+    const [recent, profile, jobContext] = await Promise.all([
       messageRepository.getLastMessages(conversationId, HISTORY_LIMIT),
       this.getTechnicianProfile(conversationId),
+      this.getJobContext(conversationId),
     ]);
 
     const history: AgentInputItem[] = [];
     if (profile) {
       history.push(this.toTechnicianContextItem(profile));
     }
+    if (jobContext) {
+      history.push(this.toJobContextItem(jobContext));
+    }
+
+    logger.info("ClaraAgent context injected", {
+      conversationId,
+      technicianProfile: profile ?? "none",
+      jobContext: jobContext ?? "none",
+    });
 
     for (const msg of recent) {
       history.push(...this.toImageSummaryItems(msg));
@@ -294,6 +296,84 @@ export class ClaraAgent implements AIAgent {
     };
   }
 
+  private async getJobContext(conversationId: string): Promise<{
+    jobNumber?: string;
+    issueDescription?: string;
+    visitNumber?: number;
+    visitDescription?: string;
+    jobTargetName?: string;
+    address?: string;
+    startTimestamp?: string;
+    status?: string;
+    companies?: string;
+    description?: string;
+  } | null> {
+    const convo = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        jobs: {
+          select: {
+            job_target_name: true,
+            address: true,
+            start_timestamp: true,
+            status: true,
+            companies: true,
+            meta_data: true,
+            description: true,
+          },
+        },
+      },
+    });
+
+    if (!convo?.jobs) return null;
+
+    const meta = (convo.jobs.meta_data as Record<string, unknown>) ?? {};
+
+    return {
+      jobTargetName: convo.jobs.job_target_name,
+      address: convo.jobs.address,
+      startTimestamp: String(convo.jobs.start_timestamp),
+      status: convo.jobs.status,
+      description: convo.jobs.description ?? undefined,
+      jobNumber: (meta.jobNumber as string) ?? undefined,
+      issueDescription: (meta.issueDescription as string) ?? convo.jobs.description ?? undefined,
+      visitNumber: (meta.visitNumber as number) ?? undefined,
+      visitDescription: (meta.description as string) ?? undefined,
+    };
+  }
+
+  private toJobContextItem(job: {
+    jobTargetName?: string;
+    address?: string;
+    startTimestamp?: string;
+    status?: string;
+    companies?: string;
+    description?: string;
+    jobNumber?: string;
+    issueDescription?: string;
+    visitNumber?: number;
+    visitDescription?: string;
+  }): AgentInputItem {
+    const text = `
+# JOB CONTEXT
+- Job Target Name: ${job.jobTargetName ?? "N/A"}
+- Address: ${job.address ?? "N/A"}
+- Start Timestamp: ${job.startTimestamp ?? "N/A"}
+- Status: ${job.status ?? "N/A"}
+- Companies: ${job.companies ?? "N/A"}
+- Job Number: ${job.jobNumber ?? "N/A"}
+- Job Description: ${job.issueDescription ?? job.description ?? "N/A"}
+- Visit Number: ${job.visitNumber ?? "N/A"}
+- Visit Description: ${job.visitDescription ?? "N/A"}
+`;
+    return {
+      role: "assistant",
+      type: "message",
+      status: "completed",
+      content: [{ type: "output_text", text }],
+    };
+  }
+
   private toUserItem(content: string): AgentInputItem {
     return {
       role: "user",
@@ -348,26 +428,6 @@ export class ClaraAgent implements AIAgent {
     callbacks?: AgentStreamCallbacks,
     usage?: { promptTokens?: number }
   ): Promise<AgentResponse> {
-    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const latestUser = [...messages].reverse().find((m: any) => m?.role === "user");
-    const latestUserText =
-      Array.isArray((latestUser as any)?.content)
-        ? (latestUser as any).content
-            .filter((c: any) => c?.type === "input_text" && typeof c.text === "string")
-            .map((c: any) => c.text)
-            .join(" ")
-        : typeof (latestUser as any)?.content === "string"
-          ? (latestUser as any).content
-          : undefined;
-
-    logger.info("Agent run started", {
-      runId,
-      conversationId: context.conversationId,
-      userId: context.userId,
-      promptTokens: usage?.promptTokens,
-      messageCount: messages.length,
-      latestUserText,
-    });
     this.lastInteractionTs = Date.now();
     const startTime = Date.now();
 
@@ -379,22 +439,13 @@ export class ClaraAgent implements AIAgent {
         messages,
         {
         stream: true,
-        context: { conversationId: context.conversationId, userId: context.userId, runId },
+        context: { conversationId: context.conversationId, userId: context.userId },
       });
-      console.log("I am here 00");
       let fullText = "";
       const toolsUsed: string[] = [];
-      const toolCalls: Array<{ name: string; callId?: string }> = [];
 
       for await (const event of stream) {
-        if (event.type === "raw_model_stream_event") {
-          logger.debug("Agent stream event", {
-            runId,
-            type: event.type,
-            dataType: (event as any)?.data?.type,
-          });
-        }
-
+        // console.log("Event received: ", JSON.stringify(event, null, 2));
         if (event.type === "raw_model_stream_event") {
           const raw = event as RunRawModelStreamEvent;
           const delta = (raw.data as any)?.delta ?? (raw.data as any)?.text ?? "";
@@ -407,41 +458,10 @@ export class ClaraAgent implements AIAgent {
           const itemEvent = event as RunItemStreamEvent;
           const rawItem: any = itemEvent.item.rawItem;
 
-          // Log every agent item event with its name and key details
-          logger.info("Agent run item event", {
-            runId,
-            name: itemEvent.name,
-            itemType: rawItem?.type,
-          });
-
           if (rawItem?.type === "hosted_tool_call" || rawItem?.type === "function_call") {
             const toolName = rawItem.name ?? rawItem.type ?? "tool_call";
             toolsUsed.push(toolName);
-            toolCalls.push({ name: toolName, callId: rawItem?.id });
-            const argsStr =
-              typeof rawItem?.arguments === "string"
-                ? rawItem.arguments.slice(0, 500)
-                : JSON.stringify(rawItem?.arguments ?? "").slice(0, 500);
-            logger.info("Agent tool call", {
-              runId,
-              toolName,
-              callId: rawItem?.id,
-              argumentsPreview: argsStr,
-            });
             callbacks?.onToolCall?.(toolName);
-          }
-
-          // Capture tool outputs when emitted
-          if (itemEvent.name === "tool_output") {
-            const outputPreview =
-              typeof rawItem?.output === "string"
-                ? rawItem.output
-                : JSON.stringify(rawItem?.output ?? "");
-            logger.info("Agent tool output", {
-              runId,
-              callId: rawItem?.id,
-              outputPreview,
-            });
           }
 
           if (rawItem?.type === "message" && rawItem?.role === "assistant") {
@@ -463,97 +483,21 @@ export class ClaraAgent implements AIAgent {
         typeof stream.finalOutput === "string" && stream.finalOutput.length > 0
           ? stream.finalOutput
           : fullText;
-      const finalOutputResolved = finalOutput;
-      const sources = consumeRagSources(runId);
-      const diagrams = sources.flatMap((source) => source.diagrams ?? []);
-      const references = sources
-        .map((source) => source.fileUrl)
-        .filter((url): url is string => Boolean(url));
-
-      const uniqueDiagrams = Array.from(new Set(diagrams));
-      const uniqueReferences = Array.from(new Set(references));
-      const includeDiagrams = this.shouldIncludeDiagrams(latestUserText);
-      logger.info("Diagram inclusion decision", {
-        runId,
-        conversationId: context.conversationId,
-        includeDiagrams,
-        diagramCount: uniqueDiagrams.length,
-        latestUserTextPreview: latestUserText?.slice(0, 160),
-      });
-
-      const buildImageLinks = (urls: string[]) =>
-        urls.map((url) => {
-          const filename = url.split("?")[0]?.split("/").pop() ?? "Diagram";
-          const title = filename.replace(/[-_]+/g, " ").replace(/\.[^/.]+$/, "").trim() || "Diagram";
-          return `![${title}](${url})`;
-        });
-      const buildLinks = (urls: string[]) =>
-        urls.map((url) => {
-          const filename = url.split("?")[0]?.split("/").pop() ?? "Source";
-          const title = filename.replace(/[-_]+/g, " ").replace(/\.[^/.]+$/, "").trim() || "Source";
-          return `[${title}](${url})`;
-        });
-
-      let finalOutputWithMedia = finalOutputResolved;
-      if (
-        includeDiagrams &&
-        uniqueDiagrams.length > 0 &&
-        !uniqueDiagrams.some((u) => finalOutputWithMedia.includes(u))
-      ) {
-        finalOutputWithMedia += `\n\nDiagrams:\n${buildImageLinks(uniqueDiagrams)
-          .map((link) => `- ${link}`)
-          .join("\n")}`;
-        logger.info("Diagrams appended to response", {
-          runId,
-          conversationId: context.conversationId,
-          diagramCount: uniqueDiagrams.length,
-        });
-      } else if (uniqueDiagrams.length > 0) {
-        logger.info("Diagrams available but not appended", {
-          runId,
-          conversationId: context.conversationId,
-          includeDiagrams,
-          alreadyPresent: uniqueDiagrams.some((u) => finalOutputWithMedia.includes(u)),
-        });
-      }
-      if (uniqueReferences.length > 0 && !uniqueReferences.some((u) => finalOutputWithMedia.includes(u))) {
-        finalOutputWithMedia += `\n\nReferences:\n${buildLinks(uniqueReferences)
-          .map((link) => `- ${link}`)
-          .join("\n")}`;
-      }
-      console.log(`Final output: ${finalOutputResolved}`);
+      console.log(`Final output: ${finalOutput}`);
 
       const response: AgentResponse = {
         messageId: `msg-${Date.now()}`,
-        content: finalOutputWithMedia,
+        content: finalOutput,
         metadata: {
           model: DEFAULT_MODEL,
           toolsUsed: Array.from(new Set(toolsUsed)),
           durationMs: Date.now() - startTime,
-          sources: sources.length > 0 ? sources : undefined,
-          diagrams: includeDiagrams && uniqueDiagrams.length > 0 ? uniqueDiagrams : undefined,
-          references: uniqueReferences.length > 0 ? uniqueReferences : undefined,
         },
       };
 
-      logger.info("Agent run completed", {
-        runId,
-        conversationId: context.conversationId,
-        userId: context.userId,
-        durationMs: response.metadata?.durationMs,
-        toolsUsed: response.metadata?.toolsUsed,
-        toolCalls,
-        finalOutputPreview: finalOutputWithMedia?.slice(0, 200),
-      });
       callbacks?.onComplete?.(response);
       return response;
     } catch (error) {
-      logger.error("ClaraAgent processing error", {
-        runId,
-        conversationId: context.conversationId,
-        userId: context.userId,
-        error,
-      });
       if (error instanceof InputGuardrailTripwireTriggered) {
         const guardrailOutput = (error as any).result?.output ?? (error as any).output ?? {};
         const guidance =
