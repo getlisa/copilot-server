@@ -30,32 +30,35 @@ model audio_files {
 }
 
 model companies {
-  id              Int              @id @default(autoincrement())
-  name            String           @db.VarChar
-  logo_url        String?
-  city            String?          @db.VarChar
-  state           String?          @db.VarChar
-  country         String?          @db.VarChar
-  postal_code     String?          @db.VarChar
-  geocoded_lat    Float?
-  geocoded_lng    Float?
-  created_at      DateTime         @default(now()) @db.Timestamp(6)
-  updated_at      DateTime         @default(now()) @db.Timestamp(6)
-  address         Json?            @default("{}")
-  company_configs company_configs?
-  jobs            jobs[]
-  users           users[]
+  id               Int                @id @default(autoincrement())
+  name             String             @db.VarChar
+  logo_url         String?
+  city             String?            @db.VarChar
+  state            String?            @db.VarChar
+  country          String?            @db.VarChar
+  postal_code      String?            @db.VarChar
+  geocoded_lat     Float?
+  geocoded_lng     Float?
+  created_at       DateTime           @default(now()) @db.Timestamp(6)
+  updated_at       DateTime           @default(now()) @db.Timestamp(6)
+  address          Json?              @default("{}")
+  company_configs  company_configs?
+  crm_connections  crm_connections?
+  crm_entity_links crm_entity_links[]
+  jobs             jobs[]
+  users            users[]
 
   @@schema("public")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model company_configs {
-  id         Int       @id @default(autoincrement())
-  company_id Int       @unique
-  checklists Json
-  updated_at DateTime  @default(now()) @db.Timestamp(6)
-  companies  companies @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id                     Int       @id @default(autoincrement())
+  company_id             Int       @unique
+  checklists             Json
+  updated_at             DateTime  @default(now()) @db.Timestamp(6)
+  sales_coaching_enabled Boolean   @default(true)
+  companies              companies @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@schema("public")
 }
@@ -73,6 +76,7 @@ model jobs {
   created_at            DateTime               @default(now()) @db.Timestamp(6)
   updated_at            DateTime               @default(now()) @db.Timestamp(6)
   status                job_status             @default(scheduled)
+  meta_data             Json?
   conversations         Conversation[]
   companies             companies              @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   users                 users?                 @relation(fields: [technician_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
@@ -141,7 +145,7 @@ model users {
   first_name            String                  @db.VarChar(100)
   last_name             String                  @db.VarChar(100)
   job_title             String?                 @db.VarChar(150)
-  email                 String                  @unique @db.VarChar(200)
+  email                 String                  @unique(map: "idx_users_email") @db.VarChar(200)
   role                  user_role               @default(technician)
   hashed_password       String                  @db.VarChar(255)
   created_at            DateTime                @default(now()) @db.Timestamp(6)
@@ -149,6 +153,7 @@ model users {
   company_id            Int
   address               Json?                   @default("{}")
   phone_number          String?                 @db.VarChar(20)
+  username              String                  @db.VarChar(200)
   conversations         Conversation[]
   jobs                  jobs[]
   messages              Message[]
@@ -157,12 +162,13 @@ model users {
   visit_session_metrics visit_session_metrics[]
   visit_sessions        visit_sessions[]
 
+  @@unique([company_id, username], map: "uq_users_company_username")
   @@schema("public")
 }
 
 model visit_sessions {
   id                     BigInt                   @id @default(autoincrement())
-  job_id                 BigInt                   @unique
+  job_id                 BigInt                   @unique(map: "idx_visit_sessions_job_id")
   technician_id          BigInt
   start_time             DateTime                 @db.Timestamp(6)
   end_time               DateTime?                @db.Timestamp(6)
@@ -289,6 +295,45 @@ model visit_session_metrics {
   @@schema("public")
 }
 
+model crm_connections {
+  id               Int                @id @default(autoincrement())
+  company_id       Int                @unique(map: "uq_crm_connections_company")
+  provider         crm_provider
+  auth_type        crm_auth_type
+  encrypted_auth   Json
+  provider_config  Json?
+  expires_at       DateTime?          @db.Timestamptz(6)
+  last_verified_at DateTime?          @db.Timestamptz(6)
+  created_at       DateTime           @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime           @default(now()) @db.Timestamptz(6)
+  companies        companies          @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_crm_connections_company")
+  crm_entity_links crm_entity_links[]
+
+  @@schema("public")
+}
+
+model crm_entity_links {
+  id                        BigInt          @id @default(autoincrement())
+  company_id                Int
+  crm_connection_id         Int
+  entity_type               crm_entity_type
+  canonical_id              BigInt
+  provider_entity_id        String          @db.VarChar(128)
+  provider_payload          Json?
+  last_synced_at            DateTime?       @db.Timestamptz(6)
+  remote_modified_at        DateTime?       @db.Timestamptz(6)
+  created_at                DateTime        @default(now()) @db.Timestamptz(6)
+  updated_at                DateTime        @default(now()) @db.Timestamptz(6)
+  parent_provider_entity_id String?         @db.VarChar(128)
+  provider_assignment_id    String?         @db.VarChar(128)
+  companies                 companies       @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_crm_entity_links_company")
+  crm_connections           crm_connections @relation(fields: [crm_connection_id], references: [id], onUpdate: NoAction, map: "fk_crm_entity_links_connection")
+
+  @@unique([crm_connection_id, entity_type, canonical_id], map: "uq_canonical_entity")
+  @@index([crm_connection_id, entity_type, remote_modified_at(sort: Desc)], map: "idx_crm_entity_links_connection_entity_remote_modified")
+  @@schema("public")
+}
+
 enum job_status {
   scheduled
   ongoing
@@ -389,5 +434,27 @@ enum ContextType {
   SYSTEM_PROMPT
 
   @@map("context_type")
+  @@schema("public")
+}
+
+enum crm_auth_type {
+  OAUTH2
+
+  @@schema("public")
+}
+
+enum crm_entity_type {
+  JOB
+  TECHNICIAN
+
+  @@schema("public")
+}
+
+enum crm_provider {
+  SERVICETITAN
+  BUILDOPS
+  HOUSECALL_PRO
+  SERVICETRADE
+
   @@schema("public")
 }
