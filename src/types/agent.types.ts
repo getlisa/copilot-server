@@ -58,6 +58,7 @@ export interface AgentContext {
   userId: string;
   jobId?: string;
   conversationHistory?: ConversationMessage[];
+  timezone?: string;
 }
 
 /**
