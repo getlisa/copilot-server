@@ -290,6 +290,7 @@ export class ChatController {
         conversationId,
         userId: senderId ? String(senderId) : "user",
         jobId: conversation.jobId ? String(conversation.jobId) : undefined,
+        timezone: (req.headers["x-device-timezone"] as string) || undefined,
       };
 
       const response =
@@ -498,6 +499,7 @@ export class ChatController {
         conversationId,
         userId: senderId ? String(senderId) : "user",
         jobId: conversation.jobId ? String(conversation.jobId) : undefined,
+        timezone: (req.headers["x-device-timezone"] as string) || undefined,
       };
 
       const response =

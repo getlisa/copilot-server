@@ -102,7 +102,7 @@ export class ClaraAgent implements AIAgent {
       throw new Error("Empty message");
     }
 
-    const history = await this.buildHistory(context.conversationId);
+    const history = await this.buildHistory(context.conversationId, context.timezone);
 
     console.log("History:", JSON.stringify(history, null, 2));
 
@@ -160,11 +160,11 @@ export class ClaraAgent implements AIAgent {
     return undefined;
   }
 
-  private async buildHistory(conversationId: string): Promise<AgentInputItem[]> {
+  private async buildHistory(conversationId: string, timezone?: string): Promise<AgentInputItem[]> {
     const [recent, profile, jobContext] = await Promise.all([
       messageRepository.getLastMessages(conversationId, HISTORY_LIMIT),
       this.getTechnicianProfile(conversationId),
-      this.getJobContext(conversationId),
+      this.getJobContext(conversationId, timezone),
     ]);
 
     const history: AgentInputItem[] = [];
@@ -296,7 +296,7 @@ export class ClaraAgent implements AIAgent {
     };
   }
 
-  private async getJobContext(conversationId: string): Promise<{
+  private async getJobContext(conversationId: string, timezone?: string): Promise<{
     jobNumber?: string;
     issueDescription?: string;
     visitNumber?: number;
@@ -305,6 +305,7 @@ export class ClaraAgent implements AIAgent {
     address?: string;
     startTimestamp?: string;
     status?: string;
+    companies?: string;
     description?: string;
   } | null> {
     const convo = await prisma.conversation.findUnique({
@@ -316,6 +317,7 @@ export class ClaraAgent implements AIAgent {
             address: true,
             start_timestamp: true,
             status: true,
+            companies: true,
             meta_data: true,
             description: true,
           },
@@ -327,10 +329,25 @@ export class ClaraAgent implements AIAgent {
 
     const meta = (convo.jobs.meta_data as Record<string, unknown>) ?? {};
 
+    let startTimestamp: string;
+    if (timezone && convo.jobs.start_timestamp) {
+      try {
+        startTimestamp = new Intl.DateTimeFormat("en-US", {
+          timeZone: timezone,
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(new Date(convo.jobs.start_timestamp));
+      } catch {
+        startTimestamp = String(convo.jobs.start_timestamp);
+      }
+    } else {
+      startTimestamp = String(convo.jobs.start_timestamp);
+    }
+
     return {
       jobTargetName: convo.jobs.job_target_name,
       address: convo.jobs.address,
-      startTimestamp: String(convo.jobs.start_timestamp),
+      startTimestamp,
       status: convo.jobs.status,
       description: convo.jobs.description ?? undefined,
       jobNumber: (meta.jobNumber as string) ?? undefined,
@@ -345,6 +362,7 @@ export class ClaraAgent implements AIAgent {
     address?: string;
     startTimestamp?: string;
     status?: string;
+    companies?: string;
     description?: string;
     jobNumber?: string;
     issueDescription?: string;
@@ -357,6 +375,7 @@ export class ClaraAgent implements AIAgent {
 - Address: ${job.address ?? "N/A"}
 - Start Timestamp: ${job.startTimestamp ?? "N/A"}
 - Status: ${job.status ?? "N/A"}
+- Companies: ${job.companies ?? "N/A"}
 - Job Number: ${job.jobNumber ?? "N/A"}
 - Job Description: ${job.issueDescription ?? job.description ?? "N/A"}
 - Visit Number: ${job.visitNumber ?? "N/A"}

@@ -29,7 +29,17 @@ export interface AgentResponse {
     completionTokens?: number;
     toolsUsed?: string[];
     durationMs?: number;
+    sources?: RagSource[];
+    diagrams?: string[];
+    references?: string[];
   };
+}
+
+export interface RagSource {
+  chunkId?: string;
+  fileUrl?: string;
+  diagrams?: string[];
+  trade?: string;
 }
 
 /**
@@ -47,6 +57,7 @@ export interface AgentContext {
   conversationId: string;
   userId: string;
   jobId?: string;
+  timezone?: string;
   conversationHistory?: ConversationMessage[];
 }
 
