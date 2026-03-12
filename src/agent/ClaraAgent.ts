@@ -296,6 +296,19 @@ export class ClaraAgent implements AIAgent {
     };
   }
 
+  private formatTimestamp(ts: Date | string, timezone?: string): string {
+    if (timezone) {
+      try {
+        return new Intl.DateTimeFormat("en-US", {
+          timeZone: timezone,
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(new Date(ts));
+      } catch { /* fall through */ }
+    }
+    return String(ts);
+  }
+
   private async getJobContext(conversationId: string, timezone?: string): Promise<{
     jobNumber?: string;
     issueDescription?: string;
@@ -307,12 +320,15 @@ export class ClaraAgent implements AIAgent {
     status?: string;
     companies?: string;
     description?: string;
+    previousVisits?: { visitNumber: number; technicianName: string; description?: string; startTimestamp: string; status: string }[];
   } | null> {
     const convo = await prisma.conversation.findUnique({
       where: { id: conversationId },
       select: {
         jobs: {
           select: {
+            id: true,
+            company_id: true,
             job_target_name: true,
             address: true,
             start_timestamp: true,
@@ -328,32 +344,58 @@ export class ClaraAgent implements AIAgent {
     if (!convo?.jobs) return null;
 
     const meta = (convo.jobs.meta_data as Record<string, unknown>) ?? {};
+    const jobNumber = (meta.jobNumber as string) ?? undefined;
 
-    let startTimestamp: string;
-    if (timezone && convo.jobs.start_timestamp) {
-      try {
-        startTimestamp = new Intl.DateTimeFormat("en-US", {
-          timeZone: timezone,
-          dateStyle: "medium",
-          timeStyle: "short",
-        }).format(new Date(convo.jobs.start_timestamp));
-      } catch {
-        startTimestamp = String(convo.jobs.start_timestamp);
-      }
-    } else {
-      startTimestamp = String(convo.jobs.start_timestamp);
+    let previousVisits: { visitNumber: number; technicianName: string; description?: string; startTimestamp: string; status: string }[] = [];
+
+    if (jobNumber) {
+      const siblingJobs = await prisma.jobs.findMany({
+        where: {
+          company_id: convo.jobs.company_id,
+          meta_data: { path: ["jobNumber"], equals: jobNumber },
+          id: { not: convo.jobs.id },
+        },
+        orderBy: { start_timestamp: "desc" },
+        take: 10,
+        select: {
+          meta_data: true,
+          start_timestamp: true,
+          status: true,
+          description: true,
+          users: {
+            select: { first_name: true, last_name: true },
+          },
+        },
+      });
+
+      previousVisits = siblingJobs.map((v) => {
+        const vMeta = (v.meta_data as Record<string, unknown>) ?? {};
+        const techName = v.users
+          ? `${v.users.first_name} ${v.users.last_name}`
+          : "Unassigned";
+        return {
+          visitNumber: (vMeta.visitNumber as number) ?? 0,
+          technicianName: techName,
+          description: (vMeta.description as string) ?? v.description ?? undefined,
+          startTimestamp: this.formatTimestamp(v.start_timestamp, timezone),
+          status: v.status,
+        };
+      });
+
+      previousVisits.sort((a, b) => a.visitNumber - b.visitNumber);
     }
 
     return {
       jobTargetName: convo.jobs.job_target_name,
       address: convo.jobs.address,
-      startTimestamp,
+      startTimestamp: this.formatTimestamp(convo.jobs.start_timestamp, timezone),
       status: convo.jobs.status,
       description: convo.jobs.description ?? undefined,
-      jobNumber: (meta.jobNumber as string) ?? undefined,
+      jobNumber,
       issueDescription: (meta.issueDescription as string) ?? convo.jobs.description ?? undefined,
       visitNumber: (meta.visitNumber as number) ?? undefined,
       visitDescription: (meta.description as string) ?? undefined,
+      previousVisits: previousVisits.length > 0 ? previousVisits : undefined,
     };
   }
 
@@ -368,7 +410,14 @@ export class ClaraAgent implements AIAgent {
     issueDescription?: string;
     visitNumber?: number;
     visitDescription?: string;
+    previousVisits?: { visitNumber: number; technicianName: string; description?: string; startTimestamp: string; status: string }[];
   }): AgentInputItem {
+    const visitLines = job.previousVisits?.length
+      ? job.previousVisits.map(
+          (v) => `  - Visit #${v.visitNumber}: ${v.technicianName} | ${v.startTimestamp} | ${v.status}${v.description ? ` | ${v.description}` : ""}`
+        ).join("\n")
+      : "  None";
+
     const text = `
 # JOB CONTEXT
 - Job Target Name: ${job.jobTargetName ?? "N/A"}
@@ -378,8 +427,11 @@ export class ClaraAgent implements AIAgent {
 - Companies: ${job.companies ?? "N/A"}
 - Job Number: ${job.jobNumber ?? "N/A"}
 - Job Description: ${job.issueDescription ?? job.description ?? "N/A"}
-- Visit Number: ${job.visitNumber ?? "N/A"}
-- Visit Description: ${job.visitDescription ?? "N/A"}
+- Current Visit Number: ${job.visitNumber ?? "N/A"}
+- Current Visit Description: ${job.visitDescription ?? "N/A"}
+
+## Previous Visits (${job.previousVisits?.length ?? 0})
+${visitLines}
 `;
     return {
       role: "assistant",
