@@ -23,6 +23,7 @@ import { systemPrompt } from "../lib/systemPrompt";
 import { Message } from "../types/conversation.types";
 import { countTokensForMessages } from "../lib/tokenizer";
 import prisma from "../lib/prisma";
+import { find as findTimezone } from "geo-tz";
 
 type AgentRunContext = {
   conversationId: string;
@@ -296,16 +297,82 @@ export class ClaraAgent implements AIAgent {
     };
   }
 
-  private formatTimestamp(ts: Date | string, timezone?: string): string {
-    if (timezone) {
-      try {
-        return new Intl.DateTimeFormat("en-US", {
-          timeZone: timezone,
-          dateStyle: "medium",
-          timeStyle: "short",
-        }).format(new Date(ts));
-      } catch { /* fall through */ }
+  private getTimezoneFromCoordinates(lat?: number | null, lng?: number | null): string | undefined {
+    if (lat == null || lng == null) return undefined;
+    try {
+      const [tz] = findTimezone(lat, lng);
+      return tz;
+    } catch {
+      return undefined;
     }
+  }
+
+  private normalizeTimezone(timezone?: string): string | undefined {
+    if (!timezone) return undefined;
+    const trimmed = timezone.trim();
+    if (!trimmed) return undefined;
+    // Common legacy alias used by some clients.
+    if (trimmed === "Asia/Calcutta") return "Asia/Kolkata";
+    return trimmed;
+  }
+
+  private tryFormatWithTimezone(ts: Date | string, timezone: string): string | undefined {
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: timezone,
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(new Date(ts));
+    } catch {
+      return undefined;
+    }
+  }
+
+  private formatTimestamp(
+    ts: Date | string,
+    options?: { timezone?: string; lat?: number | null; lng?: number | null }
+  ): string {
+    const dateObj = new Date(ts);
+    const utcTime = Number.isNaN(dateObj.getTime()) ? String(ts) : dateObj.toISOString();
+
+    const headerTimezone = this.normalizeTimezone(options?.timezone);
+    if (headerTimezone) {
+      const formatted = this.tryFormatWithTimezone(ts, headerTimezone);
+      if (formatted) {
+        logger.info("Timestamp conversion method", {
+          source: "device_header",
+          timezone: headerTimezone,
+          utcTime,
+          convertedTime: formatted,
+        });
+        return formatted;
+      }
+      logger.warn("Invalid device timezone header; trying geolocation fallback", {
+        timezone: headerTimezone,
+        utcTime,
+      });
+    }
+
+    const geoTimezone = this.getTimezoneFromCoordinates(options?.lat, options?.lng);
+    if (geoTimezone) {
+      const formatted = this.tryFormatWithTimezone(ts, geoTimezone);
+      if (formatted) {
+        logger.info("Timestamp conversion method", {
+          source: "geolocation_fallback",
+          timezone: geoTimezone,
+          utcTime,
+          convertedTime: formatted,
+        });
+        return formatted;
+      }
+    }
+
+    logger.info("Timestamp conversion method", {
+      source: "raw_utc_fallback",
+      timezone: "UTC",
+      utcTime,
+      convertedTime: String(ts),
+    });
     return String(ts);
   }
 
@@ -336,6 +403,8 @@ export class ClaraAgent implements AIAgent {
             companies: true,
             meta_data: true,
             description: true,
+            geocoded_lat: true,
+            geocoded_lng: true,
           },
         },
       },
@@ -345,6 +414,21 @@ export class ClaraAgent implements AIAgent {
 
     const meta = (convo.jobs.meta_data as Record<string, unknown>) ?? {};
     const jobNumber = (meta.jobNumber as string) ?? undefined;
+    const dbStartTimestamp =
+      convo.jobs.start_timestamp instanceof Date
+        ? convo.jobs.start_timestamp.toISOString()
+        : String(convo.jobs.start_timestamp);
+
+    logger.info("Job context fetched from database", {
+      conversationId,
+      jobId: String(convo.jobs.id),
+      jobNumber: jobNumber ?? "N/A",
+      visitNumber: (meta.visitNumber as number) ?? "N/A",
+      dbStartTimestamp,
+      dbAddress: convo.jobs.address ?? "N/A",
+      geocodedLat: convo.jobs.geocoded_lat ?? null,
+      geocodedLng: convo.jobs.geocoded_lng ?? null,
+    });
 
     let previousVisits: { visitNumber: number; technicianName: string; description?: string; startTimestamp: string; status: string }[] = [];
 
@@ -362,6 +446,8 @@ export class ClaraAgent implements AIAgent {
           start_timestamp: true,
           status: true,
           description: true,
+          geocoded_lat: true,
+          geocoded_lng: true,
           users: {
             select: { first_name: true, last_name: true },
           },
@@ -377,7 +463,11 @@ export class ClaraAgent implements AIAgent {
           visitNumber: (vMeta.visitNumber as number) ?? 0,
           technicianName: techName,
           description: (vMeta.description as string) ?? v.description ?? undefined,
-          startTimestamp: this.formatTimestamp(v.start_timestamp, timezone),
+          startTimestamp: this.formatTimestamp(v.start_timestamp, {
+            timezone,
+            lat: v.geocoded_lat,
+            lng: v.geocoded_lng,
+          }),
           status: v.status,
         };
       });
@@ -388,7 +478,11 @@ export class ClaraAgent implements AIAgent {
     return {
       jobTargetName: convo.jobs.job_target_name,
       address: convo.jobs.address,
-      startTimestamp: this.formatTimestamp(convo.jobs.start_timestamp, timezone),
+      startTimestamp: this.formatTimestamp(convo.jobs.start_timestamp, {
+        timezone,
+        lat: convo.jobs.geocoded_lat,
+        lng: convo.jobs.geocoded_lng,
+      }),
       status: convo.jobs.status,
       description: convo.jobs.description ?? undefined,
       jobNumber,
@@ -433,6 +527,13 @@ export class ClaraAgent implements AIAgent {
 ## Previous Visits (${job.previousVisits?.length ?? 0})
 ${visitLines}
 `;
+    logger.info("ClaraAgent job context shared with copilot", {
+      jobNumber: job.jobNumber ?? "N/A",
+      currentVisitNumber: job.visitNumber ?? "N/A",
+      previousVisitCount: job.previousVisits?.length ?? 0,
+      contextText: text,
+    });
+
     return {
       role: "assistant",
       type: "message",
