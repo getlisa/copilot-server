@@ -27,6 +27,8 @@ export const getJobContextTool = tool({
         select: {
           jobs: {
             select: {
+              id: true,
+              company_id: true,
               job_target_name: true,
               address: true,
               start_timestamp: true,
@@ -46,6 +48,7 @@ export const getJobContextTool = tool({
       }
 
       const meta = (convo.jobs.meta_data as Record<string, unknown>) ?? {};
+      const jobNumber = (meta.jobNumber as string) ?? undefined;
 
       let startTimestamp: string;
       if (timezone && convo.jobs.start_timestamp) {
@@ -69,11 +72,65 @@ export const getJobContextTool = tool({
         `- Scheduled Time: ${startTimestamp}`,
         `- Status: ${convo.jobs.status ?? "N/A"}`,
         `- Companies: ${convo.jobs.companies ? JSON.stringify(convo.jobs.companies) : "N/A"}`,
-        `- Job Number: ${(meta.jobNumber as string) ?? "N/A"}`,
+        `- Job Number: ${jobNumber ?? "N/A"}`,
         `- Job Description: ${(meta.issueDescription as string) ?? convo.jobs.description ?? "N/A"}`,
-        `- Visit Number: ${(meta.visitNumber as number) ?? "N/A"}`,
-        `- Visit Description: ${(meta.description as string) ?? "N/A"}`,
+        `- Current Visit Number: ${(meta.visitNumber as number) ?? "N/A"}`,
+        `- Current Visit Description: ${(meta.description as string) ?? "N/A"}`,
       ];
+
+      // Fetch previous visits (sibling jobs with same job number)
+      if (jobNumber) {
+        const siblingJobs = await prisma.jobs.findMany({
+          where: {
+            company_id: convo.jobs.company_id,
+            meta_data: { path: ["jobNumber"], equals: jobNumber },
+            id: { not: convo.jobs.id },
+          },
+          orderBy: { start_timestamp: "desc" },
+          take: 10,
+          select: {
+            meta_data: true,
+            start_timestamp: true,
+            status: true,
+            description: true,
+            users: {
+              select: { first_name: true, last_name: true },
+            },
+          },
+        });
+
+        const visitEntries = siblingJobs.map((v) => {
+          const vMeta = (v.meta_data as Record<string, unknown>) ?? {};
+          const visitNum = (vMeta.visitNumber as number) ?? 0;
+          const techName = v.users
+            ? `${v.users.first_name} ${v.users.last_name}`.trim()
+            : "Unassigned";
+          let ts = String(v.start_timestamp);
+          if (timezone) {
+            try {
+              ts = new Intl.DateTimeFormat("en-US", {
+                timeZone: timezone,
+                dateStyle: "medium",
+                timeStyle: "short",
+              }).format(new Date(v.start_timestamp));
+            } catch {
+              // keep ts as-is
+            }
+          }
+          const desc = (vMeta.description as string) ?? v.description ?? "";
+          return { visitNum, techName, ts, status: v.status, desc };
+        });
+
+        visitEntries.sort((a, b) => a.visitNum - b.visitNum);
+
+        const previousVisits = visitEntries.map(
+          (v) => `  - Visit #${v.visitNum}: ${v.techName} | ${v.ts} | ${v.status}${v.desc ? ` | ${v.desc}` : ""}`
+        );
+
+        lines.push("");
+        lines.push(`## Previous Visits (${previousVisits.length})`);
+        lines.push(previousVisits.length > 0 ? previousVisits.join("\n") : "  None");
+      }
 
       return lines.join("\n");
     } catch (error) {

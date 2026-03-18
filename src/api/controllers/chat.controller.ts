@@ -172,6 +172,12 @@ const parseInlineImages = (raw: unknown): InlineImageInput[] => {
     .filter((v): v is InlineImageInput => Boolean(v && typeof v.data === "string"));
 };
 
+const parseDeviceTimezoneHeader = (header: unknown): string | undefined => {
+  if (typeof header !== "string") return undefined;
+  const trimmed = header.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+};
+
 export class ChatController {
   /**
    * Send a message and get AI response (non-streaming)
@@ -286,7 +292,7 @@ export class ChatController {
         conversationId,
         userId: senderId ? String(senderId) : "user",
         jobId: conversation.jobId ? String(conversation.jobId) : undefined,
-        timezone: (req.headers["x-device-timezone"] as string) || undefined,
+        timezone: parseDeviceTimezoneHeader(req.headers["x-device-timezone"]),
       };
 
       const response =
@@ -507,7 +513,7 @@ export class ChatController {
         conversationId,
         userId: senderId ? String(senderId) : "user",
         jobId: conversation.jobId ? String(conversation.jobId) : undefined,
-        timezone: (req.headers["x-device-timezone"] as string) || undefined,
+        timezone: parseDeviceTimezoneHeader(req.headers["x-device-timezone"]),
       };
 
       const response =

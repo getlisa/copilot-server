@@ -29,8 +29,10 @@ import {
 import { Message } from "../types/conversation.types";
 import { countTokensForMessages } from "../lib/tokenizer";
 import prisma from "../lib/prisma";
-import { classifyQuery } from "./classifier";
 import { getJobContextTool } from "./tools/GetJobContextTool";
+import { classifyQuery } from "./classifier";
+import { find as findTimezone } from "geo-tz";
+
 
 type AgentRunContext = {
   conversationId: string;
@@ -363,6 +365,80 @@ export class ClaraAgent implements AIAgent {
       lastName: (convo as any)?.users?.last_name ?? null,
       role: (convo as any)?.users?.role ?? null,
       userId: convo.userId ?? null,
+    };
+  }
+
+  private async getJobContext(conversationId: string): Promise<{
+    jobNumber?: string;
+    issueDescription?: string;
+    visitNumber?: number;
+    visitDescription?: string;
+    jobTargetName?: string;
+    address?: string;
+    startTimestamp?: string;
+    status?: string;
+    description?: string;
+  } | null> {
+    const convo = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        jobs: {
+          select: {
+            job_target_name: true,
+            address: true,
+            start_timestamp: true,
+            status: true,
+            meta_data: true,
+            description: true,
+          },
+        },
+      },
+    });
+
+    if (!convo?.jobs) return null;
+
+    const meta = (convo.jobs.meta_data as Record<string, unknown>) ?? {};
+
+    return {
+      jobTargetName: convo.jobs.job_target_name,
+      address: convo.jobs.address,
+      startTimestamp: String(convo.jobs.start_timestamp),
+      status: convo.jobs.status,
+      description: convo.jobs.description ?? undefined,
+      jobNumber: (meta.jobNumber as string) ?? undefined,
+      issueDescription: (meta.issueDescription as string) ?? convo.jobs.description ?? undefined,
+      visitNumber: (meta.visitNumber as number) ?? undefined,
+      visitDescription: (meta.description as string) ?? undefined,
+    };
+  }
+
+  private toJobContextItem(job: {
+    jobTargetName?: string;
+    address?: string;
+    startTimestamp?: string;
+    status?: string;
+    description?: string;
+    jobNumber?: string;
+    issueDescription?: string;
+    visitNumber?: number;
+    visitDescription?: string;
+  }): AgentInputItem {
+    const text = `
+# JOB CONTEXT
+- Job Target Name: ${job.jobTargetName ?? "N/A"}
+- Address: ${job.address ?? "N/A"}
+- Start Timestamp: ${job.startTimestamp ?? "N/A"}
+- Status: ${job.status ?? "N/A"}
+- Job Number: ${job.jobNumber ?? "N/A"}
+- Job Description: ${job.issueDescription ?? job.description ?? "N/A"}
+- Visit Number: ${job.visitNumber ?? "N/A"}
+- Visit Description: ${job.visitDescription ?? "N/A"}
+`;
+    return {
+      role: "assistant",
+      type: "message",
+      status: "completed",
+      content: [{ type: "output_text", text }],
     };
   }
 

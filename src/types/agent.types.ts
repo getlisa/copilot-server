@@ -80,8 +80,8 @@ export interface AgentContext {
   conversationId: string;
   userId: string;
   jobId?: string;
-  conversationHistory?: ConversationMessage[];
   timezone?: string;
+  conversationHistory?: ConversationMessage[];
 }
 
 /**
