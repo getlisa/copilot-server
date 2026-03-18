@@ -1,5 +1,18 @@
 // types/agent.types.ts
 
+export type QueryTheme = "greeting" | "job_context" | "technical_query" | "out_of_scope";
+
+export interface ClassificationResult {
+  theme: QueryTheme;
+  /** 0.0 – 1.0 */
+  confidence: number;
+  /** One-sentence summary of why this theme was chosen */
+  reasoning: string;
+  needsRag: boolean;
+  needsWebSearch: boolean;
+  needsJobContext: boolean;
+}
+
 /**
  * Callback interface for streaming updates from the agent
  */
@@ -14,6 +27,8 @@ export interface AgentStreamCallbacks {
   onComplete?: (response: AgentResponse) => void;
   /** Called on error */
   onError?: (error: Error) => void;
+  /** Called immediately after query classification, before the agent runs */
+  onClassification?: (result: ClassificationResult) => void;
 }
 
 /**
@@ -32,6 +47,14 @@ export interface AgentResponse {
     sources?: RagSource[];
     diagrams?: string[];
     references?: string[];
+    /** Classified state that routed this request */
+    state?: QueryTheme;
+    /** Classifier confidence score (0–1) */
+    classificationConfidence?: number;
+    /** Token usage breakdown for the fast classifier call */
+    classifierTokens?: { prompt: number; completion: number };
+    /** Whether RAG fell back to web search due to low relevance score */
+    ragFallbackToWeb?: boolean;
   };
 }
 

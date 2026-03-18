@@ -50,8 +50,6 @@ export const technicalManualTool = tool({
     { query, trade }: { query: string; trade: Trade },
     runContext?: { context?: { conversationId?: string; userId?: string } }
   ) {
-    console.log("QUERY:", query);
-    console.log("TRADE:", trade);
     const contextInfo = {
       conversationId: runContext?.context?.conversationId,
       userId: runContext?.context?.userId,
@@ -134,6 +132,14 @@ export const technicalManualTool = tool({
         return { error: "Qdrant search failed. Check QDRANT credentials/permissions." };
       }
 
+      logger.info("Qdrant search complete", {
+        ...contextInfo,
+        collection,
+        hits: searchResults.length,
+        trade: trade || "any",
+        topScore: searchResults[0]?.score?.toFixed(3),
+      });
+
       if (!searchResults || searchResults.length === 0) {
         return { results: [], message: "No results found for the given query." };
       }
@@ -156,14 +162,18 @@ export const technicalManualTool = tool({
         return { error: "Rerank failed. Check Cohere API key/permissions." };
       }
 
-      console.log("RERANKED:", reranked);
       const relevantRerankedDocuments = [];
       for (let i = 0; i < reranked.results.length; i++) {
-        if (reranked.results[i].relevanceScore >= 0.85){
+        if (reranked.results[i].relevanceScore >= 0.85) {
           relevantRerankedDocuments.push(reranked.results[i]);
         }
       }
-      console.log("RELEVANT RERANKED DOCUMENTS:", relevantRerankedDocuments);
+      logger.info("RAG rerank complete", {
+        ...contextInfo,
+        total: reranked.results.length,
+        relevant: relevantRerankedDocuments.length,
+        topScore: reranked.results[0]?.relevanceScore?.toFixed(3),
+      });
       if (relevantRerankedDocuments.length === 0) {
         return { results: [], message: "No relevant results found for the given query. Please try with more specficic query or use another tool." };
       }
@@ -208,7 +218,6 @@ export const technicalManualTool = tool({
         })
       );
 
-      // console.log("RESULTS:", results);
 
       return { results };
     } catch (error) {

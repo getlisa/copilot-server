@@ -16,23 +16,27 @@ import {
   AgentContext,
   AgentResponse,
   AgentStreamCallbacks,
+  ClassificationResult,
+  QueryTheme,
 } from "../types/agent.types";
 import { messageRepository } from "../api/repositories/message.repository";
 import logger from "../lib/logger";
-import { systemPrompt } from "../lib/systemPrompt";
+import {
+  systemPrompt,
+  greetingSystemPrompt,
+  jobContextSystemPrompt,
+} from "../lib/systemPrompt";
 import { Message } from "../types/conversation.types";
 import { countTokensForMessages } from "../lib/tokenizer";
 import prisma from "../lib/prisma";
+import { classifyQuery } from "./classifier";
+import { getJobContextTool } from "./tools/GetJobContextTool";
 
 type AgentRunContext = {
   conversationId: string;
   userId: string;
+  timezone?: string;
 };
-
-// type InlineImageInput = {
-//   data: string;
-//   mimeType?: string;
-// };
 
 type ImageItem = {
   type: "input_image";
@@ -40,16 +44,24 @@ type ImageItem = {
 };
 
 const DEFAULT_MODEL = process.env.OPENAI_AGENT_MODEL ?? "gpt-4o-mini";
+const FAST_MODEL = process.env.OPENAI_FAST_MODEL ?? "gpt-4o-mini";
 const VECTOR_STORE_ID = process.env.VECTOR_STORE_ID;
 const HISTORY_LIMIT = 15;
 
+const OUT_OF_SCOPE_RESPONSE =
+  "I'm Clara, your field service AI assistant. I'm specialized in HVAC, plumbing, electrical, and fire protection. Please ask me about your current job or any technical field service topics — I'm happy to help!";
+
 export class ClaraAgent implements AIAgent {
-  private agent: Agent<AgentRunContext>;
+  private greetingAgent: Agent<AgentRunContext>;
+  private jobContextAgent: Agent<AgentRunContext>;
+  private technicalAgent: Agent<AgentRunContext>;
   private lastInteractionTs = Date.now();
 
-
   constructor() {
-    this.agent = this.buildAgent();
+    const { greeting, jobContext, technical } = this.buildAgents();
+    this.greetingAgent = greeting;
+    this.jobContextAgent = jobContext;
+    this.technicalAgent = technical;
   }
 
   async init(): Promise<void> {
@@ -60,37 +72,64 @@ export class ClaraAgent implements AIAgent {
     setDefaultOpenAIKey(apiKey);
   }
 
-  private buildAgent(): Agent<AgentRunContext> {
-    const tools = [];
+  private buildAgents(): {
+    greeting: Agent<AgentRunContext>;
+    jobContext: Agent<AgentRunContext>;
+    technical: Agent<AgentRunContext>;
+  } {
+    const greeting = new Agent<AgentRunContext>({
+      name: "Clara - Greeting",
+      instructions: greetingSystemPrompt,
+      model: FAST_MODEL,
+      modelSettings: {
+        topP: 0.9,
+        maxTokens: 200,
+        toolChoice: "none",
+        truncation: "auto",
+      },
+      tools: [],
+    });
 
+    const jobContext = new Agent<AgentRunContext>({
+      name: "Clara - Job Context",
+      instructions: jobContextSystemPrompt,
+      model: FAST_MODEL,
+      modelSettings: {
+        topP: 0.8,
+        maxTokens: 500,
+        toolChoice: "required",
+        truncation: "auto",
+      },
+      tools: [getJobContextTool],
+    });
+
+    const technicalTools: (ReturnType<typeof fileSearchTool> | typeof getJobContextTool)[] = [];
     if (VECTOR_STORE_ID) {
       const vectorStoreIds = VECTOR_STORE_ID.split(",")
         .map((id) => id.trim())
         .filter(Boolean);
       if (vectorStoreIds.length > 0) {
-        tools.push(fileSearchTool(vectorStoreIds));
+        technicalTools.push(fileSearchTool(vectorStoreIds));
       }
     }
-    tools.push(webSearchTool({ searchContextSize: "medium" }));
+    technicalTools.push(webSearchTool({ searchContextSize: "medium" }) as any);
+    technicalTools.push(getJobContextTool);
 
-    return new Agent<AgentRunContext>({
-      name: "Clara - Technician Copilot",
+    const technical = new Agent<AgentRunContext>({
+      name: "Clara - Technical",
       instructions: systemPrompt,
       model: DEFAULT_MODEL,
-      modelSettings:{
+      modelSettings: {
         topP: 0.8,
         maxTokens: 800,
         toolChoice: "required",
         parallelToolCalls: true,
-        // promptCacheRetention: "24h",
-        // reasoning:{
-        //   effort: "medium",
-        //   summary: "auto"
-        // },
         truncation: "auto",
       },
-      tools,
+      tools: technicalTools,
     });
+
+    return { greeting, jobContext, technical };
   }
 
   async processMessage(
@@ -102,18 +141,66 @@ export class ClaraAgent implements AIAgent {
       throw new Error("Empty message");
     }
 
-    const history = await this.buildHistory(context.conversationId, context.timezone);
+    const startTime = Date.now();
 
-    console.log("History:", JSON.stringify(history, null, 2));
+    logger.info(`▶ USER: "${text.slice(0, 200)}${text.length > 200 ? "…" : ""}"`, {
+      conversationId: context.conversationId,
+      userId: context.userId,
+    });
+
+    // Run classifier and DB history fetch in parallel to minimize latency
+    const [classificationResult, history] = await Promise.all([
+      classifyQuery(text),
+      this.buildHistory(context.conversationId),
+    ]);
+
+    const agent = this.selectAgent(classificationResult.theme);
+    logger.info(`✦ CLASSIFIED: ${classificationResult.theme} (${Math.round(classificationResult.confidence * 100)}%) → ${agent.name}`, {
+      conversationId: context.conversationId,
+      reasoning: classificationResult.reasoning,
+      classifierMs: `${Date.now() - startTime}ms`,
+    });
+
+    callbacks?.onClassification?.(classificationResult);
+
+    // out_of_scope: return static response without calling any LLM agent
+    if (classificationResult.theme === "out_of_scope") {
+      const response: AgentResponse = {
+        messageId: `msg-${Date.now()}`,
+        content: OUT_OF_SCOPE_RESPONSE,
+        metadata: {
+          model: FAST_MODEL,
+          toolsUsed: [],
+          durationMs: Date.now() - startTime,
+          state: "out_of_scope",
+          classificationConfidence: classificationResult.confidence,
+          classifierTokens: classificationResult.classifierTokens,
+        },
+      };
+      callbacks?.onComplete?.(response);
+      return response;
+    }
 
     const messages: AgentInputItem[] = [...history, this.toUserItem(text)] as AgentInputItem[];
-    const promptTokens = countTokensForMessages(messages, DEFAULT_MODEL);
-    console.log("Prompt tokens:", promptTokens);
-    return this.runAgent(messages, context, callbacks);
+
+    return this.runAgent(agent, messages, context, callbacks, classificationResult);
+  }
+
+  private selectAgent(theme: QueryTheme): Agent<AgentRunContext> {
+    switch (theme) {
+      case "greeting":
+        return this.greetingAgent;
+      case "job_context":
+        return this.jobContextAgent;
+      case "technical_query":
+      default:
+        return this.technicalAgent;
+    }
   }
 
   /**
    * Accepts inline image data (base64 or data URLs) to avoid external hosting.
+   * Images always route to the technical agent.
    */
   async processMessageWithImages(
     text: string,
@@ -139,13 +226,24 @@ export class ClaraAgent implements AIAgent {
       content: [{ type: "input_text", text: text }, ...imageItems],
     };
 
-    // const history = await this.buildHistory(context.conversationId);
     const messages: AgentInputItem[] = [userMessage];
     const promptTokens = countTokensForMessages(messages, DEFAULT_MODEL);
+    logger.debug("Image message prompt tokens", { promptTokens });
 
-    console.log("Messages SENT###:", JSON.stringify(messages, null, 2) );
+    // Images always go to the technical agent
+    const imageClassification: ClassificationResult & { classifierTokens: { prompt: number; completion: number } } = {
+      theme: "technical_query",
+      confidence: 1,
+      reasoning: "Image message always routes to technical agent",
+      needsRag: true,
+      needsWebSearch: false,
+      needsJobContext: false,
+      classifierTokens: { prompt: 0, completion: 0 },
+    };
 
-    return this.runAgent(messages, context, callbacks, { promptTokens });
+    callbacks?.onClassification?.(imageClassification);
+
+    return this.runAgent(this.technicalAgent, messages, context, callbacks, imageClassification, { promptTokens });
   }
 
   async dispose(): Promise<void> {
@@ -160,26 +258,16 @@ export class ClaraAgent implements AIAgent {
     return undefined;
   }
 
-  private async buildHistory(conversationId: string, timezone?: string): Promise<AgentInputItem[]> {
-    const [recent, profile, jobContext] = await Promise.all([
+  private async buildHistory(conversationId: string): Promise<AgentInputItem[]> {
+    const [recent, profile] = await Promise.all([
       messageRepository.getLastMessages(conversationId, HISTORY_LIMIT),
       this.getTechnicianProfile(conversationId),
-      this.getJobContext(conversationId, timezone),
     ]);
 
     const history: AgentInputItem[] = [];
     if (profile) {
       history.push(this.toTechnicianContextItem(profile));
     }
-    if (jobContext) {
-      history.push(this.toJobContextItem(jobContext));
-    }
-
-    logger.info("ClaraAgent context injected", {
-      conversationId,
-      technicianProfile: profile ?? "none",
-      jobContext: jobContext ?? "none",
-    });
 
     for (const msg of recent) {
       history.push(...this.toImageSummaryItems(msg));
@@ -187,12 +275,7 @@ export class ClaraAgent implements AIAgent {
         msg.senderType === "AI" ? this.toAssistantItem(msg.content) : this.toUserItem(msg.content)
       );
     }
-    logger.debug("ClaraAgent history constructed", {
-      conversationId,
-      messageCount: recent.length,
-      historyItems: history.length,
-    });
-    console.log("History:", JSON.stringify(history, null, 2));
+
     return history;
   }
 
@@ -200,11 +283,6 @@ export class ClaraAgent implements AIAgent {
     const summaries = Array.isArray(message.metadata?.imageSummaries)
       ? message.metadata.imageSummaries
       : [];
-    logger.debug("ClaraAgent image summaries", {
-      messageId: message.id,
-      summaryCount: summaries.length,
-    });
-    console.log("Summaries:", JSON.stringify(summaries, null, 2));
     return summaries.map((summary) => ({
       role: "assistant",
       type: "message",
@@ -245,25 +323,17 @@ export class ClaraAgent implements AIAgent {
     role?: string | null;
     userId?: bigint | string | null;
   }): AgentInputItem {
-
     const text = `
-    # TECHNICIAN DETAILS
-    - First Name: ${profile.firstName}
-    - Last Name: ${profile.lastName}
-    - Role: ${profile.role}
+# TECHNICIAN DETAILS
+- First Name: ${profile.firstName}
+- Last Name: ${profile.lastName}
+- Role: ${profile.role}
     `;
-    console.log("Technician context item:", text);
-
     return {
       role: "assistant",
       type: "message",
       status: "completed",
-      content: [
-        {
-          type: "output_text",
-          text,
-        },
-      ],
+      content: [{ type: "output_text", text }],
     };
   }
 
@@ -296,107 +366,11 @@ export class ClaraAgent implements AIAgent {
     };
   }
 
-  private async getJobContext(conversationId: string, timezone?: string): Promise<{
-    jobNumber?: string;
-    issueDescription?: string;
-    visitNumber?: number;
-    visitDescription?: string;
-    jobTargetName?: string;
-    address?: string;
-    startTimestamp?: string;
-    status?: string;
-    companies?: string;
-    description?: string;
-  } | null> {
-    const convo = await prisma.conversation.findUnique({
-      where: { id: conversationId },
-      select: {
-        jobs: {
-          select: {
-            job_target_name: true,
-            address: true,
-            start_timestamp: true,
-            status: true,
-            companies: true,
-            meta_data: true,
-            description: true,
-            geocoded_lat: true,
-            geocoded_lng: true,
-          },
-        },
-      },
-    });
-
-    if (!convo?.jobs) return null;
-
-    const meta = (convo.jobs.meta_data as Record<string, unknown>) ?? {};
-
-    let startTimestamp: string;
-    if (timezone && convo.jobs.start_timestamp) {
-      startTimestamp = new Intl.DateTimeFormat("en-US", {
-        timeZone: timezone,
-        dateStyle: "medium",
-        timeStyle: "short",
-      }).format(new Date(convo.jobs.start_timestamp));
-    } else {
-      startTimestamp = String(convo.jobs.start_timestamp);
-    }
-
-    return {
-      jobTargetName: convo.jobs.job_target_name,
-      address: convo.jobs.address,
-      startTimestamp,
-      status: convo.jobs.status,
-      description: convo.jobs.description ?? undefined,
-      jobNumber: (meta.jobNumber as string) ?? undefined,
-      issueDescription: (meta.issueDescription as string) ?? convo.jobs.description ?? undefined,
-      visitNumber: (meta.visitNumber as number) ?? undefined,
-      visitDescription: (meta.description as string) ?? undefined,
-    };
-  }
-
-  private toJobContextItem(job: {
-    jobTargetName?: string;
-    address?: string;
-    startTimestamp?: string;
-    status?: string;
-    companies?: string;
-    description?: string;
-    jobNumber?: string;
-    issueDescription?: string;
-    visitNumber?: number;
-    visitDescription?: string;
-  }): AgentInputItem {
-    const text = `
-# JOB CONTEXT
-- Job Target Name: ${job.jobTargetName ?? "N/A"}
-- Address: ${job.address ?? "N/A"}
-- Start Timestamp: ${job.startTimestamp ?? "N/A"}
-- Status: ${job.status ?? "N/A"}
-- Companies: ${job.companies ?? "N/A"}
-- Job Number: ${job.jobNumber ?? "N/A"}
-- Job Description: ${job.issueDescription ?? job.description ?? "N/A"}
-- Visit Number: ${job.visitNumber ?? "N/A"}
-- Visit Description: ${job.visitDescription ?? "N/A"}
-`;
-    return {
-      role: "assistant",
-      type: "message",
-      status: "completed",
-      content: [{ type: "output_text", text }],
-    };
-  }
-
   private toUserItem(content: string): AgentInputItem {
     return {
       role: "user",
       type: "message",
-      content: [
-        {
-          type: "input_text",
-          text: content,
-        },
-      ],
+      content: [{ type: "input_text", text: content }],
     };
   }
 
@@ -405,40 +379,16 @@ export class ClaraAgent implements AIAgent {
       role: "assistant",
       type: "message",
       status: "completed",
-      content: [
-        {
-          type: "output_text",
-          text: content,
-        },
-      ],
+      content: [{ type: "output_text", text: content }],
     };
   }
 
-  private toUserItemWithImages(content: string, images: string[]): AgentInputItem[] {
-    const imageItems: ImageItem[] = images.map((img: string) => {
-      console.log("Image URL:", img);
-      return {
-        type: "input_image",
-        image: img
-      }
-    })
-    let messages: AgentInputItem[] = [{
-      role: "user",
-      content: [
-        { type: "input_text", text: content },
-        ...imageItems,
-      ],
-    } as AgentInputItem]
-
-    console.log("Messages SENT###:", JSON.stringify(messages, null, 2) );
-
-    return messages;
-  }
-
   private async runAgent(
+    agentInstance: Agent<AgentRunContext>,
     messages: AgentInputItem[],
     context: AgentContext,
     callbacks?: AgentStreamCallbacks,
+    classificationResult?: ClassificationResult & { classifierTokens?: { prompt: number; completion: number } },
     usage?: { promptTokens?: number }
   ): Promise<AgentResponse> {
     this.lastInteractionTs = Date.now();
@@ -447,18 +397,15 @@ export class ClaraAgent implements AIAgent {
     callbacks?.onThinking?.();
 
     try {
-      const stream = await run(
-        this.agent,
-        messages,
-        {
+      const stream = await run(agentInstance, messages, {
         stream: true,
-        context: { conversationId: context.conversationId, userId: context.userId },
+        context: { conversationId: context.conversationId, userId: context.userId, timezone: context.timezone },
       });
+
       let fullText = "";
       const toolsUsed: string[] = [];
 
       for await (const event of stream) {
-        // console.log("Event received: ", JSON.stringify(event, null, 2));
         if (event.type === "raw_model_stream_event") {
           const raw = event as RunRawModelStreamEvent;
           const delta = (raw.data as any)?.delta ?? (raw.data as any)?.text ?? "";
@@ -474,6 +421,7 @@ export class ClaraAgent implements AIAgent {
           if (rawItem?.type === "hosted_tool_call" || rawItem?.type === "function_call") {
             const toolName = rawItem.name ?? rawItem.type ?? "tool_call";
             toolsUsed.push(toolName);
+            logger.info(`🔧 TOOL: ${toolName}`, { conversationId: context.conversationId });
             callbacks?.onToolCall?.(toolName);
           }
 
@@ -490,21 +438,32 @@ export class ClaraAgent implements AIAgent {
           }
         }
       }
+
       await stream.completed;
-      console.log("fullText:", fullText);
+
       const finalOutput =
         typeof stream.finalOutput === "string" && stream.finalOutput.length > 0
           ? stream.finalOutput
           : fullText;
-      console.log(`Final output: ${finalOutput}`);
+
+      const durationMs = Date.now() - startTime;
+
+      const uniqueTools = Array.from(new Set(toolsUsed));
+      logger.info(`✓ AI (${durationMs}ms): "${finalOutput.slice(0, 180)}${finalOutput.length > 180 ? "…" : ""}"`, {
+        conversationId: context.conversationId,
+        tools: uniqueTools.length > 0 ? uniqueTools : undefined,
+      });
 
       const response: AgentResponse = {
         messageId: `msg-${Date.now()}`,
         content: finalOutput,
         metadata: {
-          model: DEFAULT_MODEL,
-          toolsUsed: Array.from(new Set(toolsUsed)),
-          durationMs: Date.now() - startTime,
+          model: agentInstance === this.technicalAgent ? DEFAULT_MODEL : FAST_MODEL,
+          toolsUsed: uniqueTools,
+          durationMs,
+          state: classificationResult?.theme,
+          classificationConfidence: classificationResult?.confidence,
+          classifierTokens: classificationResult?.classifierTokens,
         },
       };
 
@@ -516,7 +475,7 @@ export class ClaraAgent implements AIAgent {
         const guidance =
           guardrailOutput?.outputInfo?.guidance ??
           guardrailOutput?.guidance ??
-          "I’m focused on field service (HVAC, plumbing, electrical, fire protection). Please ask about the job or equipment you’re working on.";
+          "I'm focused on field service (HVAC, plumbing, electrical, fire protection). Please ask about the job or equipment you're working on.";
         return {
           messageId: `guardrail-${Date.now()}`,
           content: guidance,
@@ -530,11 +489,7 @@ export class ClaraAgent implements AIAgent {
   }
 
   /**
-   * Run the dedicated image analyzer to produce a concise summary for history.
-   */
-  /**
    * Vision-style question using presigned image URLs.
-   * We pass the image URLs in the user message so the model can fetch them.
    */
   async processVisionQuestion(
     question: string,
@@ -542,7 +497,6 @@ export class ClaraAgent implements AIAgent {
     context: AgentContext,
     callbacks?: AgentStreamCallbacks
   ): Promise<AgentResponse> {
-    // Reuse the image-aware path to ensure image_url is present in the payload
     return this.processMessageWithImages(question, imageUrls, context, callbacks);
   }
 }
@@ -564,4 +518,3 @@ export async function shutdownClaraAgent(): Promise<void> {
     claraInstance = null;
   }
 }
- 

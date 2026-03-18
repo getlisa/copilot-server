@@ -1,6 +1,6 @@
 import * as dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 function requireEnv(key: string, defaultValue: string): string {
   return (process.env[key] ?? defaultValue) as string;

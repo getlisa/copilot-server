@@ -286,7 +286,7 @@ export class VoiceController {
       return res.status(400).json({ error: "text is required" });
     }
 
-    console.log("TEXT CHUNK", text);
+    logger.debug("TTS chunk request", { textLength: text.length });
 
     try {
       const resp = await openai.audio.speech.create(

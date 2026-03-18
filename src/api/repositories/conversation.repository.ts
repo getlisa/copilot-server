@@ -140,7 +140,6 @@ export class ConversationRepository {
 
     // Check if conversation exists for this job
     const existing = await this.getByJobIdUniqueAndUserId(data.jobId, data.userId);
-    console.log("existing", existing);
     if (existing) {
       return { conversation: existing, created: false };
     }

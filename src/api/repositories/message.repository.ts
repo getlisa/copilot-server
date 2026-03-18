@@ -20,7 +20,6 @@ export class MessageRepository {
    * Create a new message
    */
   async create(data: CreateMessageInput): Promise<Message> {
-    console.log(`I'm here 1`)
     return prisma.message.create({
       data: {
         ...(data.id && { id: data.id }),

@@ -2,7 +2,7 @@ import { encoding_for_model, get_encoding, TiktokenModel } from "@dqbd/tiktoken"
 import { AgentInputItem } from "@openai/agents";
 import dotenv from "dotenv";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const FALLBACK_MODEL = "cl100k_base";
 

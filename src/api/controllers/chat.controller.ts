@@ -3,7 +3,7 @@ import { conversationRepository } from "../repositories/conversation.repository"
 import { messageRepository } from "../repositories/message.repository";
 import logger from "../../lib/logger";
 import { getClaraAgent } from "../../agent/ClaraAgent";
-import { AgentStreamCallbacks } from "../../types/agent.types";
+import { AgentStreamCallbacks, ClassificationResult } from "../../types/agent.types";
 import { getRecentImagesWithPresignedUrls } from "../../lib/imageAccess";
 import { getPresignedUrlForKey } from "../../lib/s3";
 import prisma from "../../lib/prisma";
@@ -56,11 +56,7 @@ const fetchImagesForConversation = async (conversationId: string, limit?: number
         });
       } else if (att && att.metadata && att.metadata.s3Key) {
         const url = await getPresignedUrlForKey(att.metadata.s3Key);
-        console.log({
-          "att.metadata.s3Key": att.metadata.s3Key,
-          "url": url,
-          
-        })
+        logger.debug("Resolved attachment URL", { s3Key: att.metadata.s3Key });
         images.push({
           id: att.id ?? msg.id,
           url,
@@ -475,6 +471,17 @@ export class ChatController {
       let fullResponse = "";
 
       const callbacks: AgentStreamCallbacks = {
+        onClassification: (result: ClassificationResult) => {
+          res.write(
+            `data: ${JSON.stringify({
+              type: "classification",
+              theme: result.theme,
+              confidence: result.confidence,
+              reasoning: result.reasoning,
+            })}\n\n`
+          );
+          flush();
+        },
         onThinking: () => {
           res.write(`data: ${JSON.stringify({ type: "thinking" })}\n\n`);
           flush();
@@ -489,6 +496,7 @@ export class ChatController {
           flush();
         },
         onError: (error: Error) => {
+          logger.error("Agent error emitted to client", { conversationId, error: error.message });
           res.write(`data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`);
           flush();
         },

@@ -1,7 +1,8 @@
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import dotenv from "dotenv";
-dotenv.config();
+import logger from "./logger";
+dotenv.config({ quiet: true });
 
 const region = process.env.AWS_REGION;
 const bucket = process.env.AWS_S3_BUCKET;
@@ -13,7 +14,7 @@ const MAX_TTL = 60 * 60 * 24 * 7; // S3 presign hard limit: 7 days
 
 if (!bucket) {
   // We keep this non-fatal to allow local dev without S3, but will throw if used without config.
-  console.warn("[s3] S3_BUCKET env var is not set. Uploads will fail until configured.");
+  logger.warn("S3_BUCKET env var is not set — uploads will fail until configured");
 }
 
 export const s3Client = new S3Client({
@@ -110,12 +111,7 @@ export async function getPresignedUrlForKey(
     throw new Error("S3 bucket not configured (S3_BUCKET missing)");
   }
   const normalizedKey = normalizeS3Key(key);
-  console.log({
-    "key": normalizedKey,
-    "expiresInSeconds": expiresInSeconds,
-    "defaultTtl": defaultTtl,
-    "MAX_TTL": MAX_TTL,
-  })
+  logger.debug("Generating presigned URL", { key: normalizedKey, ttl: expiresInSeconds ?? defaultTtl });
   const safeTtl =
     !Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0
       ? defaultTtl

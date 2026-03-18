@@ -7,7 +7,7 @@ import { chatRoute } from "./api/routes/chat.route";
 import { voiceRoute } from "./api/routes/voice.route";
 import logger from "./lib/logger";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 // Enable BigInt JSON serialization (converts to string)
 (BigInt.prototype as any).toJSON = function () {
@@ -23,7 +23,7 @@ app.use(
   cors({
     origin: process.env.ALLOW_ORIGIN,
     credentials: true,
-    allowedHeaders: "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Dev-Bypass, X-User-Id, X-User-Email, X-User-Role, X-Company-Id",
+    allowedHeaders: "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Dev-Bypass, X-User-Id, X-User-Email, X-User-Role, X-Company-Id, X-Device-Timezone",
     preflightContinue: false,
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
   })

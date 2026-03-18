@@ -30,7 +30,7 @@ export async function summarizeImageUrl(imageUrl: string): Promise<StructuredSum
   if (!imageUrl || typeof imageUrl !== "string") {
     return null;
   }
-  console.log("SUMMARY_MODEL:", SUMMARY_MODEL);
+  logger.debug("Image summarization started", { model: SUMMARY_MODEL });
 
   try {
     const response = await openai.responses.create({

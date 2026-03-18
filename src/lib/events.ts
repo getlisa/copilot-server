@@ -33,8 +33,6 @@ export function trackFileEvent(
   properties: BaseFileEventProps = {}
 ) {
   try {
-    console.log("[FileEvent]", event, properties);
-
     logger.info("FileEvent", {
       event,
       properties,
