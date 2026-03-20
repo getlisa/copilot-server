@@ -1,6 +1,26 @@
 // types/agent.types.ts
 
 export type QueryTheme = "greeting" | "job_context" | "technical_query" | "out_of_scope";
+export type TechnicalQueryType = "ambigous" | "incomplete_information" | "complete_information";
+
+export type checklistItem = [
+  {
+    item_0: "Trade Vertical",
+    description: "The trade vertical of the equipment. Example: HVAC, Plumbing, Electrical, or Fire Protection",
+  },
+  {
+    item_1: "Brand",
+    description: "The brand of the equipment",
+  },
+  {
+    item_2: "Type",
+    description: "The type of the equipment",
+  },
+  {
+    item_4: "Model Number",
+    description: "The model number of the equipment",
+  }
+]
 
 export interface ClassificationResult {
   theme: QueryTheme;
@@ -11,6 +31,18 @@ export interface ClassificationResult {
   needsRag: boolean;
   needsWebSearch: boolean;
   needsJobContext: boolean;
+}
+
+export interface TechnicalClassificationResult {
+  queryType: TechnicalQueryType;
+  /** One-sentence summary of why this query type was chosen */
+  queryConfidence: number;
+  /** 0.0 – 1.0 */
+  queryReasoning: string;
+  /** The checklist items that are needed to answer the question */
+  checklistItems: checklistItem[];
+  /** The checklist items that are not needed to answer the question */
+  checklistItemsNotNeeded: checklistItem[];
 }
 
 /**

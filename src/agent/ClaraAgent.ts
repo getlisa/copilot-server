@@ -30,8 +30,8 @@ import { Message } from "../types/conversation.types";
 import { countTokensForMessages } from "../lib/tokenizer";
 import prisma from "../lib/prisma";
 import { getJobContextTool } from "./tools/GetJobContextTool";
-import { classifyQuery } from "./classifier";
-import { find as findTimezone } from "geo-tz";
+import { Classifier } from "./classifier";
+import { technicalManualTool } from "./tools/RagTool";
 
 
 type AgentRunContext = {
@@ -49,6 +49,30 @@ const DEFAULT_MODEL = process.env.OPENAI_AGENT_MODEL ?? "gpt-4o-mini";
 const FAST_MODEL = process.env.OPENAI_FAST_MODEL ?? "gpt-4o-mini";
 const VECTOR_STORE_ID = process.env.VECTOR_STORE_ID;
 const HISTORY_LIMIT = 15;
+const QDRANT_KB_ENABLED = Boolean(
+  process.env.QDRANT_CLUSTER_URL?.trim() && process.env.QDRANT_COLLECTION_NAME?.trim()
+);
+const technicalTools: unknown[] = [];
+
+if (QDRANT_KB_ENABLED) {
+  technicalTools.push(technicalManualTool);
+  logger.info("Technical agent: using Qdrant (technical_manual_tool) for knowledge base search");
+} else if (VECTOR_STORE_ID) {
+  const vectorStoreIds = VECTOR_STORE_ID.split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (vectorStoreIds.length > 0) {
+    technicalTools.push(fileSearchTool(vectorStoreIds));
+    logger.info("Technical agent: using file_search tool for knowledge base search");
+  }
+} else {
+  logger.warn(
+    "No knowledge base configured: set QDRANT_CLUSTER_URL + QDRANT_COLLECTION_NAME for Qdrant, or VECTOR_STORE_ID for OpenAI file search"
+  );
+}
+
+technicalTools.push(webSearchTool({ searchContextSize: "medium" }) as any);
+technicalTools.push(getJobContextTool);
 
 const OUT_OF_SCOPE_RESPONSE =
   "I'm Clara, your field service AI assistant. I'm specialized in HVAC, plumbing, electrical, and fire protection. Please ask me about your current job or any technical field service topics — I'm happy to help!";
@@ -57,6 +81,8 @@ export class ClaraAgent implements AIAgent {
   private greetingAgent: Agent<AgentRunContext>;
   private jobContextAgent: Agent<AgentRunContext>;
   private technicalAgent: Agent<AgentRunContext>;
+  /** Shared classifier + OpenAI client — one per ClaraAgent instance, not per message */
+  private readonly classifier = new Classifier();
   private lastInteractionTs = Date.now();
 
   constructor() {
@@ -152,7 +178,7 @@ export class ClaraAgent implements AIAgent {
 
     // Run classifier and DB history fetch in parallel to minimize latency
     const [classificationResult, history] = await Promise.all([
-      classifyQuery(text),
+      this.classifier.classifyQuery(text),
       this.buildHistory(context.conversationId),
     ]);
 
