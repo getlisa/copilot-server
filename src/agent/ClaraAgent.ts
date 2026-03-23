@@ -57,19 +57,21 @@ const technicalTools: unknown[] = [];
 if (QDRANT_KB_ENABLED) {
   technicalTools.push(technicalManualTool);
   logger.info("Technical agent: using Qdrant (technical_manual_tool) for knowledge base search");
-} else if (VECTOR_STORE_ID) {
-  const vectorStoreIds = VECTOR_STORE_ID.split(",")
-    .map((id) => id.trim())
-    .filter(Boolean);
-  if (vectorStoreIds.length > 0) {
-    technicalTools.push(fileSearchTool(vectorStoreIds));
-    logger.info("Technical agent: using file_search tool for knowledge base search");
-  }
 } else {
   logger.warn(
     "No knowledge base configured: set QDRANT_CLUSTER_URL + QDRANT_COLLECTION_NAME for Qdrant, or VECTOR_STORE_ID for OpenAI file search"
   );
 }
+
+// else if (VECTOR_STORE_ID) {
+//   const vectorStoreIds = VECTOR_STORE_ID.split(",")
+//     .map((id) => id.trim())
+//     .filter(Boolean);
+//   if (vectorStoreIds.length > 0) {
+//     technicalTools.push(fileSearchTool(vectorStoreIds));
+//     logger.info("Technical agent: using file_search tool for knowledge base search");
+//   }
+// }
 
 technicalTools.push(webSearchTool({ searchContextSize: "medium" }) as any);
 technicalTools.push(getJobContextTool);
@@ -123,7 +125,8 @@ export class ClaraAgent implements AIAgent {
       instructions: jobContextSystemPrompt,
       model: FAST_MODEL,
       modelSettings: {
-        topP: 0.8,
+        temperature: 0.6,
+        topP: 0.9,
         maxTokens: 500,
         toolChoice: "required",
         truncation: "auto",
@@ -131,17 +134,19 @@ export class ClaraAgent implements AIAgent {
       tools: [getJobContextTool],
     });
 
-    const technicalTools: (ReturnType<typeof fileSearchTool> | typeof getJobContextTool)[] = [];
-    if (VECTOR_STORE_ID) {
-      const vectorStoreIds = VECTOR_STORE_ID.split(",")
-        .map((id) => id.trim())
-        .filter(Boolean);
-      if (vectorStoreIds.length > 0) {
-        technicalTools.push(fileSearchTool(vectorStoreIds));
-      }
-    }
-    technicalTools.push(webSearchTool({ searchContextSize: "medium" }) as any);
-    technicalTools.push(getJobContextTool);
+    // const technicalTools: (ReturnType<typeof fileSearchTool> | typeof getJobContextTool)[] = [];
+    // if (VECTOR_STORE_ID) {
+    //   const vectorStoreIds = VECTOR_STORE_ID.split(",")
+    //     .map((id) => id.trim())
+    //     .filter(Boolean);
+    //   if (vectorStoreIds.length > 0) {
+    //     technicalTools.push(fileSearchTool(vectorStoreIds));
+    //   }
+    // }
+    // technicalTools.push(webSearchTool({ searchContextSize: "medium" }) as any);
+    // technicalTools.push(getJobContextTool);
+
+    const technicalTools = [getJobContextTool, technicalManualTool, webSearchTool({ searchContextSize: "medium" })];
 
     const technical = new Agent<AgentRunContext>({
       name: "Clara - Technical",

@@ -13,8 +13,8 @@ interface TechnicalManualChunk {
   category: Trade;
   chunk_text: string;
   chunk_type: "text" | "image" | "table";
-  image_s3_urls?: string[];
-  file_s3_url?: string;
+  // image_s3_urls?: string[];
+  file_s3_url: string;
   page_number?: number;
   metadata?: Record<string, unknown>;
 }
@@ -38,22 +38,37 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 export const technicalManualTool = tool({
   name: "technical_manual_tool",
   description:
-    "Search Qdrant for relevant HVAC/Plumbing/Fire/Electrical manual chunks. Returns text plus any related diagram/image S3 URLs.",
+    "Search Qdrant for relevant HVAC/Plumbing/Fire/Electrical manual chunks.",
+  // parameters: z
+  //   .object({
+  //     query: z
+  //       .string()
+  //       .describe('Detailed technical query that includes the brand, model number for accurate search.'),
+  //     // trade: z.enum(["HVAC", "Plumbing", "Fire", "Electrical"]).describe('Determine the trade based on the brand, model, equipment. Example: "I am having this error in my AC system, Indoor-remote controller communication error" -> HVAC'),
+  //   }),
   parameters: z
-    .object({
-      query: z
-        .string()
-        .describe('Detailed technical query (e.g., "Trane XV20i error code 126 troubleshooting")'),
-      trade: z.enum(["HVAC", "Plumbing", "Fire", "Electrical"]).describe('Determine the trade based on the brand, model, equipment. Example: "I am having this error in my AC system, Indoor-remote controller communication error" -> HVAC'),
-    }),
+  .object({
+    brand: z.string().describe('The brand of the equipment.'),
+    model: z.string().describe('The model of the equipment.'),
+    issue: z.string().describe('The issue with the equipment.'),
+  }),
   async execute(
-    { query, trade }: { query: string; trade: Trade },
+    { brand, model, issue }: { brand: string; model: string; issue: string },
     runContext?: { context?: { conversationId?: string; userId?: string } }
   ) {
     const contextInfo = {
       conversationId: runContext?.context?.conversationId,
       userId: runContext?.context?.userId,
     };
+
+    const searchQuery = `Brand: ${brand}, Model: ${model}`;
+    const completeQuery = `${searchQuery}, Issue: ${issue}`;
+    const embeddingModel = process.env.OPENAI_EMBEDDING_MODEL;
+    if (!embeddingModel) {
+      return { error: "OPENAI_EMBEDDING_MODEL is not set" };
+    }
+
+    console.log(`SEARCH QUERY IS: ${searchQuery}`);
 
     const formatError = (error: unknown) => {
       const errObj = error as any;
@@ -71,8 +86,8 @@ export const technicalManualTool = tool({
 
     logger.info("technical_manual_tool invoked", {
       ...contextInfo,
-      queryPreview: query,
-      trade: trade,
+      queryPreview: searchQuery,
+      // trade: trade,
     });
 
     const collection = process.env.QDRANT_COLLECTION_NAME;
@@ -86,9 +101,9 @@ export const technicalManualTool = tool({
       let queryVector: number[] | undefined;
       try {
         const embeddingResponse = await openai.embeddings.create({
-          model: "text-embedding-3-large",
-          input: query,
-          dimensions: 3072,
+          model: embeddingModel || "text-embedding-3-small",
+          input: searchQuery,
+          dimensions: 1536,
         });
         queryVector = embeddingResponse.data?.[0]?.embedding;
       } catch (error) {
@@ -104,11 +119,12 @@ export const technicalManualTool = tool({
       }
 
       // 2) Vector search in Qdrant (filter only when trade provided)
-      const filter = trade
-        ? {
-            must: [{ key: "category", match: { value: trade } }],
-          }
-        : undefined;
+      const filter = undefined;
+      // const filter = trade
+      //   ? {
+      //       must: [{ key: "category", match: { value: trade } }],
+      //     }
+      //   : undefined;
 
       let searchResults: QdrantSearchResult[] = [];
       try {
@@ -126,7 +142,7 @@ export const technicalManualTool = tool({
           ...contextInfo,
           collection,
           filterApplied: Boolean(filter),
-          trade: trade,
+          // trade: trade,
           ...formatError(error),
         });
         return { error: "Qdrant search failed. Check QDRANT credentials/permissions." };
@@ -136,7 +152,7 @@ export const technicalManualTool = tool({
         ...contextInfo,
         collection,
         hits: searchResults.length,
-        trade: trade || "any",
+        // trade: trade || "any",
         topScore: searchResults[0]?.score?.toFixed(3),
       });
 
@@ -150,7 +166,7 @@ export const technicalManualTool = tool({
       try {
         reranked = await cohere.rerank({
           model: "rerank-english-v3.0",
-          query,
+          query: completeQuery,
           documents,
           topN: Math.min(3, documents.length),
         });
@@ -184,37 +200,38 @@ export const technicalManualTool = tool({
       const results = await Promise.all(
         relevantRerankedDocuments.map(async (rerankedDocument) => {
           const point = searchResults[rerankedDocument.index];
-          const rawImages = point.payload?.image_s3_urls ?? [];
-          const rawFileUrl = point.payload?.file_s3_url;
-          const pageNumber = point.payload?.page_number;
+          // const rawImages = point.payload?.image_s3_urls ?? [];
+          const rawFileUrl = point.payload.file_s3_url;
+          const pageNumber = point.payload.page_number ?? undefined;
           const pageNumberString = pageNumber ? `Page ${pageNumber}` : undefined;
-          const imageUrls = rawImages.filter(
-            (url): url is string => typeof url === "string" && url.trim().length > 0
-          );
+          // const imageUrls = rawImages.filter(
+          //   (url): url is string => typeof url === "string" && url.trim().length > 0
+          // );
           const fileUrl =
             typeof rawFileUrl === "string" && rawFileUrl.trim().length > 0
               ? rawFileUrl
               : undefined;
 
-          if (runId && (imageUrls.length > 0 || fileUrl)) {
+          if (runId && fileUrl) {
             recordRagSources(runId, [
               {
                 chunkId: point.payload?.chunk_id,
                 fileUrl,
-                diagrams: imageUrls,
                 trade: point.payload?.category,
               },
             ]);
           }
-
-          return {
+          const documents = [{
             relevance: rerankedDocument.relevanceScore,
             text: point.payload?.chunk_text,
             pageNumber: pageNumberString,
-            diagrams: exposeUrlsToModel ? imageUrls : [],
             fileUrl: exposeUrlsToModel ? fileUrl : undefined,
             trade: point.payload?.category,
-          };
+          }];
+
+          console.log(`DOCUMENTS: ${JSON.stringify(documents, null, 2)}`);
+
+          return documents as any;
         })
       );
 

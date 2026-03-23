@@ -99,7 +99,7 @@ export const getJobContextTool = tool({
           },
         });
 
-        const visitEntries = siblingJobs.map((v) => {
+        const visitEntries = siblingJobs.map((v: any) => {
           const vMeta = (v.meta_data as Record<string, unknown>) ?? {};
           const visitNum = (vMeta.visitNumber as number) ?? 0;
           const techName = v.users
@@ -121,10 +121,10 @@ export const getJobContextTool = tool({
           return { visitNum, techName, ts, status: v.status, desc };
         });
 
-        visitEntries.sort((a, b) => a.visitNum - b.visitNum);
+        visitEntries.sort((a: any, b: any) => a.visitNum - b.visitNum);
 
         const previousVisits = visitEntries.map(
-          (v) => `  - Visit #${v.visitNum}: ${v.techName} | ${v.ts} | ${v.status}${v.desc ? ` | ${v.desc}` : ""}`
+          (v: any) => `  - Visit #${v.visitNum}: ${v.techName} | ${v.ts} | ${v.status}${v.desc ? ` | ${v.desc}` : ""}`
         );
 
         lines.push("");
