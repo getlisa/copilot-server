@@ -38,6 +38,7 @@ Rules:
 - If the user mentions an image or photo for analysis, classify as "technical_query"
 - When in doubt between job_context and technical_query, choose "technical_query"
 - "out_of_scope" only for clearly unrelated topics (sports, cooking, politics, etc.)
+- Short follow-ups that continue a field-service discussion (e.g. "yes", "give me the checklist", "that one", "the AC one") must NOT be "out_of_scope" when recent context is about HVAC, plumbing, electrical, fire protection, installs, or troubleshooting — use "technical_query"
 
 Respond with valid JSON only — no markdown, no extra text:
 {
@@ -134,7 +135,7 @@ export class Classifier{
         messages.push({ role: "user", content: `Recent conversation context:\n${recentContext}` });
         messages.push({ role: "assistant", content: "Got it." });
       }
-
+ 
       messages.push({ role: "user", content: userMessage });
 
       const response = await client.chat.completions.create({

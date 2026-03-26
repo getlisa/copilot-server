@@ -8,6 +8,17 @@ import { getRecentImagesWithPresignedUrls } from "../../lib/imageAccess";
 import { getPresignedUrlForKey } from "../../lib/s3";
 import prisma from "../../lib/prisma";
 
+/** Abort agent/model calls when the client disconnects before the response is fully sent. */
+function abortSignalForHttpRequest(res: Response): AbortSignal {
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) {
+      controller.abort();
+    }
+  });
+  return controller.signal;
+}
+
 // Redact presigned URLs for logging (strip query params)
 const redactUrl = (url: string) => {
   try {
@@ -293,6 +304,7 @@ export class ChatController {
         userId: senderId ? String(senderId) : "user",
         jobId: conversation.jobId ? String(conversation.jobId) : undefined,
         timezone: parseDeviceTimezoneHeader(req.headers["x-device-timezone"]),
+        signal: abortSignalForHttpRequest(res),
       };
 
       const response =
@@ -501,11 +513,6 @@ export class ChatController {
           res.write(`data: ${JSON.stringify({ type: "tool_call", tool: toolName })}\n\n`);
           flush();
         },
-        onError: (error: Error) => {
-          logger.error("Agent error emitted to client", { conversationId, error: error.message });
-          res.write(`data: ${JSON.stringify({ type: "error", error: error.message })}\n\n`);
-          flush();
-        },
       };
 
       // Process with streaming callbacks (vision if images available)
@@ -514,6 +521,7 @@ export class ChatController {
         userId: senderId ? String(senderId) : "user",
         jobId: conversation.jobId ? String(conversation.jobId) : undefined,
         timezone: parseDeviceTimezoneHeader(req.headers["x-device-timezone"]),
+        signal: abortSignalForHttpRequest(res),
       };
 
       const response =
@@ -548,14 +556,17 @@ export class ChatController {
 
       logger.info("Chat stream completed", { conversationId, messageId: aiMessage.id });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       logger.error("Chat stream error", {
         conversationId,
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
       });
 
-      res.write(`data: ${JSON.stringify({ type: "error", error: "Stream failed" })}\n\n`);
-      flush();
-      res.end();
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ type: "error", error: message })}\n\n`);
+        flush();
+        res.end();
+      }
     }
   }
 }

@@ -113,6 +113,8 @@ export interface AgentContext {
   userId: string;
   jobId?: string;
   timezone?: string;
+  /** When the HTTP client disconnects, the agent run should stop (OpenAI `run` `signal`). */
+  signal?: AbortSignal;
   conversationHistory?: ConversationMessage[];
 }
 

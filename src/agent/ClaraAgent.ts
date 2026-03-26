@@ -2,9 +2,11 @@ import {
   Agent,
   AgentInputItem,
   run,
+  RunItem,
   RunItemStreamEvent,
   RunRawModelStreamEvent,
   InputGuardrailTripwireTriggered,
+  ModelBehaviorError,
 } from "@openai/agents";
 import {
   fileSearchTool,
@@ -80,6 +82,9 @@ const OUT_OF_SCOPE_RESPONSE =
   "I'm Clara, your field service AI assistant. I'm specialized in HVAC, plumbing, electrical, and fire protection. Please ask me about your current job or any technical field service topics — I'm happy to help!";
 
 export class ClaraAgent implements AIAgent {
+  private static readonly STREAM_MAX_ATTEMPTS = 3;
+  private static readonly STREAM_RETRY_DELAY_MS = 350;
+
   private greetingAgent: Agent<AgentRunContext>;
   private jobContextAgent: Agent<AgentRunContext>;
   private technicalAgent: Agent<AgentRunContext>;
@@ -181,10 +186,16 @@ export class ClaraAgent implements AIAgent {
       userId: context.userId,
     });
 
-    // Run classifier and DB history fetch in parallel to minimize latency
+    const [recentMessages, profile] = await Promise.all([
+      messageRepository.getLastMessages(context.conversationId, HISTORY_LIMIT),
+      this.getTechnicianProfile(context.conversationId),
+    ]);
+
+    const classifierRecentContext = this.formatClassifierRecentContext(recentMessages, text);
+
     const [classificationResult, history] = await Promise.all([
-      this.classifier.classifyQuery(text),
-      this.buildHistory(context.conversationId),
+      this.classifier.classifyQuery(text, classifierRecentContext),
+      Promise.resolve(this.assembleHistoryFromMessages(recentMessages, profile)),
     ]);
 
     const agent = this.selectAgent(classificationResult.theme);
@@ -291,12 +302,41 @@ export class ClaraAgent implements AIAgent {
     return undefined;
   }
 
-  private async buildHistory(conversationId: string): Promise<AgentInputItem[]> {
-    const [recent, profile] = await Promise.all([
-      messageRepository.getLastMessages(conversationId, HISTORY_LIMIT),
-      this.getTechnicianProfile(conversationId),
-    ]);
+  /**
+   * Builds a short transcript for the query classifier so elliptical follow-ups
+   * ("give me the checklist") route using prior turns, not the latest line alone.
+   */
+  private formatClassifierRecentContext(recent: Message[], currentUserText: string): string | undefined {
+    if (recent.length === 0) return undefined;
 
+    const last = recent[recent.length - 1];
+    const prior =
+      last?.senderType === "USER" && last.content?.trim() === currentUserText.trim()
+        ? recent.slice(0, -1)
+        : recent;
+
+    if (prior.length === 0) return undefined;
+
+    const window = prior.slice(-6);
+    const maxLen = 600;
+    const lines: string[] = [];
+    for (const msg of window) {
+      const role = msg.senderType === "AI" ? "Assistant" : "User";
+      const body = (msg.content ?? "").replace(/\s+/g, " ").trim().slice(0, maxLen);
+      if (body.length > 0) lines.push(`${role}: ${body}`);
+    }
+    return lines.length > 0 ? lines.join("\n") : undefined;
+  }
+
+  private assembleHistoryFromMessages(
+    recent: Message[],
+    profile: {
+      firstName?: string | null;
+      lastName?: string | null;
+      role?: string | null;
+      userId?: bigint | string | null;
+    } | null
+  ): AgentInputItem[] {
     const history: AgentInputItem[] = [];
     if (profile) {
       history.push(this.toTechnicianContextItem(profile));
@@ -490,6 +530,95 @@ export class ClaraAgent implements AIAgent {
     };
   }
 
+  private static async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private collectToolsUsedFromNewItems(newItems: RunItem[]): string[] {
+    const toolsUsed: string[] = [];
+    for (const item of newItems) {
+      const rawItem = (item as { rawItem?: { type?: string; name?: string } }).rawItem as
+        | { type?: string; name?: string }
+        | undefined;
+      if (rawItem?.type === "hosted_tool_call" || rawItem?.type === "function_call") {
+        toolsUsed.push(rawItem.name ?? rawItem.type ?? "tool_call");
+      }
+    }
+    return toolsUsed;
+  }
+
+  private resolveFinalOutputFromStream(stream: { finalOutput?: unknown }, fullText: string): string {
+    const fo = stream.finalOutput;
+    if (typeof fo === "string" && fo.trim().length > 0) {
+      return fo.trim();
+    }
+    return fullText.trim();
+  }
+
+  private isMissingFinalResponseError(error: unknown): boolean {
+    if (error instanceof ModelBehaviorError) {
+      const msg = String((error as Error).message ?? "");
+      return msg.includes("did not produce a final response");
+    }
+    return false;
+  }
+
+  private isAbortError(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const e = error as Error;
+    if (e.name === "AbortError") return true;
+    const msg = String(e.message ?? "");
+    return msg.includes("aborted") || msg.includes("The operation was aborted");
+  }
+
+  private async consumeStreamedRun(
+    stream: AsyncIterable<unknown> & { completed: Promise<void>; finalOutput?: unknown },
+    context: AgentContext,
+    callbacks?: AgentStreamCallbacks
+  ): Promise<{ fullText: string; toolsUsed: string[] }> {
+    let fullText = "";
+    const toolsUsed: string[] = [];
+
+    for await (const event of stream) {
+      const ev = event as { type?: string };
+      if (ev.type === "raw_model_stream_event") {
+        const raw = event as RunRawModelStreamEvent;
+        const data = raw.data as { delta?: string; text?: string; type?: string };
+        const delta = data?.delta ?? data?.text ?? "";
+        const isTextDelta = data?.type === "output_text_delta";
+        if (isTextDelta && delta) {
+          fullText += delta;
+          callbacks?.onTextChunk?.(delta, fullText);
+        }
+      } else if (ev.type === "run_item_stream_event") {
+        const itemEvent = event as RunItemStreamEvent;
+        const rawItem: any = itemEvent.item.rawItem;
+
+        if (rawItem?.type === "hosted_tool_call" || rawItem?.type === "function_call") {
+          const toolName = rawItem.name ?? rawItem.type ?? "tool_call";
+          toolsUsed.push(toolName);
+          logger.info(`🔧 TOOL: ${toolName}`, { conversationId: context.conversationId });
+          callbacks?.onToolCall?.(toolName);
+        }
+
+        if (rawItem?.type === "message" && rawItem?.role === "assistant") {
+          const assistantText = Array.isArray(rawItem.content)
+            ? rawItem.content
+                .filter((c: any) => c?.type === "output_text" && typeof c.text === "string")
+                .map((c: any) => c.text)
+                .join("")
+            : "";
+          if (assistantText && !fullText) {
+            fullText = assistantText;
+          }
+        }
+      }
+    }
+
+    await stream.completed;
+    return { fullText, toolsUsed };
+  }
+
   private async runAgent(
     agentInstance: Agent<AgentRunContext>,
     messages: AgentInputItem[],
@@ -503,96 +632,180 @@ export class ClaraAgent implements AIAgent {
 
     callbacks?.onThinking?.();
 
-    try {
-      const stream = await run(agentInstance, messages, {
-        stream: true,
-        context: { conversationId: context.conversationId, userId: context.userId, timezone: context.timezone },
-      });
+    const runContext = {
+      conversationId: context.conversationId,
+      userId: context.userId,
+      timezone: context.timezone,
+    };
 
-      let fullText = "";
-      const toolsUsed: string[] = [];
+    let lastError: unknown;
 
-      for await (const event of stream) {
-        if (event.type === "raw_model_stream_event") {
-          const raw = event as RunRawModelStreamEvent;
-          const delta = (raw.data as any)?.delta ?? (raw.data as any)?.text ?? "";
-          const isTextDelta = (raw.data as any)?.type === "output_text_delta";
-          if (isTextDelta && delta) {
-            fullText += delta;
-            callbacks?.onTextChunk?.(delta, fullText);
-          }
-        } else if (event.type === "run_item_stream_event") {
-          const itemEvent = event as RunItemStreamEvent;
-          const rawItem: any = itemEvent.item.rawItem;
+    for (let attempt = 1; attempt <= ClaraAgent.STREAM_MAX_ATTEMPTS; attempt++) {
+      const isLastAttempt = attempt === ClaraAgent.STREAM_MAX_ATTEMPTS;
+      const useBufferedRun = isLastAttempt;
 
-          if (rawItem?.type === "hosted_tool_call" || rawItem?.type === "function_call") {
-            const toolName = rawItem.name ?? rawItem.type ?? "tool_call";
-            toolsUsed.push(toolName);
-            logger.info(`🔧 TOOL: ${toolName}`, { conversationId: context.conversationId });
+      try {
+        if (context.signal?.aborted) {
+          throw new Error("Request aborted");
+        }
+
+        if (useBufferedRun) {
+          logger.info("ClaraAgent: non-streaming run (final attempt)", {
+            conversationId: context.conversationId,
+            attempt,
+            agent: agentInstance.name,
+          });
+
+          const result = await run(agentInstance, messages, {
+            stream: false,
+            context: runContext,
+            signal: context.signal,
+          });
+
+          const toolsUsed = this.collectToolsUsedFromNewItems(result.newItems);
+          for (const toolName of toolsUsed) {
             callbacks?.onToolCall?.(toolName);
           }
 
-          if (rawItem?.type === "message" && rawItem?.role === "assistant") {
-            const assistantText = Array.isArray(rawItem.content)
-              ? rawItem.content
-                  .filter((c: any) => c?.type === "output_text" && typeof c.text === "string")
-                  .map((c: any) => c.text)
-                  .join("")
-              : "";
-            if (assistantText && !fullText) {
-              fullText = assistantText;
-            }
+          const fo = result.finalOutput;
+          const finalOutput =
+            typeof fo === "string" && fo.trim().length > 0 ? fo.trim() : "";
+
+          if (finalOutput.length > 0 && callbacks?.onTextChunk) {
+            callbacks.onTextChunk(finalOutput, finalOutput);
           }
+
+          if (!finalOutput) {
+            throw new Error("Agent produced empty output (buffered run)");
+          }
+
+          const durationMs = Date.now() - startTime;
+          const uniqueTools = Array.from(new Set(toolsUsed));
+          logger.info(`✓ AI (${durationMs}ms): "${finalOutput.slice(0, 180)}${finalOutput.length > 180 ? "…" : ""}"`, {
+            conversationId: context.conversationId,
+            tools: uniqueTools.length > 0 ? uniqueTools : undefined,
+          });
+
+          const response: AgentResponse = {
+            messageId: `msg-${Date.now()}`,
+            content: finalOutput,
+            metadata: {
+              model: agentInstance === this.technicalAgent ? DEFAULT_MODEL : FAST_MODEL,
+              toolsUsed: uniqueTools,
+              durationMs,
+              state: classificationResult?.theme,
+              classificationConfidence: classificationResult?.confidence,
+              classifierTokens: classificationResult?.classifierTokens,
+            },
+          };
+
+          callbacks?.onComplete?.(response);
+          return response;
         }
-      }
 
-      await stream.completed;
+        const stream = (await run(agentInstance, messages, {
+          stream: true,
+          context: runContext,
+          signal: context.signal,
+        })) as AsyncIterable<unknown> & { completed: Promise<void>; finalOutput?: unknown };
 
-      const finalOutput =
-        typeof stream.finalOutput === "string" && stream.finalOutput.length > 0
-          ? stream.finalOutput
-          : fullText;
+        const { fullText, toolsUsed } = await this.consumeStreamedRun(stream, context, callbacks);
+        const finalOutput = this.resolveFinalOutputFromStream(stream, fullText);
 
-      const durationMs = Date.now() - startTime;
+        if (!finalOutput) {
+          logger.warn("ClaraAgent: empty output after stream, will retry", {
+            conversationId: context.conversationId,
+            attempt,
+            agent: agentInstance.name,
+            toolsUsedCount: toolsUsed.length,
+            fullTextLen: fullText.length,
+            streamError: (stream as { error?: unknown }).error,
+          });
+          lastError = new Error("Agent produced empty output");
+          if (context.signal?.aborted) {
+            throw lastError;
+          }
+          await ClaraAgent.sleep(ClaraAgent.STREAM_RETRY_DELAY_MS);
+          continue;
+        }
 
-      const uniqueTools = Array.from(new Set(toolsUsed));
-      logger.info(`✓ AI (${durationMs}ms): "${finalOutput.slice(0, 180)}${finalOutput.length > 180 ? "…" : ""}"`, {
-        conversationId: context.conversationId,
-        tools: uniqueTools.length > 0 ? uniqueTools : undefined,
-      });
+        const durationMs = Date.now() - startTime;
+        const uniqueTools = Array.from(new Set(toolsUsed));
+        logger.info(`✓ AI (${durationMs}ms): "${finalOutput.slice(0, 180)}${finalOutput.length > 180 ? "…" : ""}"`, {
+          conversationId: context.conversationId,
+          tools: uniqueTools.length > 0 ? uniqueTools : undefined,
+        });
 
-      const response: AgentResponse = {
-        messageId: `msg-${Date.now()}`,
-        content: finalOutput,
-        metadata: {
-          model: agentInstance === this.technicalAgent ? DEFAULT_MODEL : FAST_MODEL,
-          toolsUsed: uniqueTools,
-          durationMs,
-          state: classificationResult?.theme,
-          classificationConfidence: classificationResult?.confidence,
-          classifierTokens: classificationResult?.classifierTokens,
-        },
-      };
-
-      callbacks?.onComplete?.(response);
-      return response;
-    } catch (error) {
-      if (error instanceof InputGuardrailTripwireTriggered) {
-        const guardrailOutput = (error as any).result?.output ?? (error as any).output ?? {};
-        const guidance =
-          guardrailOutput?.outputInfo?.guidance ??
-          guardrailOutput?.guidance ??
-          "I'm focused on field service (HVAC, plumbing, electrical, fire protection). Please ask about the job or equipment you're working on.";
-        return {
-          messageId: `guardrail-${Date.now()}`,
-          content: guidance,
+        const response: AgentResponse = {
+          messageId: `msg-${Date.now()}`,
+          content: finalOutput,
+          metadata: {
+            model: agentInstance === this.technicalAgent ? DEFAULT_MODEL : FAST_MODEL,
+            toolsUsed: uniqueTools,
+            durationMs,
+            state: classificationResult?.theme,
+            classificationConfidence: classificationResult?.confidence,
+            classifierTokens: classificationResult?.classifierTokens,
+          },
         };
-      }
 
-      logger.error("ClaraAgent processing error", { error });
-      callbacks?.onError?.(error as Error);
-      throw error;
+        callbacks?.onComplete?.(response);
+        return response;
+      } catch (error) {
+        if (error instanceof InputGuardrailTripwireTriggered) {
+          const guardrailOutput = (error as any).result?.output ?? (error as any).output ?? {};
+          const guidance =
+            guardrailOutput?.outputInfo?.guidance ??
+            guardrailOutput?.guidance ??
+            "I'm focused on field service (HVAC, plumbing, electrical, fire protection). Please ask about the job or equipment you're working on.";
+          return {
+            messageId: `guardrail-${Date.now()}`,
+            content: guidance,
+          };
+        }
+
+        if (this.isAbortError(error)) {
+          logger.error("ClaraAgent: run aborted", {
+            conversationId: context.conversationId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+
+        const canRetry =
+          attempt < ClaraAgent.STREAM_MAX_ATTEMPTS &&
+          !context.signal?.aborted &&
+          (this.isMissingFinalResponseError(error) ||
+            (error instanceof Error && error.message === "Agent produced empty output") ||
+            (error instanceof Error && error.message === "Agent produced empty output (buffered run)"));
+
+        if (canRetry) {
+          logger.warn("ClaraAgent: retrying agent run after stream/model failure", {
+            conversationId: context.conversationId,
+            attempt,
+            agent: agentInstance.name,
+            error: error instanceof Error ? error.message : String(error),
+            fullTextPreview: this.isMissingFinalResponseError(error) ? "(missing response_done)" : undefined,
+          });
+          lastError = error;
+          await ClaraAgent.sleep(ClaraAgent.STREAM_RETRY_DELAY_MS);
+          continue;
+        }
+
+        logger.error("ClaraAgent processing error", {
+          error,
+          conversationId: context.conversationId,
+          agent: agentInstance.name,
+        });
+        throw error;
+      }
     }
+
+    logger.error("ClaraAgent: exhausted retries", {
+      conversationId: context.conversationId,
+      lastError: lastError instanceof Error ? lastError.message : String(lastError),
+    });
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   /**
