@@ -7,7 +7,7 @@ const openai = new OpenAI();
 const SUMMARY_MODEL =
   process.env.OPENAI_IMAGE_SUMMARY_MODEL ??
   process.env.IMAGE_SUMMARY_MODEL ??
-  "gpt-4o-mini";
+  "gpt-4.1";
 
 /**
  * Structured image summary format we store with each IMAGE message.

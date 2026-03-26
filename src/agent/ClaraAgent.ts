@@ -45,7 +45,7 @@ type ImageItem = {
   image: string;
 };
 
-const DEFAULT_MODEL = process.env.OPENAI_AGENT_MODEL ?? "gpt-4o-mini";
+const DEFAULT_MODEL = process.env.OPENAI_AGENT_MODEL ?? "gpt-5.4-mini-2026-03-17";
 const FAST_MODEL = process.env.OPENAI_FAST_MODEL ?? "gpt-4o-mini";
 const VECTOR_STORE_ID = process.env.VECTOR_STORE_ID;
 const HISTORY_LIMIT = 15;

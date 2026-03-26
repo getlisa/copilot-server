@@ -39,21 +39,21 @@ export const technicalManualTool = tool({
   name: "technical_manual_tool",
   description:
     "Search Qdrant for relevant HVAC/Plumbing/Fire/Electrical manual chunks.",
-  // parameters: z
-  //   .object({
-  //     query: z
-  //       .string()
-  //       .describe('Detailed technical query that includes the brand, model number for accurate search.'),
-  //     // trade: z.enum(["HVAC", "Plumbing", "Fire", "Electrical"]).describe('Determine the trade based on the brand, model, equipment. Example: "I am having this error in my AC system, Indoor-remote controller communication error" -> HVAC'),
-  //   }),
   parameters: z
-  .object({
-    brand: z.string().describe('The brand of the equipment.'),
-    model: z.string().describe('The model of the equipment.'),
-    issue: z.string().describe('The issue with the equipment.'),
-  }),
+    .object({
+      query: z
+        .string()
+        .describe('Detailed technical query that includes the brand, model number for accurate search.'),
+      // trade: z.enum(["HVAC", "Plumbing", "Fire", "Electrical"]).describe('Determine the trade based on the brand, model, equipment. Example: "I am having this error in my AC system, Indoor-remote controller communication error" -> HVAC'),
+    }),
+  // parameters: z
+  // .object({
+  //   brand: z.string().describe('The brand of the equipment.'),
+  //   model: z.string().describe('The model of the equipment.'),
+  //   issue: z.string().describe('The issue with the equipment.'),
+  // }),
   async execute(
-    { brand, model, issue }: { brand: string; model: string; issue: string },
+    { query }: { query: string },
     runContext?: { context?: { conversationId?: string; userId?: string } }
   ) {
     const contextInfo = {
@@ -61,14 +61,12 @@ export const technicalManualTool = tool({
       userId: runContext?.context?.userId,
     };
 
-    const searchQuery = `Brand: ${brand}, Model: ${model}`;
-    const completeQuery = `${searchQuery}, Issue: ${issue}`;
     const embeddingModel = process.env.OPENAI_EMBEDDING_MODEL;
     if (!embeddingModel) {
       return { error: "OPENAI_EMBEDDING_MODEL is not set" };
     }
 
-    console.log(`SEARCH QUERY IS: ${searchQuery}`);
+    console.log(`SEARCH QUERY IS: ${query}`);
 
     const formatError = (error: unknown) => {
       const errObj = error as any;
@@ -86,7 +84,7 @@ export const technicalManualTool = tool({
 
     logger.info("technical_manual_tool invoked", {
       ...contextInfo,
-      queryPreview: searchQuery,
+      queryPreview: query,
       // trade: trade,
     });
 
@@ -102,7 +100,7 @@ export const technicalManualTool = tool({
       try {
         const embeddingResponse = await openai.embeddings.create({
           model: embeddingModel || "text-embedding-3-small",
-          input: searchQuery,
+          input: query,
           dimensions: 1536,
         });
         queryVector = embeddingResponse.data?.[0]?.embedding;
@@ -156,6 +154,8 @@ export const technicalManualTool = tool({
         topScore: searchResults[0]?.score?.toFixed(3),
       });
 
+      console.log(`=======SEARCH RESULTS========: ${JSON.stringify(searchResults, null, 2)}`);
+
       if (!searchResults || searchResults.length === 0) {
         return { results: [], message: "No results found for the given query." };
       }
@@ -166,7 +166,7 @@ export const technicalManualTool = tool({
       try {
         reranked = await cohere.rerank({
           model: "rerank-english-v3.0",
-          query: completeQuery,
+          query: query,
           documents,
           topN: Math.min(3, documents.length),
         });
@@ -177,6 +177,8 @@ export const technicalManualTool = tool({
         });
         return { error: "Rerank failed. Check Cohere API key/permissions." };
       }
+
+      console.log(`=======RERANKED DOCUMENTS========: ${JSON.stringify(reranked, null, 2)}`);
 
       const relevantRerankedDocuments = [];
       for (let i = 0; i < reranked.results.length; i++) {
@@ -229,7 +231,16 @@ export const technicalManualTool = tool({
             trade: point.payload?.category,
           }];
 
-          console.log(`DOCUMENTS: ${JSON.stringify(documents, null, 2)}`);
+          const debugDocuments = [{
+            relevance: rerankedDocument.relevanceScore,
+            text: point.payload?.chunk_text,
+            pageNumber: pageNumberString,
+            fileUrl: exposeUrlsToModel ? fileUrl : undefined,
+            trade: point.payload?.category,
+            chunkId: point.payload?.chunk_id,
+          }];
+
+          console.log(`=======FINAL DOCUMENTS========: ${JSON.stringify(debugDocuments, null, 2)}`);
 
           return documents as any;
         })
