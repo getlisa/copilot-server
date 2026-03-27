@@ -93,6 +93,7 @@ export interface AgentResponse {
 export interface RagSource {
   chunkId?: string;
   fileUrl?: string;
+  pageNumber?: number;
   diagrams?: string[];
   trade?: string;
 }

@@ -33,14 +33,18 @@ import { Message } from "../types/conversation.types";
 import { countTokensForMessages } from "../lib/tokenizer";
 import prisma from "../lib/prisma";
 import { getJobContextTool } from "./tools/GetJobContextTool";
+import { randomUUID } from "crypto";
 import { Classifier } from "./classifier";
 import { technicalManualTool } from "./tools/RagTool";
+import { consumeRagSources } from "./tools/ragToolSources";
+import { RagSource } from "../types/agent.types";
 
 
 type AgentRunContext = {
   conversationId: string;
   userId: string;
   timezone?: string;
+  runId?: string;
 };
 
 type ImageItem = {
@@ -548,27 +552,36 @@ export class ClaraAgent implements AIAgent {
     return toolsUsed;
   }
 
-  private static readonly CITATION_RE = /\s*citeturn\d+search\d+/g;
+  /** Unicode citation markers used by the Responses API (private-use area). */
+  private static readonly CITE_START = "\uE200";
+
+  /** Matches a complete Unicode citation token: \uE200 … \uE201 */
+  private static readonly UNICODE_CITE_RE = /\uE200[\s\S]*?\uE201/g;
+  /** Fallback: plain-text citation that sometimes leaks in logs/rendering. */
+  private static readonly TEXT_CITE_RE = /\s*citeturn\d+search\d+/g;
+  /** CJK bracket citations (【…】). */
   private static readonly BRACKET_CITE_RE = /\s*【[^】]*】/g;
-  /** Longest possible partial match: " citeturn99search99" = ~21 chars; 25 gives headroom. */
-  private static readonly CITE_BUFFER_SIZE = 25;
-  /** Matches the tail of a string that *could* be the start of a citation token. */
-  private static readonly PARTIAL_CITE_RE = /\s*c(?:i(?:t(?:e(?:t(?:u(?:r(?:n(?:\d*(?:s(?:e(?:a(?:r(?:c(?:h(?:\d*)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?$/;
+  /** REFERENCE_LINK: [label](url) that may leak into the response body. */
+  private static readonly REF_LINK_RE = /\n*\s*REFERENCE_LINK:\s*\[[^\]]+\]\([^)]+\)/g;
+  /** Partial REFERENCE_LINK at the end of a streaming buffer (after a newline). */
+  private static readonly PARTIAL_REF_RE =
+    /\n\s*REF(?:E(?:R(?:E(?:N(?:C(?:E(?:_(?:L(?:I(?:N(?:K(?::(?:\s*(?:\[(?:[^\]]*(?:\](?:\([^)]*)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?$/;
 
   /**
-   * Strip Responses-API auto-citations from a complete (non-streaming) string.
+   * Strip all citation / reference-link variants from a complete string.
    */
   private static stripCitations(text: string): string {
     return text
-      .replace(ClaraAgent.CITATION_RE, "")
+      .replace(ClaraAgent.UNICODE_CITE_RE, "")
+      .replace(ClaraAgent.TEXT_CITE_RE, "")
       .replace(ClaraAgent.BRACKET_CITE_RE, "")
+      .replace(ClaraAgent.REF_LINK_RE, "")
       .trimEnd();
   }
 
   /**
-   * Creates a stateful filter for streaming deltas that buffers the tail so
-   * split citations like "…model. cite" + "turn0search0" are caught.
-   * Call `flush()` when the stream ends to emit any held-back safe text.
+   * Stateful streaming filter that strips citations and REFERENCE_LINK
+   * patterns, buffering partial matches across deltas.
    */
   private static createCitationFilter() {
     let held = "";
@@ -576,27 +589,82 @@ export class ClaraAgent implements AIAgent {
       push(delta: string): string {
         held += delta;
         held = held
-          .replace(ClaraAgent.CITATION_RE, "")
-          .replace(ClaraAgent.BRACKET_CITE_RE, "");
-        const partialMatch = ClaraAgent.PARTIAL_CITE_RE.exec(held);
-        if (partialMatch && partialMatch.index < held.length) {
-          const safe = held.slice(0, partialMatch.index);
-          held = held.slice(partialMatch.index);
+          .replace(ClaraAgent.UNICODE_CITE_RE, "")
+          .replace(ClaraAgent.TEXT_CITE_RE, "")
+          .replace(ClaraAgent.BRACKET_CITE_RE, "")
+          .replace(ClaraAgent.REF_LINK_RE, "");
+
+        // Hold back incomplete Unicode citation
+        const openIdx = held.lastIndexOf(ClaraAgent.CITE_START);
+        if (openIdx !== -1) {
+          const safe = held.slice(0, openIdx);
+          held = held.slice(openIdx);
           return safe;
         }
+
+        // Hold back incomplete REFERENCE_LINK pattern
+        const partialRef = ClaraAgent.PARTIAL_REF_RE.exec(held);
+        if (partialRef && partialRef.index < held.length) {
+          const safe = held.slice(0, partialRef.index);
+          held = held.slice(partialRef.index);
+          return safe;
+        }
+
+        // Also catch "REFERENCE_LINK:" present but [label](url) incomplete
+        const refTagIdx = held.lastIndexOf("REFERENCE_LINK:");
+        if (refTagIdx !== -1) {
+          const tail = held.slice(refTagIdx);
+          if (!/REFERENCE_LINK:\s*\[[^\]]+\]\([^)]+\)/.test(tail)) {
+            const holdFrom = held.lastIndexOf("\n", refTagIdx);
+            const safe = held.slice(0, holdFrom >= 0 ? holdFrom : refTagIdx);
+            held = held.slice(holdFrom >= 0 ? holdFrom : refTagIdx);
+            return safe;
+          }
+        }
+
         const safe = held;
         held = "";
         return safe;
       },
       flush(): string {
-        const rest = held
-          .replace(ClaraAgent.CITATION_RE, "")
-          .replace(ClaraAgent.BRACKET_CITE_RE, "")
-          .trimEnd();
+        const rest = ClaraAgent.stripCitations(held);
         held = "";
         return rest;
       },
     };
+  }
+
+  /**
+   * Build a deduplicated "Sources:" footer from RAG sources.
+   * Groups by fileUrl and merges page numbers.
+   */
+  private static formatSourcesFooter(sources: RagSource[]): string {
+    const byUrl = new Map<string, Set<number>>();
+    for (const s of sources) {
+      if (!s.fileUrl) continue;
+      const existing = byUrl.get(s.fileUrl);
+      if (existing) {
+        if (s.pageNumber != null) existing.add(s.pageNumber);
+      } else {
+        const pages = new Set<number>();
+        if (s.pageNumber != null) pages.add(s.pageNumber);
+        byUrl.set(s.fileUrl, pages);
+      }
+    }
+
+    if (byUrl.size === 0) return "";
+
+    const links: string[] = [];
+    for (const [url, pages] of byUrl) {
+      const sorted = [...pages].sort((a, b) => a - b);
+      let label: string;
+      if (sorted.length === 0) label = "View Source";
+      else if (sorted.length === 1) label = `View Manual - Page ${sorted[0]}`;
+      else label = `View Manual - Pages ${sorted.join(", ")}`;
+      links.push(`- [${label}](${url})`);
+    }
+
+    return `\n\n**Sources:**\n${links.join("\n")}`;
   }
 
   private resolveFinalOutputFromStream(stream: { finalOutput?: unknown }, fullText: string): string {
@@ -692,10 +760,12 @@ export class ClaraAgent implements AIAgent {
 
     callbacks?.onThinking?.();
 
+    const runId = randomUUID();
     const runContext = {
       conversationId: context.conversationId,
       userId: context.userId,
       timezone: context.timezone,
+      runId,
     };
 
     let lastError: unknown;
@@ -728,16 +798,21 @@ export class ClaraAgent implements AIAgent {
           }
 
           const fo = result.finalOutput;
-          const finalOutput = ClaraAgent.stripCitations(
+          let finalOutput = ClaraAgent.stripCitations(
             typeof fo === "string" && fo.trim().length > 0 ? fo.trim() : ""
           );
 
-          if (finalOutput.length > 0 && callbacks?.onTextChunk) {
-            callbacks.onTextChunk(finalOutput, finalOutput);
-          }
-
           if (!finalOutput) {
             throw new Error("Agent produced empty output (buffered run)");
+          }
+
+          // Append deduplicated sources footer
+          const ragSources = consumeRagSources(runId);
+          const sourcesFooter = ClaraAgent.formatSourcesFooter(ragSources);
+          finalOutput = finalOutput + sourcesFooter;
+
+          if (callbacks?.onTextChunk) {
+            callbacks.onTextChunk(finalOutput, finalOutput);
           }
 
           const durationMs = Date.now() - startTime;
@@ -771,7 +846,7 @@ export class ClaraAgent implements AIAgent {
         })) as AsyncIterable<unknown> & { completed: Promise<void>; finalOutput?: unknown };
 
         const { fullText, toolsUsed } = await this.consumeStreamedRun(stream, context, callbacks);
-        const finalOutput = this.resolveFinalOutputFromStream(stream, fullText);
+        let finalOutput = this.resolveFinalOutputFromStream(stream, fullText);
 
         if (!finalOutput) {
           logger.warn("ClaraAgent: empty output after stream, will retry", {
@@ -788,6 +863,14 @@ export class ClaraAgent implements AIAgent {
           }
           await ClaraAgent.sleep(ClaraAgent.STREAM_RETRY_DELAY_MS);
           continue;
+        }
+
+        // Append deduplicated sources footer and stream it as a final chunk
+        const ragSources = consumeRagSources(runId);
+        const sourcesFooter = ClaraAgent.formatSourcesFooter(ragSources);
+        if (sourcesFooter) {
+          finalOutput = finalOutput + sourcesFooter;
+          callbacks?.onTextChunk?.(sourcesFooter, finalOutput);
         }
 
         const durationMs = Date.now() - startTime;

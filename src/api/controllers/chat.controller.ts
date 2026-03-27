@@ -8,11 +8,13 @@ import { getRecentImagesWithPresignedUrls } from "../../lib/imageAccess";
 import { getPresignedUrlForKey } from "../../lib/s3";
 import prisma from "../../lib/prisma";
 
-/** Strip Responses-API auto-citations that leak from the model (e.g. citeturn0search0). */
-const CITE_RE = /\s*citeturn\d+search\d+/g;
+/** Strip Responses-API auto-citations and leaked REFERENCE_LINK patterns. */
+const UNICODE_CITE_RE = /\uE200[\s\S]*?\uE201/g;
+const TEXT_CITE_RE = /\s*citeturn\d+search\d+/g;
 const BRACKET_CITE_RE = /\s*【[^】]*】/g;
+const REF_LINK_RE = /\n*\s*REFERENCE_LINK:\s*\[[^\]]+\]\([^)]+\)/g;
 function stripCitations(text: string): string {
-  return text.replace(CITE_RE, "").replace(BRACKET_CITE_RE, "");
+  return text.replace(UNICODE_CITE_RE, "").replace(TEXT_CITE_RE, "").replace(BRACKET_CITE_RE, "").replace(REF_LINK_RE, "");
 }
 
 /** Abort agent/model calls when the client disconnects before the response is fully sent. */

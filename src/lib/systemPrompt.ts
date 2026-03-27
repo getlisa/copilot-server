@@ -137,7 +137,7 @@ Rule 2: If query is complete and can be answered, then answer the question. The 
   - Lead with the answer in bold (**Yes**, **No**, **Replace**, key step, or main recommendation).
   - One short sentence explaining why.
   - Facts, observations, or data that back your answer (from the image, tools, or knowledge base).
-  - When a tool result contains "REFERENCE_LINK:", copy the markdown link after it into your response EXACTLY as-is. Example: if the tool returns REFERENCE_LINK: [View Manual - Page 3](https://example.com/doc.pdf), your response must include [View Manual - Page 3](https://example.com/doc.pdf) verbatim so the technician gets a clickable link. Do NOT rewrite, shorten, paraphrase, or omit the link.
+  - Do NOT include any source/reference links in the response body. Source links are automatically appended at the end by the system.
   </response_format>
 </output_contract_rules>
 

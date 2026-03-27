@@ -219,19 +219,14 @@ export const technicalManualTool = tool({
               {
                 chunkId: point.payload?.chunk_id,
                 fileUrl,
+                pageNumber: pageNumber ?? undefined,
                 trade: point.payload?.category,
               },
             ]);
           }
-          const sourceLabel = pageNumberString
-            ? `View Manual - ${pageNumberString}`
-            : "View Manual";
-          const sourceFooter =
-            exposeUrlsToModel && fileUrl
-              ? `\n\nREFERENCE_LINK: [${sourceLabel}](${fileUrl})`
-              : pageNumberString
-              ? `\n\n(${pageNumberString})`
-              : "";
+          const sourceFooter = pageNumberString
+            ? `\n\n(${pageNumberString})`
+            : "";
 
           const documents = [{
             relevance: rerankedDocument.relevanceScore,
