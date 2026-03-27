@@ -223,11 +223,19 @@ export const technicalManualTool = tool({
               },
             ]);
           }
+          const sourceLabel = pageNumberString
+            ? `View Manual - ${pageNumberString}`
+            : "View Manual";
+          const sourceFooter =
+            exposeUrlsToModel && fileUrl
+              ? `\n\nREFERENCE_LINK: [${sourceLabel}](${fileUrl})`
+              : pageNumberString
+              ? `\n\n(${pageNumberString})`
+              : "";
+
           const documents = [{
             relevance: rerankedDocument.relevanceScore,
-            text: point.payload?.chunk_text,
-            pageNumber: pageNumberString,
-            fileUrl: exposeUrlsToModel ? fileUrl : undefined,
+            text: `${point.payload?.chunk_text ?? ""}${sourceFooter}`,
             trade: point.payload?.category,
           }];
 

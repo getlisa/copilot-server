@@ -27,6 +27,7 @@ import {
   systemPrompt,
   greetingSystemPrompt,
   jobContextSystemPrompt,
+  generalQuerySystemPrompt,
 } from "../lib/systemPrompt";
 import { Message } from "../types/conversation.types";
 import { countTokensForMessages } from "../lib/tokenizer";
@@ -88,15 +89,17 @@ export class ClaraAgent implements AIAgent {
   private greetingAgent: Agent<AgentRunContext>;
   private jobContextAgent: Agent<AgentRunContext>;
   private technicalAgent: Agent<AgentRunContext>;
+  private generalAgent: Agent<AgentRunContext>;
   /** Shared classifier + OpenAI client — one per ClaraAgent instance, not per message */
   private readonly classifier = new Classifier();
   private lastInteractionTs = Date.now();
 
   constructor() {
-    const { greeting, jobContext, technical } = this.buildAgents();
+    const { greeting, jobContext, technical, general } = this.buildAgents();
     this.greetingAgent = greeting;
     this.jobContextAgent = jobContext;
     this.technicalAgent = technical;
+    this.generalAgent = general;
   }
 
   async init(): Promise<void> {
@@ -111,6 +114,7 @@ export class ClaraAgent implements AIAgent {
     greeting: Agent<AgentRunContext>;
     jobContext: Agent<AgentRunContext>;
     technical: Agent<AgentRunContext>;
+    general: Agent<AgentRunContext>;
   } {
     const greeting = new Agent<AgentRunContext>({
       name: "Clara - Greeting",
@@ -167,7 +171,20 @@ export class ClaraAgent implements AIAgent {
       tools: technicalTools,
     });
 
-    return { greeting, jobContext, technical };
+    const general = new Agent<AgentRunContext>({
+      name: "Clara - General",
+      instructions: generalQuerySystemPrompt,
+      model: FAST_MODEL,
+      modelSettings: {
+        topP: 0.9,
+        maxTokens: 400,
+        toolChoice: "none",
+        truncation: "auto",
+      },
+      tools: [],
+    });
+
+    return { greeting, jobContext, technical, general };
   }
 
   async processMessage(
@@ -207,24 +224,6 @@ export class ClaraAgent implements AIAgent {
 
     callbacks?.onClassification?.(classificationResult);
 
-    // out_of_scope: return static response without calling any LLM agent
-    if (classificationResult.theme === "out_of_scope") {
-      const response: AgentResponse = {
-        messageId: `msg-${Date.now()}`,
-        content: OUT_OF_SCOPE_RESPONSE,
-        metadata: {
-          model: FAST_MODEL,
-          toolsUsed: [],
-          durationMs: Date.now() - startTime,
-          state: "out_of_scope",
-          classificationConfidence: classificationResult.confidence,
-          classifierTokens: classificationResult.classifierTokens,
-        },
-      };
-      callbacks?.onComplete?.(response);
-      return response;
-    }
-
     const messages: AgentInputItem[] = [...history, this.toUserItem(text)] as AgentInputItem[];
 
     return this.runAgent(agent, messages, context, callbacks, classificationResult);
@@ -236,6 +235,8 @@ export class ClaraAgent implements AIAgent {
         return this.greetingAgent;
       case "job_context":
         return this.jobContextAgent;
+      case "general_query":
+        return this.generalAgent;
       case "technical_query":
       default:
         return this.technicalAgent;
@@ -547,12 +548,61 @@ export class ClaraAgent implements AIAgent {
     return toolsUsed;
   }
 
+  private static readonly CITATION_RE = /\s*citeturn\d+search\d+/g;
+  private static readonly BRACKET_CITE_RE = /\s*【[^】]*】/g;
+  /** Longest possible partial match: " citeturn99search99" = ~21 chars; 25 gives headroom. */
+  private static readonly CITE_BUFFER_SIZE = 25;
+  /** Matches the tail of a string that *could* be the start of a citation token. */
+  private static readonly PARTIAL_CITE_RE = /\s*c(?:i(?:t(?:e(?:t(?:u(?:r(?:n(?:\d*(?:s(?:e(?:a(?:r(?:c(?:h(?:\d*)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?$/;
+
+  /**
+   * Strip Responses-API auto-citations from a complete (non-streaming) string.
+   */
+  private static stripCitations(text: string): string {
+    return text
+      .replace(ClaraAgent.CITATION_RE, "")
+      .replace(ClaraAgent.BRACKET_CITE_RE, "")
+      .trimEnd();
+  }
+
+  /**
+   * Creates a stateful filter for streaming deltas that buffers the tail so
+   * split citations like "…model. cite" + "turn0search0" are caught.
+   * Call `flush()` when the stream ends to emit any held-back safe text.
+   */
+  private static createCitationFilter() {
+    let held = "";
+    return {
+      push(delta: string): string {
+        held += delta;
+        held = held
+          .replace(ClaraAgent.CITATION_RE, "")
+          .replace(ClaraAgent.BRACKET_CITE_RE, "");
+        const partialMatch = ClaraAgent.PARTIAL_CITE_RE.exec(held);
+        if (partialMatch && partialMatch.index < held.length) {
+          const safe = held.slice(0, partialMatch.index);
+          held = held.slice(partialMatch.index);
+          return safe;
+        }
+        const safe = held;
+        held = "";
+        return safe;
+      },
+      flush(): string {
+        const rest = held
+          .replace(ClaraAgent.CITATION_RE, "")
+          .replace(ClaraAgent.BRACKET_CITE_RE, "")
+          .trimEnd();
+        held = "";
+        return rest;
+      },
+    };
+  }
+
   private resolveFinalOutputFromStream(stream: { finalOutput?: unknown }, fullText: string): string {
     const fo = stream.finalOutput;
-    if (typeof fo === "string" && fo.trim().length > 0) {
-      return fo.trim();
-    }
-    return fullText.trim();
+    const raw = typeof fo === "string" && fo.trim().length > 0 ? fo.trim() : fullText.trim();
+    return ClaraAgent.stripCitations(raw);
   }
 
   private isMissingFinalResponseError(error: unknown): boolean {
@@ -578,17 +628,21 @@ export class ClaraAgent implements AIAgent {
   ): Promise<{ fullText: string; toolsUsed: string[] }> {
     let fullText = "";
     const toolsUsed: string[] = [];
+    const citeFilter = ClaraAgent.createCitationFilter();
 
     for await (const event of stream) {
       const ev = event as { type?: string };
       if (ev.type === "raw_model_stream_event") {
         const raw = event as RunRawModelStreamEvent;
         const data = raw.data as { delta?: string; text?: string; type?: string };
-        const delta = data?.delta ?? data?.text ?? "";
+        const rawDelta = data?.delta ?? data?.text ?? "";
         const isTextDelta = data?.type === "output_text_delta";
-        if (isTextDelta && delta) {
-          fullText += delta;
-          callbacks?.onTextChunk?.(delta, fullText);
+        if (isTextDelta && rawDelta) {
+          const clean = citeFilter.push(rawDelta);
+          if (clean) {
+            fullText += clean;
+            callbacks?.onTextChunk?.(clean, fullText);
+          }
         }
       } else if (ev.type === "run_item_stream_event") {
         const itemEvent = event as RunItemStreamEvent;
@@ -609,10 +663,16 @@ export class ClaraAgent implements AIAgent {
                 .join("")
             : "";
           if (assistantText && !fullText) {
-            fullText = assistantText;
+            fullText = ClaraAgent.stripCitations(assistantText);
           }
         }
       }
+    }
+
+    const remaining = citeFilter.flush();
+    if (remaining) {
+      fullText += remaining;
+      callbacks?.onTextChunk?.(remaining, fullText);
     }
 
     await stream.completed;
@@ -668,8 +728,9 @@ export class ClaraAgent implements AIAgent {
           }
 
           const fo = result.finalOutput;
-          const finalOutput =
-            typeof fo === "string" && fo.trim().length > 0 ? fo.trim() : "";
+          const finalOutput = ClaraAgent.stripCitations(
+            typeof fo === "string" && fo.trim().length > 0 ? fo.trim() : ""
+          );
 
           if (finalOutput.length > 0 && callbacks?.onTextChunk) {
             callbacks.onTextChunk(finalOutput, finalOutput);

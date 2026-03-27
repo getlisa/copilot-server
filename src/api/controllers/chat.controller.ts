@@ -8,6 +8,13 @@ import { getRecentImagesWithPresignedUrls } from "../../lib/imageAccess";
 import { getPresignedUrlForKey } from "../../lib/s3";
 import prisma from "../../lib/prisma";
 
+/** Strip Responses-API auto-citations that leak from the model (e.g. citeturn0search0). */
+const CITE_RE = /\s*citeturn\d+search\d+/g;
+const BRACKET_CITE_RE = /\s*【[^】]*】/g;
+function stripCitations(text: string): string {
+  return text.replace(CITE_RE, "").replace(BRACKET_CITE_RE, "");
+}
+
 /** Abort agent/model calls when the client disconnects before the response is fully sent. */
 function abortSignalForHttpRequest(res: Response): AbortSignal {
   const controller = new AbortController();
@@ -313,12 +320,12 @@ export class ChatController {
           : imageUrls.length > 0
             ? await agent.processMessageWithImages(content, imageUrls, baseContext)
             : await agent.processMessage(content, baseContext);
-      // 4. Save AI response
+      // 4. Save AI response (strip any leaked citations)
       const aiMessage = await messageRepository.create({
         conversationId,
         senderType: "AI",
         senderId: null,
-        content: response.content,
+        content: stripCitations(response.content).trimEnd(),
         contentType: "TEXT",
         metadata: {
           ...response.metadata,
@@ -505,8 +512,10 @@ export class ChatController {
           flush();
         },
         onTextChunk: (chunk: string, fullText: string) => {
-          fullResponse = fullText;
-          res.write(`data: ${JSON.stringify({ type: "chunk", content: chunk })}\n\n`);
+          const clean = stripCitations(chunk);
+          if (!clean) return;
+          fullResponse = stripCitations(fullText);
+          res.write(`data: ${JSON.stringify({ type: "chunk", content: clean })}\n\n`);
           flush();
         },
         onToolCall: (toolName: string) => {
@@ -531,12 +540,13 @@ export class ChatController {
             ? await agent.processVisionQuestion(content, imageUrls, baseContext, callbacks)
             : await agent.processMessage(content, baseContext, callbacks);
 
-      // Save complete AI response
+      // Save complete AI response (strip any leaked citations)
+      const cleanContent = stripCitations(response.content).trimEnd();
       const aiMessage = await messageRepository.create({
         conversationId,
         senderType: "AI",
         senderId: null,
-        content: response.content,
+        content: cleanContent,
         contentType: "TEXT",
         metadata: {
           ...response.metadata,

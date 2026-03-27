@@ -1,6 +1,6 @@
 // types/agent.types.ts
 
-export type QueryTheme = "greeting" | "job_context" | "technical_query" | "out_of_scope";
+export type QueryTheme = "greeting" | "job_context" | "technical_query" | "general_query";
 export type TechnicalQueryType = "ambigous" | "incomplete_information" | "complete_information";
 
 export type checklistItem = [

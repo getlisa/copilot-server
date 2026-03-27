@@ -5,7 +5,10 @@ import { ClassificationResult, QueryTheme, TechnicalClassificationResult, Techni
 const FAST_MODEL = process.env.OPENAI_FAST_MODEL ?? "gpt-4o-mini";
 
 /** Minimum confidence required to trust the classification; below this falls back to technical_query */
-const CONFIDENCE_THRESHOLD = 0.80;
+const CONFIDENCE_THRESHOLD = 0.8;
+
+/** Off-topic (`general_query`) can be trusted slightly below main threshold so politics/general questions are not routed to the technical agent. */
+const GENERAL_QUERY_CONFIDENCE_THRESHOLD = 0.55;
 
 const CHECKLIST_ITEM = [
   {
@@ -32,13 +35,15 @@ Classify the user message into exactly one theme:
 - "greeting": casual greetings, thanks, how are you, small talk, acknowledgements
 - "job_context": questions about current job details, address, scheduled time, visit number, job status, technician assignment, previous visits
 - "technical_query": troubleshooting, error codes, equipment specs, repair procedures, safety standards, wiring, code compliance, product manuals
-- "out_of_scope": anything completely unrelated to field service industries
+- "general_query": anything completely unrelated to field service industries and related to general topics like sports, cooking, politics, etc.
 
 Rules:
 - If the user mentions an image or photo for analysis, classify as "technical_query"
 - When in doubt between job_context and technical_query, choose "technical_query"
-- "out_of_scope" only for clearly unrelated topics (sports, cooking, politics, etc.)
-- Short follow-ups that continue a field-service discussion (e.g. "yes", "give me the checklist", "that one", "the AC one") must NOT be "out_of_scope" when recent context is about HVAC, plumbing, electrical, fire protection, installs, or troubleshooting — use "technical_query"
+- "general_query" only for clearly unrelated topics and not related to field service industries (e.g. sports, cooking, politics, world news, celebrities).
+- Short follow-ups that continue a field-service discussion (e.g. "yes", "give me the checklist", "that one", "the AC one") must be "technical_query", not "general_query".
+
+Use exactly one of these JSON theme values: "greeting", "job_context", "technical_query", "general_query". Do not use "out_of_scope" or other labels.
 
 Respond with valid JSON only — no markdown, no extra text:
 {
@@ -46,7 +51,7 @@ Respond with valid JSON only — no markdown, no extra text:
   "confidence": <0.0-1.0>,
   "reasoning": "<1 concise sentence>",
   "needsRag": <true|false>,
-  "needsWebSearch": false,
+  "needsWebSearch": <true|false>,
   "needsJobContext": <true|false>
 }`;
 
@@ -84,6 +89,40 @@ const TECHNICAL_FALLBACK_RESULT: TechnicalClassificationResult = {
   checklistItems: [],
   checklistItemsNotNeeded: [],
 };
+
+const VALID_THEMES: QueryTheme[] = ["greeting", "job_context", "technical_query", "general_query"];
+
+/** Strip optional ```json fences so JSON.parse succeeds. */
+function extractJsonPayload(raw: string): string {
+  let s = raw.trim();
+  const fence = /^```(?:json)?\s*([\s\S]*?)```$/im.exec(s);
+  if (fence) {
+    s = fence[1].trim();
+  }
+  return s;
+}
+
+/**
+ * Map model output to a known QueryTheme. Accepts legacy names (e.g. out_of_scope) that would
+ * otherwise trigger invalid-theme fallback → technical_query.
+ */
+function normalizeClassifiedTheme(raw: unknown): QueryTheme | null {
+  if (raw == null || typeof raw !== "string") return null;
+  const key = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+
+  if (key === "out_of_scope" || key === "off_topic" || key === "offtopic" || key === "not_in_scope") {
+    return "general_query";
+  }
+
+  if (VALID_THEMES.includes(key as QueryTheme)) {
+    return key as QueryTheme;
+  }
+
+  return null;
+}
 
 // let openaiClient: OpenAI | null = null;
 
@@ -152,23 +191,24 @@ export class Classifier{
       };
 
       const raw = response.choices[0]?.message?.content ?? "{}";
+      const jsonPayload = extractJsonPayload(raw);
       let parsed: Partial<ClassificationResult>;
 
       try {
-        parsed = JSON.parse(raw);
+        parsed = JSON.parse(jsonPayload);
       } catch {
-        logger.warn("Classifier returned invalid JSON, falling back", { raw });
+        logger.warn("Classifier returned invalid JSON, falling back", { raw: raw.slice(0, 500) });
         return { ...FALLBACK_RESULT, classifierTokens };
       }
 
-      const validThemes: QueryTheme[] = ["greeting", "job_context", "technical_query", "out_of_scope"];
-      if (!parsed.theme || !validThemes.includes(parsed.theme as QueryTheme)) {
-        logger.warn("Classifier returned invalid theme, falling back", { parsed });
+      const normalizedTheme = normalizeClassifiedTheme(parsed.theme as string);
+      if (!normalizedTheme) {
+        logger.warn("Classifier returned invalid theme, falling back", { theme: parsed.theme, parsed });
         return { ...FALLBACK_RESULT, classifierTokens };
       }
 
       const result: ClassificationResult = {
-        theme: parsed.theme as QueryTheme,
+        theme: normalizedTheme,
         confidence: typeof parsed.confidence === "number" ? Math.min(1, Math.max(0, parsed.confidence)) : 0,
         reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : "",
         needsRag: Boolean(parsed.needsRag),
@@ -176,10 +216,14 @@ export class Classifier{
         needsJobContext: Boolean(parsed.needsJobContext),
       };
 
-      if (result.confidence < CONFIDENCE_THRESHOLD) {
+      const minConfidence =
+        result.theme === "general_query" ? GENERAL_QUERY_CONFIDENCE_THRESHOLD : CONFIDENCE_THRESHOLD;
+
+      if (result.confidence < minConfidence) {
         logger.warn("Low classifier confidence, falling back to technical_query", {
           originalTheme: result.theme,
           confidence: result.confidence,
+          minConfidence,
         });
         return {
           ...FALLBACK_RESULT,
