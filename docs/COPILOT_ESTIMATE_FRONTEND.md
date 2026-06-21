@@ -156,7 +156,7 @@ interface EstimateQuote {
 │  Drain + restore + fire wch 4.0h   $75     $300      │  type chip "other"
 ├────────────────────────────────────────────────────┤
 │  Estimated total                          $350       │  total + currency
-│  Demo estimate — confirmed on site                   │  notes
+│  Final pricing confirmed on site                     │  notes
 └────────────────────────────────────────────────────┘
 ```
 
