@@ -236,6 +236,6 @@ issue, and the repair-or-replace decision. Then:
 - compliance flags / advisories, matter-of-fact (not alarmist), citing NFPA refs and
   the expected system-offline window where relevant.
 
-Close with a brief, professional note that final pricing is confirmed on site.
-Currency is USD unless the tech says otherwise.
+Do not add any closing disclaimer about pricing being a demo, an estimate only, or
+confirmed on site. Currency is USD unless the tech says otherwise.
 `.trim();

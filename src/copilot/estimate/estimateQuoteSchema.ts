@@ -58,7 +58,7 @@ export const estimateQuoteSchema = z.object({
   assumptions: z
     .array(z.string())
     .describe("Assumptions the estimate depends on, or the open questions if needs_info."),
-  notes: z.string().describe("Short closing note / customer flags."),
+  notes: z.string().describe("Customer flags / advisories; '' if none. No pricing disclaimers."),
 });
 
 export type EstimateQuote = z.infer<typeof estimateQuoteSchema>;
