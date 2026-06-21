@@ -105,51 +105,41 @@ fall back to rendering the streamed markdown only.
 
 ## The `quote` payload (`EstimateQuote`)
 
-The quote follows the fire-protection estimating structure: **materials and labor
-are split**, **labor is always a range** (low–high), system-offline (drain-down) and
-compliance items are explicit, and `customerNotes` carries the NFPA advisories.
+The card is a **flat summary** — materials and labor are flattened into `lineItems`
+with a single `total`. The full reasoning, labor ranges, and NFPA notes stream in
+the markdown bubble above the card.
+
+> **Readiness:** the `quote` frame is only emitted when the copilot produced a
+> **complete** estimate (real line items + a numeric total). When it is asking
+> follow-up questions instead, **no `quote` frame is sent** — render only the
+> streamed text. (Internally `status` is always `"estimate"` for any quote you
+> receive; `"needs_info"` turns never reach the client.)
 
 ```ts
 interface EstimateQuote {
-  title: string;                  // "Loading Dock — Painted Head Replacement"
+  status: "estimate" | "needs_info"; // you will only ever receive "estimate"
   identifiedEquipment: {
-    brand: string;                // proactively chosen, e.g. "Tyco"
-    model: string;                // e.g. "TY3151 (or equiv.)"
-    category: string;             // "Pendant sprinkler head"
+    brand: string;                   // proactively chosen, e.g. "Tyco"
+    model: string;                   // e.g. "TY3151 (or equiv.)"
+    category: string;                // "Pendant sprinkler head"
     issue: string;
     decision: "repair" | "replace";
-    confidence: number;           // 0..1
+    confidence: number;              // 0..1
   };
-  materials: Array<{
+  lineItems: Array<{
     label: string;
-    partNumber: string;           // or "equiv."; "" if unknown
-    quantity: number;
-    unitPrice: number;
-    amount: number;               // quantity * unitPrice
+    type: "equipment" | "part" | "labor" | "access" | "other";
+    quantity: number;                // qty, or typical hours for labor
+    unitCost: number;                // unit price, or hourly rate for labor
+    amount: number;                  // quantity * unitCost
   }>;
-  labor: Array<{
-    task: string;                 // task + condition
-    hoursLow: number;
-    hoursHigh: number;
-    rate: number;
-    tier: "Tech I" | "Tech II" | "Tech III" | "Tech IV" | "Emergency";
-    amountLow: number;            // hoursLow * rate
-    amountHigh: number;           // hoursHigh * rate
-  }>;
-  accessEquipment: Array<{ label: string; cost: number }>; // [] if none
-  systemOffline: {
-    required: boolean;            // wet system must be drained?
-    estimatedHours: string;       // "3–4 hours"; "" if N/A
-    note: string;                 // "" if N/A
-  };
-  materialsSubtotal: number;
-  laborSubtotalLow: number;
-  laborSubtotalHigh: number;
-  totalLow: number;               // estimate range — show "$low – $high"
-  totalHigh: number;
-  currency: string;               // "USD"
+  laborHours: number;
+  laborRate: number;
+  subtotal: number;
+  total: number;                     // single headline number
+  currency: string;                  // "USD"
   assumptions: string[];
-  customerNotes: string[];        // compliance flags / advisories
+  notes: string;                     // closing note / customer flags + disclaimer
 }
 ```
 
@@ -160,26 +150,19 @@ interface EstimateQuote {
 │  Tyco TY3151 (or equiv.) · pendant · REPLACE (0.9 ✓) │  identifiedEquipment
 │  Painted over — non-compliant                        │  .issue
 ├────────────────────────────────────────────────────┤
-│  MATERIALS                 Qty   Unit     Amount     │  materials
-│  Pendant head 200°F          1   $5.90    $5.90      │
+│  ITEM                       QTY    UNIT    AMOUNT    │  lineItems
+│  Pendant head 200°F          1    $5.90    $5.90     │
+│  Replace head (tile, 10ft)  0.6h   $75     $45       │  type chip "labor"
+│  Drain + restore + fire wch 4.0h   $75     $300      │  type chip "other"
 ├────────────────────────────────────────────────────┤
-│  LABOR                      Hours  Rate    Amount    │  labor (ranges)
-│  Replace head (tile, 10ft)  0.5–0.75 $75  $37–$56    │  · tier chip "Tech II"
-│  Drain + restore + fire wch 3.5–6.0 $75  $262–$450   │  ⟵ systemOffline.required
-├────────────────────────────────────────────────────┤
-│  Materials                            $5.90          │
-│  Labor                          $435 – $651          │
-│  TOTAL ESTIMATE                 $441 – $657          │  totalLow–totalHigh
-├────────────────────────────────────────────────────┤
-│  ⚠ Notes for customer                                │  customerNotes
-│  • Painted heads are non-compliant (NFPA 25)…        │
-│  • System offline ~3–4 hrs; fire watch required      │  systemOffline.note
+│  Estimated total                          $350       │  total + currency
+│  Demo estimate — confirmed on site                   │  notes
 └────────────────────────────────────────────────────┘
 ```
 
-Render `totalLow`–`totalHigh` as the headline range, show a colored `tier` chip on
-each labor line, surface a "System offline" banner when `systemOffline.required`,
-and list `customerNotes` + `assumptions` under collapsible rows.
+Color the `type` chips (equipment/part/labor/access/other) and list `assumptions`
+under a collapsible row. (The streamed markdown still shows the full labor ranges
+and the NFPA "Notes for Customer" block — render that as the message body.)
 
 ---
 
