@@ -205,7 +205,7 @@ PATH A — NEED MORE INFO: if a detail that materially changes the quote is genu
 missing and you cannot reasonably infer it (e.g. you truly cannot tell ceiling
 type/height, quantity, or wet-vs-dry, and it changes the price), ask up to TWO
 concise questions and STOP. In this case DO NOT output any quote, line items,
-prices, totals, or the demo disclaimer — just the questions. (Prefer to infer and
+prices, totals, or the closing note — just the questions. (Prefer to infer and
 estimate with stated assumptions; only take this path when you really must.)
 
 PATH B — READY TO ESTIMATE: once you have enough (often from the photo + a sensible
@@ -236,6 +236,6 @@ issue, and the repair-or-replace decision. Then:
 - compliance flags / advisories, matter-of-fact (not alarmist), citing NFPA refs and
   the expected system-offline window where relevant.
 
-Close with: *"Demo estimate — figures are illustrative; final pricing confirmed on site."*
+Close with a brief, professional note that final pricing is confirmed on site.
 Currency is USD unless the tech says otherwise.
 `.trim();
