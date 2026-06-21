@@ -131,10 +131,14 @@ export async function extractQuote(
           {
             role: "system",
             content:
-              "Convert the field-service cost estimate below into the structured JSON quote. " +
-              "Use only figures present in or directly implied by the estimate. Ensure each " +
-              "line item's amount equals quantity * unitCost, subtotal equals the sum of line " +
-              "item amounts, and total reflects the estimate. Currency is USD unless stated.",
+              "Convert the fire-protection field estimate below into the structured JSON quote. " +
+              "Use only figures present in or directly implied by the estimate. Split materials " +
+              "(fixed price) from labor (always a low-high hours range). For each material, amount " +
+              "= quantity * unitPrice. For each labor line, amountLow = hoursLow * rate and " +
+              "amountHigh = hoursHigh * rate. materialsSubtotal is the sum of material amounts; " +
+              "laborSubtotalLow/High are the sums of labor amounts; totalLow/High include access " +
+              "equipment. Set systemOffline.required true only if the wet system must be drained. " +
+              "Put compliance flags/advisories in customerNotes. Currency is USD unless stated.",
           },
           {
             role: "user",
