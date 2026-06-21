@@ -101,8 +101,17 @@ export class EstimateController {
       );
 
       // 2) Derive the structured quote card (best-effort, text-only).
+      // Only surface a card when the copilot actually produced a complete estimate
+      // — if it's asking follow-up questions, no card is shown until it has enough
+      // info to price the job.
       const quote = await extractQuote(text, content, signal);
-      if (quote) send({ type: "quote", data: quote });
+      const quoteReady =
+        !!quote &&
+        quote.status === "estimate" &&
+        quote.lineItems.length > 0 &&
+        Number.isFinite(quote.total) &&
+        quote.total > 0;
+      if (quoteReady) send({ type: "quote", data: quote });
 
       // Persist the AI message with the quote on metadata.
       const aiMessage = await messageRepository.create({
@@ -115,7 +124,7 @@ export class EstimateController {
           mode: "estimate",
           modelUsed: ESTIMATE_MODEL,
           runId,
-          quote: quote ?? null,
+          quote: quoteReady ? quote : null,
           promptTokens: usage.promptTokens,
           completionTokens: usage.completionTokens,
           totalTokens: usage.totalTokens,

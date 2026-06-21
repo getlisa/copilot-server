@@ -4,41 +4,33 @@ import { z } from "zod";
  * Structured cost-estimate ("quote") schema.
  *
  * DEMO-ONLY. This is the shape the estimate endpoint emits in its `quote` SSE
- * frame and persists on the AI message metadata. It mirrors the quote structure
- * in docs/Clara_FieldCopilot_Agent_Reference.md: materials and labor are split,
- * labor is always a RANGE (low–high), system-offline and compliance items are
- * captured explicitly, and customer-facing flags live in their own block.
+ * frame and persists on the AI message metadata. It is intentionally decoupled
+ * from the live copilot — nothing here is shared with the production prompt or
+ * the LangGraph workflow.
  *
- * It is intentionally decoupled from the live copilot — nothing here is shared
- * with the production prompt or the LangGraph workflow.
+ * `status` gates whether a quote card should be shown at all:
+ *   - "needs_info": the copilot is asking clarifying questions / lacks the detail
+ *     to price the job. NO quote card is rendered for this turn.
+ *   - "estimate": a complete, itemized estimate with a numeric total.
+ *
+ * The card is a flat summary (materials + labor flattened into `lineItems`); the
+ * full reasoning, ranges, and NFPA notes live in the streamed markdown.
  */
 
-export const laborTierEnum = z.enum([
-  "Tech I",
-  "Tech II",
-  "Tech III",
-  "Tech IV",
-  "Emergency",
+export const lineItemTypeEnum = z.enum([
+  "equipment", // a whole replacement unit (e.g. a new sprinkler head)
+  "part", // a component used in a repair (e.g. seal, fusible link)
+  "labor", // technician time
+  "access", // lift / scaffold / access equipment
+  "other", // permits, disposal, drain-down, fire watch, misc.
 ]);
 
-/** A material/part line — fixed price. */
-export const materialItemSchema = z.object({
-  label: z.string().describe("Description, e.g. 'Pendant head 1/2\" NPT 200°F'."),
-  partNumber: z.string().describe("Part number or 'equiv.'; '' if unknown."),
-  quantity: z.number(),
-  unitPrice: z.number(),
-  amount: z.number().describe("quantity * unitPrice."),
-});
-
-/** A labor line — always a range. */
-export const laborItemSchema = z.object({
-  task: z.string().describe("Task + condition, e.g. 'Replace head — suspended tile, 10ft'."),
-  hoursLow: z.number(),
-  hoursHigh: z.number(),
-  rate: z.number().describe("Hourly rate for the tier."),
-  tier: laborTierEnum,
-  amountLow: z.number().describe("hoursLow * rate."),
-  amountHigh: z.number().describe("hoursHigh * rate."),
+export const lineItemSchema = z.object({
+  label: z.string().describe("Human-readable description of this line item."),
+  type: lineItemTypeEnum,
+  quantity: z.number().describe("Quantity, or typical hours (midpoint) for labor."),
+  unitCost: z.number().describe("Cost per unit, or hourly rate for labor."),
+  amount: z.number().describe("quantity * unitCost."),
 });
 
 export const identifiedEquipmentSchema = z.object({
@@ -52,49 +44,39 @@ export const identifiedEquipmentSchema = z.object({
   confidence: z.number().min(0).max(1).describe("Identification confidence (0-1)."),
 });
 
-export const systemOfflineSchema = z.object({
-  required: z.boolean().describe("True if the wet system must be drained for this work."),
-  estimatedHours: z.string().describe("Expected offline window, e.g. '3–4 hours'; '' if N/A."),
-  note: z.string().describe("Short customer-facing note; '' if N/A."),
-});
-
 export const estimateQuoteSchema = z.object({
-  title: z.string().describe("Short job title, e.g. 'Loading Dock — Painted Head Replacement'."),
+  status: z
+    .enum(["estimate", "needs_info"])
+    .describe("'estimate' only if a complete itemized quote with a total exists; else 'needs_info'."),
   identifiedEquipment: identifiedEquipmentSchema,
-  materials: z.array(materialItemSchema).describe("Material/part line items."),
-  labor: z.array(laborItemSchema).describe("Labor line items (each a range)."),
-  accessEquipment: z
-    .array(z.object({ label: z.string(), cost: z.number() }))
-    .describe("Lift/scaffold/equipment rentals; [] if none."),
-  systemOffline: systemOfflineSchema,
-  materialsSubtotal: z.number(),
-  laborSubtotalLow: z.number(),
-  laborSubtotalHigh: z.number(),
-  totalLow: z.number().describe("Low end of the total estimate."),
-  totalHigh: z.number().describe("High end of the total estimate."),
+  lineItems: z.array(lineItemSchema).describe("Flattened materials + labor line items."),
+  laborHours: z.number().describe("Total typical labor hours (midpoint). 0 if needs_info."),
+  laborRate: z.number().describe("Primary labor rate per hour. 0 if needs_info."),
+  subtotal: z.number().describe("Sum of all line item amounts. 0 if needs_info."),
+  total: z.number().describe("Final estimated total (single number). 0 if needs_info."),
   currency: z.string().describe("ISO currency code, e.g. 'USD'."),
-  assumptions: z.array(z.string()).describe("Assumptions the estimate depends on."),
-  customerNotes: z
+  assumptions: z
     .array(z.string())
-    .describe("Compliance flags / advisories for the customer (NFPA references)."),
+    .describe("Assumptions the estimate depends on, or the open questions if needs_info."),
+  notes: z.string().describe("Short closing note / customer flags. Include the demo disclaimer."),
 });
 
 export type EstimateQuote = z.infer<typeof estimateQuoteSchema>;
 
 /**
  * JSON Schema for the OpenAI `response_format: { type: "json_schema" }` structured
- * output. Hand-authored to keep the dependency surface identical to a clean `main`
- * and because OpenAI strict mode requires `additionalProperties: false` and every
- * property listed in `required`.
+ * output. Hand-authored (rather than zod-to-json-schema) to keep the dependency
+ * surface identical to a clean `main` — and because OpenAI strict mode requires
+ * `additionalProperties: false` and every property listed in `required`.
  */
 export const estimateQuoteJsonSchema = {
-  name: "fire_protection_estimate",
+  name: "cost_estimate",
   strict: true,
   schema: {
     type: "object",
     additionalProperties: false,
     properties: {
-      title: { type: "string" },
+      status: { type: "string", enum: ["estimate", "needs_info"] },
       identifiedEquipment: {
         type: "object",
         additionalProperties: false,
@@ -108,87 +90,43 @@ export const estimateQuoteJsonSchema = {
         },
         required: ["brand", "model", "category", "issue", "decision", "confidence"],
       },
-      materials: {
+      lineItems: {
         type: "array",
         items: {
           type: "object",
           additionalProperties: false,
           properties: {
             label: { type: "string" },
-            partNumber: { type: "string" },
+            type: {
+              type: "string",
+              enum: ["equipment", "part", "labor", "access", "other"],
+            },
             quantity: { type: "number" },
-            unitPrice: { type: "number" },
+            unitCost: { type: "number" },
             amount: { type: "number" },
           },
-          required: ["label", "partNumber", "quantity", "unitPrice", "amount"],
+          required: ["label", "type", "quantity", "unitCost", "amount"],
         },
       },
-      labor: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            task: { type: "string" },
-            hoursLow: { type: "number" },
-            hoursHigh: { type: "number" },
-            rate: { type: "number" },
-            tier: {
-              type: "string",
-              enum: ["Tech I", "Tech II", "Tech III", "Tech IV", "Emergency"],
-            },
-            amountLow: { type: "number" },
-            amountHigh: { type: "number" },
-          },
-          required: ["task", "hoursLow", "hoursHigh", "rate", "tier", "amountLow", "amountHigh"],
-        },
-      },
-      accessEquipment: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            label: { type: "string" },
-            cost: { type: "number" },
-          },
-          required: ["label", "cost"],
-        },
-      },
-      systemOffline: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          required: { type: "boolean" },
-          estimatedHours: { type: "string" },
-          note: { type: "string" },
-        },
-        required: ["required", "estimatedHours", "note"],
-      },
-      materialsSubtotal: { type: "number" },
-      laborSubtotalLow: { type: "number" },
-      laborSubtotalHigh: { type: "number" },
-      totalLow: { type: "number" },
-      totalHigh: { type: "number" },
+      laborHours: { type: "number" },
+      laborRate: { type: "number" },
+      subtotal: { type: "number" },
+      total: { type: "number" },
       currency: { type: "string" },
       assumptions: { type: "array", items: { type: "string" } },
-      customerNotes: { type: "array", items: { type: "string" } },
+      notes: { type: "string" },
     },
     required: [
-      "title",
+      "status",
       "identifiedEquipment",
-      "materials",
-      "labor",
-      "accessEquipment",
-      "systemOffline",
-      "materialsSubtotal",
-      "laborSubtotalLow",
-      "laborSubtotalHigh",
-      "totalLow",
-      "totalHigh",
+      "lineItems",
+      "laborHours",
+      "laborRate",
+      "subtotal",
+      "total",
       "currency",
       "assumptions",
-      "customerNotes",
+      "notes",
     ],
   },
 } as const;

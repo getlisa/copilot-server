@@ -131,14 +131,20 @@ export async function extractQuote(
           {
             role: "system",
             content:
-              "Convert the fire-protection field estimate below into the structured JSON quote. " +
-              "Use only figures present in or directly implied by the estimate. Split materials " +
-              "(fixed price) from labor (always a low-high hours range). For each material, amount " +
-              "= quantity * unitPrice. For each labor line, amountLow = hoursLow * rate and " +
-              "amountHigh = hoursHigh * rate. materialsSubtotal is the sum of material amounts; " +
-              "laborSubtotalLow/High are the sums of labor amounts; totalLow/High include access " +
-              "equipment. Set systemOffline.required true only if the wet system must be drained. " +
-              "Put compliance flags/advisories in customerNotes. Currency is USD unless stated.",
+              "Convert the fire-protection field response below into the structured JSON quote.\n" +
+              "FIRST decide `status`:\n" +
+              "- 'needs_info' if the response is only asking clarifying/follow-up questions, or " +
+              "says information is not yet identified / no pricing was provided. In that case set " +
+              "lineItems to [], laborHours/laborRate/subtotal/total to 0, and put the open " +
+              "questions in `assumptions`.\n" +
+              "- 'estimate' ONLY if the response contains a complete itemized quote with real " +
+              "priced line items AND a numeric total.\n" +
+              "When status is 'estimate': flatten materials and labor into `lineItems`. For each " +
+              "material line, type is 'equipment'/'part'/'access'/'other', quantity*unitCost=amount. " +
+              "For each labor line, type='labor', quantity = typical hours (use the midpoint of any " +
+              "range), unitCost = hourly rate, amount = quantity*unitCost. `total` is a single " +
+              "number = sum of all line amounts (use range midpoints). Use only figures present in " +
+              "or directly implied by the response. Currency is USD unless stated.",
           },
           {
             role: "user",
