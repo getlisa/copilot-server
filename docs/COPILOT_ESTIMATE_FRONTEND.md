@@ -105,53 +105,81 @@ fall back to rendering the streamed markdown only.
 
 ## The `quote` payload (`EstimateQuote`)
 
+The quote follows the fire-protection estimating structure: **materials and labor
+are split**, **labor is always a range** (low–high), system-offline (drain-down) and
+compliance items are explicit, and `customerNotes` carries the NFPA advisories.
+
 ```ts
 interface EstimateQuote {
+  title: string;                  // "Loading Dock — Painted Head Replacement"
   identifiedEquipment: {
-    brand: string;
-    model: string;
-    category: string;        // e.g. "Fire sprinkler head"
+    brand: string;                // proactively chosen, e.g. "Tyco"
+    model: string;                // e.g. "TY3151 (or equiv.)"
+    category: string;             // "Pendant sprinkler head"
     issue: string;
     decision: "repair" | "replace";
-    confidence: number;      // 0..1
+    confidence: number;           // 0..1
   };
-  lineItems: Array<{
+  materials: Array<{
     label: string;
-    type: "equipment" | "part" | "labor" | "access" | "other";
-    quantity: number;        // qty, or hours for labor
-    unitCost: number;
-    amount: number;          // quantity * unitCost
+    partNumber: string;           // or "equiv."; "" if unknown
+    quantity: number;
+    unitPrice: number;
+    amount: number;               // quantity * unitPrice
   }>;
-  laborHours: number;
-  laborRate: number;
-  subtotal: number;
-  total: number;
-  currency: string;          // "USD"
+  labor: Array<{
+    task: string;                 // task + condition
+    hoursLow: number;
+    hoursHigh: number;
+    rate: number;
+    tier: "Tech I" | "Tech II" | "Tech III" | "Tech IV" | "Emergency";
+    amountLow: number;            // hoursLow * rate
+    amountHigh: number;           // hoursHigh * rate
+  }>;
+  accessEquipment: Array<{ label: string; cost: number }>; // [] if none
+  systemOffline: {
+    required: boolean;            // wet system must be drained?
+    estimatedHours: string;       // "3–4 hours"; "" if N/A
+    note: string;                 // "" if N/A
+  };
+  materialsSubtotal: number;
+  laborSubtotalLow: number;
+  laborSubtotalHigh: number;
+  totalLow: number;               // estimate range — show "$low – $high"
+  totalHigh: number;
+  currency: string;               // "USD"
   assumptions: string[];
-  notes: string;
+  customerNotes: string[];        // compliance flags / advisories
 }
 ```
 
 ### Suggested quote-card layout
 
 ```
-┌─────────────────────────────────────────────┐
-│  Tyco TY-FRB pendent  ·  REPLACE   (0.86 ✓)   │  identifiedEquipment
-│  Corroded, leaking at the seat                │  .issue
-├─────────────────────────────────────────────┤
-│  Item                     Qty   Unit   Amount │  lineItems table
-│  Tyco TY-FRB head          1    $18     $18   │
-│  Brass escutcheon          1     $6      $6   │
-│  Field labor             0.5h   $95     $48   │
-│  Disposal fee              1    $25     $25   │
-├─────────────────────────────────────────────┤
-│  Estimated total                       $97    │  total + currency
-│  Demo estimate — confirmed on site            │  notes
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│  Tyco TY3151 (or equiv.) · pendant · REPLACE (0.9 ✓) │  identifiedEquipment
+│  Painted over — non-compliant                        │  .issue
+├────────────────────────────────────────────────────┤
+│  MATERIALS                 Qty   Unit     Amount     │  materials
+│  Pendant head 200°F          1   $5.90    $5.90      │
+├────────────────────────────────────────────────────┤
+│  LABOR                      Hours  Rate    Amount    │  labor (ranges)
+│  Replace head (tile, 10ft)  0.5–0.75 $75  $37–$56    │  · tier chip "Tech II"
+│  Drain + restore + fire wch 3.5–6.0 $75  $262–$450   │  ⟵ systemOffline.required
+├────────────────────────────────────────────────────┤
+│  Materials                            $5.90          │
+│  Labor                          $435 – $651          │
+│  TOTAL ESTIMATE                 $441 – $657          │  totalLow–totalHigh
+├────────────────────────────────────────────────────┤
+│  ⚠ Notes for customer                                │  customerNotes
+│  • Painted heads are non-compliant (NFPA 25)…        │
+│  • System offline ~3–4 hrs; fire watch required      │  systemOffline.note
+└────────────────────────────────────────────────────┘
 ```
 
-Color the `type` chips (equipment/part/labor/access/other) and show
-`assumptions` under a collapsible "Assumptions" row.
+Render `totalLow`–`totalHigh` as the headline range, show a colored `tier` chip on
+each labor line, surface a "System offline" banner when `systemOffline.required`,
+and list `customerNotes` + `assumptions` under collapsible rows.
 
 ---
 
@@ -265,8 +293,9 @@ async function send(content: string, photo?: { base64: string; mime: string }) {
 1. Open a conversation. Flip the **Estimate Cost** toggle ON — chip appears.
 2. Tap the camera, snap the sprinkler head, add "leaking at the seat", send.
 3. Watch "Estimating…", then the markdown estimate streams in.
-4. The **quote card** pops with identified **Tyco TY-FRB**, repair-vs-replace,
-   line items, and an **estimated total**.
+4. The **quote card** pops with the identified head (e.g. **Tyco TY3151, or
+   equiv.**), repair-vs-replace, materials + labor ranges, a system-offline banner,
+   and an **estimated total range**.
 5. (Optional) Toggle OFF and ask a normal follow-up to show both modes share the
    same conversation.
 
