@@ -81,25 +81,38 @@ Same framing as the copilot: each frame has a named `event:` line and a JSON
 `data:` payload (the payload repeats the name in its `type` field). Lines starting
 with `:` are heartbeats — ignore them.
 
+> **⚠ Breaking change.** The estimate no longer token-streams the quote as
+> markdown. The old `chunk` event is replaced by a single **`message`** event, and
+> the structured payload is now **either** a `quote` **or** a `questions` event.
+> `done` carries a **`responseKind`** that tells you exactly what the turn produced.
+> Show an "Estimating…" spinner between `thinking` and `message` (no live typing).
+
 ### Event types
 
-| `type`         | Payload                            | Meaning / UI hint                                                    |
-| -------------- | ---------------------------------- | -------------------------------------------------------------------- |
-| `user_message` | `{ data: Message }`                | The persisted user message (with the photo). Render/confirm it.      |
-| `thinking`     | `{}`                               | Estimating started. Show "Estimating…".                              |
-| `chunk`        | `{ content: string }`              | A piece of the markdown estimate. **Append** to the streaming bubble. |
-| `quote`        | `{ data: EstimateQuote }`          | **The structured quote.** Render the quote card (see below).         |
-| `done`         | `{ data: Message }`                | Final persisted AI message (full markdown in `data.content`).        |
-| `error`        | `{ error: string }`                | Something failed. Surface a retry.                                   |
+| `type`         | Payload                                  | UI meaning |
+| -------------- | ---------------------------------------- | ---------- |
+| `user_message` | `{ data: Message }`                      | The persisted user message. Render/confirm it. |
+| `thinking`     | `{}`                                     | Started. Show an "Estimating…" spinner. |
+| `message`      | `{ content: string }`                    | **RENDER** — the assistant's chat-bubble text (concise markdown). |
+| `quote`        | `{ data: EstimateQuote }`                | **FORMAT** — render the quote card. Sent only on a quote turn. |
+| `questions`    | `{ data: { questions: FollowUpQuestion[] } }` | **FORMAT** — render option buttons + "Other". Sent only on a questions turn. |
+| `done`         | `{ data: Message, responseKind }`        | Final state. `responseKind ∈ "quote" \| "questions" \| "message"`. |
+| `error`        | `{ error: string }`                      | Something failed. Surface a retry. |
 
-Typical order:
+**Exactly one** of `quote` / `questions` is sent per turn (or neither, for a plain
+`message`). `done.responseKind` is the authoritative signal of what to show:
 
 ```
-user_message → thinking → chunk* → quote → done
+user_message → thinking → message → [quote | questions]? → done
 ```
 
-`quote` arrives once, just before `done`. It is best-effort: if it's missing,
-fall back to rendering the streamed markdown only.
+- `responseKind: "quote"`     → a `quote` event was sent → render the bubble + card.
+- `responseKind: "questions"` → a `questions` event was sent → render the bubble + buttons.
+- `responseKind: "message"`   → neither → render the bubble only.
+
+The same values are mirrored on `done.data.metadata.responseKind`, with the quote /
+questions in `metadata.quote` / `metadata.questions` — use those to **rehydrate** the
+card/buttons when reloading conversation history.
 
 ---
 
@@ -182,13 +195,64 @@ rows. Render `lineTotal`/`total` as currency.
 
 ---
 
+## The `questions` payload (`FollowUpQuestion`)
+
+When the request is too vague to price, the copilot asks the **required** questions
+instead of guessing. Render each as a prompt with its `options` as tappable buttons,
+plus an always-present **"Other"** entry for typed/spoken free text.
+
+```ts
+interface FollowUpQuestion {
+  id: string;                      // e.g. "ceiling_type"
+  question: string;                // shown above the buttons
+  options: Array<{
+    id: string;
+    label: string;                 // button text, e.g. "Drop tile ceiling"
+    value: string;                 // the answer text to send back when tapped
+  }>;
+  allowOther: boolean;             // always true → show an "Other" (type/speak) entry
+}
+```
+
+```
+┌──────────────────────────────────────────────┐
+│  To price this I need a couple of details:     │  ← message event
+├──────────────────────────────────────────────┤
+│  What type of ceiling?                         │  questions[0].question
+│  [ Open/exposed ] [ Drop tile ] [ Drywall ]    │  options (buttons)
+│  [ ✎ Other ]                                   │  allowOther
+├──────────────────────────────────────────────┤
+│  Roughly how high?                             │  questions[1].question
+│  [ <10ft ] [ 10–14ft ] [ 14–20ft ] [ ✎ Other ]│
+└──────────────────────────────────────────────┘
+```
+
+### Answering — round-trip
+
+Selecting an option (or submitting "Other") sends the answer **back to the same
+endpoint** as `content`, in the **same conversation**. The server keeps short history,
+so the copilot remembers what it asked and returns a `quote` (or asks the next
+required question). Send the option's `value` (or the free text):
+
+```ts
+// one question: just send the chosen value
+streamEstimate(API_BASE, conversationId, { content: chosenOption.value }, handlers);
+
+// multiple questions answered at once: combine into one message
+const answer = answered.map((a) => `${a.question}: ${a.value}`).join("; ");
+streamEstimate(API_BASE, conversationId, { content: answer }, handlers);
+```
+
+---
+
 ## Client example (TypeScript, framework-agnostic)
 
 ```ts
 export interface EstimateEvent {
-  type: "user_message" | "thinking" | "chunk" | "quote" | "done" | "error";
-  data?: any;
-  content?: string;
+  type: "user_message" | "thinking" | "message" | "quote" | "questions" | "done" | "error";
+  data?: any;            // user_message/quote: payload · questions: { questions } · done: Message
+  content?: string;      // message: the chat-bubble text
+  responseKind?: "quote" | "questions" | "message"; // on `done`
   error?: string;
 }
 
@@ -205,9 +269,10 @@ export async function streamEstimate(
   handlers: {
     onUserMessage?: (m: any) => void;
     onThinking?: () => void;
-    onChunk?: (text: string) => void;
+    onMessage?: (text: string) => void;
     onQuote?: (quote: any) => void;
-    onDone?: (message: any) => void;
+    onQuestions?: (questions: any[]) => void;
+    onDone?: (message: any, responseKind: string) => void;
     onError?: (msg: string) => void;
   },
   signal?: AbortSignal
@@ -244,9 +309,10 @@ export async function streamEstimate(
       switch (ev.type) {
         case "user_message": handlers.onUserMessage?.(ev.data); break;
         case "thinking":     handlers.onThinking?.(); break;
-        case "chunk":        handlers.onChunk?.(ev.content ?? ""); break;
+        case "message":      handlers.onMessage?.(ev.content ?? ""); break;
         case "quote":        handlers.onQuote?.(ev.data); break;
-        case "done":         handlers.onDone?.(ev.data); break;
+        case "questions":    handlers.onQuestions?.(ev.data?.questions ?? []); break;
+        case "done":         handlers.onDone?.(ev.data, ev.responseKind ?? "message"); break;
         case "error":        handlers.onError?.(ev.error ?? "Unknown error"); break;
       }
     }
@@ -258,24 +324,28 @@ export async function streamEstimate(
 
 ```tsx
 const [estimateMode, setEstimateMode] = useState(false); // chat-bar toggle
+const [busy, setBusy] = useState(false);                 // show "Estimating…" spinner
 const [text, setText] = useState("");
 const [quote, setQuote] = useState<EstimateQuote | null>(null);
+const [questions, setQuestions] = useState<FollowUpQuestion[] | null>(null);
 const abort = useRef<AbortController>();
 
 async function send(content: string, photo?: { base64: string; mime: string }) {
   abort.current = new AbortController();
 
   if (estimateMode) {
-    setText(""); setQuote(null);
+    setText(""); setQuote(null); setQuestions(null); setBusy(true);
     await streamEstimate(
       API_BASE,
       conversationId,
       { content, imageBase64: photo?.base64, imageMimeType: photo?.mime },
       {
-        onChunk: (t) => setText((p) => p + t),
-        onQuote: (q) => setQuote(q),
-        onDone: (m) => setText(m.content),
-        onError: () => {/* show retry */},
+        onThinking:  () => setBusy(true),
+        onMessage:   (t) => setText(t),         // arrives once (no token streaming)
+        onQuote:     (q) => setQuote(q),         // render the card
+        onQuestions: (qs) => setQuestions(qs),   // render option buttons
+        onDone:      () => setBusy(false),
+        onError:     () => setBusy(false),
       },
       abort.current.signal
     );
@@ -283,6 +353,9 @@ async function send(content: string, photo?: { base64: string; mime: string }) {
     // …normal copilot stream (see COPILOT_FRONTEND.md)…
   }
 }
+
+// Tapping an option (or submitting "Other") just calls send() again with the value:
+function answer(option: { value: string }) { setQuestions(null); send(option.value); }
 ```
 
 ---
@@ -291,7 +364,7 @@ async function send(content: string, photo?: { base64: string; mime: string }) {
 
 1. Open a conversation. Flip the **Estimate Cost** toggle ON — chip appears.
 2. Tap the camera, snap the sprinkler head, add "leaking at the seat", send.
-3. Watch "Estimating…", then the markdown estimate streams in.
+3. Watch "Estimating…", then the assistant message + quote card appear together.
 4. The **quote card** pops with the identified head (e.g. **Tyco TY3151, or
    equiv.**), repair-vs-replace, the priced line items (materials + labor by
    pricebook code), the subtotals, and the **TOTAL QUOTE**.
@@ -304,10 +377,11 @@ async function send(content: string, photo?: { base64: string; mime: string }) {
 
 - **Photo input:** prefer `imageBase64` for a captured photo (no upload round-trip),
   or pass a presigned `imageUrl` if you already upload images. The image is sent to
-  a vision model; only `content` is reused for the structured pass (image isn't re-sent).
+  a single vision call that returns the typed result (message + quote/questions).
 - **Persistence:** the user message and the final AI message are persisted
-  automatically; the AI message carries `metadata.mode = "estimate"` and
-  `metadata.quote`. No extra save call.
+  automatically; the AI message carries `metadata.mode = "estimate"`,
+  `metadata.responseKind`, and `metadata.quote` / `metadata.questions`. No extra
+  save call. Use these to rehydrate the card/buttons in conversation history.
 - **Abort:** abort the `fetch` on unmount/navigation; the server aborts the model
   run when the client disconnects.
 - **Markdown:** the assistant `content` is markdown; render with your existing renderer.
