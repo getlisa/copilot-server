@@ -33,6 +33,9 @@ export const lineItemSchema = z.object({
   unit: z.string().describe("Unit of measure: EA, HR, RL, DAY, CALL, TRIP, MILE, etc."),
   unitPrice: z.number().describe("Unit price / hourly rate from the pricebook."),
   lineTotal: z.number().describe("quantity * unitPrice."),
+  isIdentifiedEquipment: z
+    .boolean()
+    .describe("True on the ONE line that is the photographed/identified equipment (for the PDF thumbnail)."),
 });
 
 export const identifiedEquipmentSchema = z.object({
@@ -157,8 +160,9 @@ export const estimateQuoteJsonSchema = {
             unit: { type: "string" },
             unitPrice: { type: "number" },
             lineTotal: { type: "number" },
+            isIdentifiedEquipment: { type: "boolean" },
           },
-          required: ["sourceSheet", "code", "description", "kind", "quantity", "unit", "unitPrice", "lineTotal"],
+          required: ["sourceSheet", "code", "description", "kind", "quantity", "unit", "unitPrice", "lineTotal", "isIdentifiedEquipment"],
         },
       },
       materialsServicesSubtotal: { type: "number" },

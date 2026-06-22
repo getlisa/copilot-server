@@ -105,7 +105,10 @@ ${FIRE_PROTECTION_PRICEBOOK}
 Fill the quote:
 - identifiedEquipment (carry over what was identified), lineItems (each with
   sourceSheet, code, description, kind 'material'|'service'|'labor'|'rental'|'permit'|
-  'other', quantity, unit, unitPrice, lineTotal), materialsServicesSubtotal (non-labor
+  'other', quantity, unit, unitPrice, lineTotal, isIdentifiedEquipment). Set
+  isIdentifiedEquipment=true on the ONE line item that represents the photographed/
+  identified equipment (the part being repaired/replaced); false on all others.
+  materialsServicesSubtotal (non-labor
   lines), laborSubtotal (labor lines), taxOther (0 unless applicable), total (= the
   three subtotals), currency ("USD"), assumptions, customerNotes (NFPA flags /
   offline window). status = "estimate". Never produce empty lineItems or a zero total.

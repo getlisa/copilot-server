@@ -61,18 +61,13 @@ export async function uploadBufferToS3(params: {
 
 export async function getPresignedUrlForKey(
   key: string,
-  expiresInSeconds: number = defaultTtl
+  expiresInSeconds: number = defaultTtl,
+  opts?: { downloadFilename?: string }
 ): Promise<string> {
   if (!bucket) {
     throw new Error("S3 bucket not configured (S3_BUCKET missing)");
   }
   const normalizedKey = normalizeS3Key(key);
-  console.log({
-    "key": normalizedKey,
-    "expiresInSeconds": expiresInSeconds,
-    "defaultTtl": defaultTtl,
-    "MAX_TTL": MAX_TTL,
-  })
   const safeTtl =
     !Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0
       ? defaultTtl
@@ -81,6 +76,11 @@ export async function getPresignedUrlForKey(
   const command = new GetObjectCommand({
     Bucket: bucket,
     Key: normalizedKey,
+    // When set, browsers/apps download the object (with this filename) instead of
+    // rendering it inline.
+    ...(opts?.downloadFilename
+      ? { ResponseContentDisposition: `attachment; filename="${opts.downloadFilename}"` }
+      : {}),
   });
 
   return getSignedUrl(s3Client, command, { expiresIn: safeTtl });

@@ -103,6 +103,7 @@ with `:` are heartbeats — ignore them.
 | `identified`   | `{ data: IdentifiedEquipment \| null }`  | *(optional)* equipment recognized early (brand/model/category/issue/decision/confidence). Show a preview chip. |
 | `message`      | `{ content: string }`                    | **RENDER** — the assistant's chat-bubble text (concise markdown). |
 | `quote`        | `{ data: EstimateQuote }`                | **FORMAT** — render the quote card. Sent only on a quote turn. |
+| `quote_pdf`    | `{ url, key, filename }`                 | *(quote turns)* the generated quotation PDF — a presigned, downloadable URL. Show a **"Download PDF"** button. |
 | `questions`    | `{ data: { questions: FollowUpQuestion[] } }` | **FORMAT** — render option buttons + "Other". Sent only on a questions turn. |
 | `done`         | `{ data: Message, responseKind }`        | Final state. `responseKind ∈ "quote" \| "questions" \| "message"`. |
 | `error`        | `{ error: string }`                      | Something failed. Surface a retry. |
@@ -113,7 +114,8 @@ with `:` are heartbeats — ignore them.
 ```
 quote turn:     user_message → thinking
   → node:identify(start) → identified → node:identify(end)
-  → node:build_quote(start) → message → quote → node:build_quote(end) → done
+  → node:build_quote(start) → message → quote → node:build_quote(end)
+  → quote_pdf → done
 
 questions turn: user_message → thinking
   → node:identify(start) → identified → node:identify(end)
@@ -212,6 +214,39 @@ rows. Render `lineTotal`/`total` as currency.
 
 ---
 
+## Quotation PDF (`quote_pdf`)
+
+On every quote turn the backend renders a branded PDF quotation (Clara logo, company
++ customer addresses, the line-item table, totals, signature, terms), stores it in
+S3, and emits a **`quote_pdf`** frame with a **presigned, downloadable** URL:
+
+```ts
+// quote_pdf payload
+{ url: string; key: string; filename: string }  // e.g. filename "Estimate-E0ABC12.pdf"
+```
+
+- Show a **"Download PDF"** button that opens `url` (it serves with
+  `Content-Disposition: attachment`, so it downloads rather than rendering inline).
+- If the user uploaded an equipment photo, it's embedded as a **thumbnail on the
+  matching line item** automatically — nothing to do on the client.
+- The key is also persisted at `done.data.metadata.quote.pdfKey` (with
+  `metadata.quote.estimateNumber`).
+
+### Re-download later (presigned URLs expire)
+
+The `quote_pdf` URL is time-limited (~24h). To get a fresh link for a saved quote:
+
+```
+GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
+→ 302 redirect to a fresh presigned download URL
+```
+
+Use the AI message's `id` as `:messageId`. Just point a download/`<a download>` at this
+endpoint — it always re-presigns, so links never go stale. Returns 404 if that message
+has no PDF (e.g. a questions turn).
+
+---
+
 ## The `questions` payload (`FollowUpQuestion`)
 
 When the request is too vague to price, the copilot asks the **required** questions
@@ -266,11 +301,12 @@ streamEstimate(API_BASE, conversationId, { content: answer }, handlers);
 
 ```ts
 export interface EstimateEvent {
-  type: "user_message" | "thinking" | "node" | "identified" | "message" | "quote" | "questions" | "done" | "error";
+  type: "user_message" | "thinking" | "node" | "identified" | "message" | "quote" | "quote_pdf" | "questions" | "done" | "error";
   data?: any;            // user_message/quote/identified: payload · questions: { questions } · done: Message
   content?: string;      // message: the chat-bubble text
   node?: string;         // node: "identify" | "build_quote" | "ask_questions"
   phase?: "start" | "end"; // node: lifecycle phase
+  url?: string; key?: string; filename?: string; // quote_pdf
   responseKind?: "quote" | "questions" | "message"; // on `done`
   error?: string;
 }
@@ -292,6 +328,7 @@ export async function streamEstimate(
     onIdentified?: (equipment: any) => void;                      // optional
     onMessage?: (text: string) => void;
     onQuote?: (quote: any) => void;
+    onQuotePdf?: (pdf: { url: string; key: string; filename: string }) => void;
     onQuestions?: (questions: any[]) => void;
     onDone?: (message: any, responseKind: string) => void;
     onError?: (msg: string) => void;
@@ -334,6 +371,7 @@ export async function streamEstimate(
         case "identified":   handlers.onIdentified?.(ev.data); break;
         case "message":      handlers.onMessage?.(ev.content ?? ""); break;
         case "quote":        handlers.onQuote?.(ev.data); break;
+        case "quote_pdf":    handlers.onQuotePdf?.({ url: ev.url!, key: ev.key!, filename: ev.filename! }); break;
         case "questions":    handlers.onQuestions?.(ev.data?.questions ?? []); break;
         case "done":         handlers.onDone?.(ev.data, ev.responseKind ?? "message"); break;
         case "error":        handlers.onError?.(ev.error ?? "Unknown error"); break;
