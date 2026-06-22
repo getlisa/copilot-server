@@ -19,4 +19,14 @@ estimateRoute.post(
   EstimateController.stream
 );
 
+/**
+ * @route   GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
+ * @desc    Re-presign + 302-redirect to the downloadable quotation PDF for a quote.
+ * @access  Public (for demo)
+ */
+estimateRoute.get(
+  "/:conversationId/estimate/:messageId/pdf",
+  EstimateController.downloadPdf
+);
+
 export { estimateRoute };
