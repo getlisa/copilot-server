@@ -1,36 +1,38 @@
 import { z } from "zod";
 
 /**
- * Structured cost-estimate ("quote") schema.
+ * Structured cost-estimate ("quote") schema — follows the pricebook's quotation
+ * format (docs/EQUIPMENT_DATA.md §6): each line carries its source sheet + code,
+ * and totals split into Materials+Services / Labor / Tax.
  *
- * DEMO-ONLY. This is the shape the estimate endpoint emits in its `quote` SSE
- * frame and persists on the AI message metadata. It is intentionally decoupled
- * from the live copilot — nothing here is shared with the production prompt or
- * the LangGraph workflow.
+ * DEMO/feature note: emitted in the `quote` SSE frame and persisted on the AI
+ * message metadata. Decoupled from the live copilot.
  *
- * `status` gates whether a quote card should be shown at all:
- *   - "needs_info": the copilot is asking clarifying questions / lacks the detail
- *     to price the job. NO quote card is rendered for this turn.
- *   - "estimate": a complete, itemized estimate with a numeric total.
- *
- * The card is a flat summary (materials + labor flattened into `lineItems`); the
- * full reasoning, ranges, and NFPA notes live in the streamed markdown.
+ * `status` gates whether a card is shown:
+ *   - "needs_info": copilot is asking clarifying questions → NO card this turn.
+ *   - "estimate": a complete itemized quotation with a numeric total.
  */
 
-export const lineItemTypeEnum = z.enum([
-  "equipment", // a whole replacement unit (e.g. a new sprinkler head)
-  "part", // a component used in a repair (e.g. seal, fusible link)
-  "labor", // technician time
-  "access", // lift / scaffold / access equipment
-  "other", // permits, disposal, drain-down, fire watch, misc.
+export const lineItemKindEnum = z.enum([
+  "material", // a part from a materials sheet (SP-/FA-/EX-/KH-/VL-/FD-/HG-/HS-/BF-/SH-…)
+  "service", // a flat-fee standard service (SV-…)
+  "labor", // a labor-benchmark task (LH-/LA-/LV-/LK-/LI-/LS-/LT-/LQ-/LBF-/LP-…)
+  "rental", // equipment/access rental (LB-030…036)
+  "permit", // permits / AHJ fees (LB-040…045)
+  "other", // anything else (mark as assumption)
 ]);
 
 export const lineItemSchema = z.object({
-  label: z.string().describe("Human-readable description of this line item."),
-  type: lineItemTypeEnum,
-  quantity: z.number().describe("Quantity, or typical hours (midpoint) for labor."),
-  unitCost: z.number().describe("Cost per unit, or hourly rate for labor."),
-  amount: z.number().describe("quantity * unitCost."),
+  sourceSheet: z
+    .string()
+    .describe("Pricebook sheet, e.g. 'Sprinkler Materials', 'Labor Benchmarks', 'Standard Services'."),
+  code: z.string().describe("Pricebook code, e.g. 'SP-010', 'LH-002', 'SV-002', 'LB-030'."),
+  description: z.string().describe("Human-readable line description."),
+  kind: lineItemKindEnum,
+  quantity: z.number().describe("Quantity, or hours (Mid Hrs) for labor lines."),
+  unit: z.string().describe("Unit of measure: EA, HR, RL, DAY, CALL, TRIP, MILE, etc."),
+  unitPrice: z.number().describe("Unit price / hourly rate from the pricebook."),
+  lineTotal: z.number().describe("quantity * unitPrice."),
 });
 
 export const identifiedEquipmentSchema = z.object({
@@ -47,36 +49,39 @@ export const identifiedEquipmentSchema = z.object({
 export const estimateQuoteSchema = z.object({
   status: z
     .enum(["estimate", "needs_info"])
-    .describe("'estimate' only if a complete itemized quote with a total exists; else 'needs_info'."),
+    .describe("'estimate' only if a complete itemized quotation with a total exists; else 'needs_info'."),
+  title: z.string().describe("Short job title, e.g. 'Loading Dock — Painted Head Replacement'."),
   identifiedEquipment: identifiedEquipmentSchema,
-  lineItems: z.array(lineItemSchema).describe("Flattened materials + labor line items."),
-  laborHours: z.number().describe("Total typical labor hours (midpoint). 0 if needs_info."),
-  laborRate: z.number().describe("Primary labor rate per hour. 0 if needs_info."),
-  subtotal: z.number().describe("Sum of all line item amounts. 0 if needs_info."),
-  total: z.number().describe("Final estimated total (single number). 0 if needs_info."),
+  lineItems: z.array(lineItemSchema).describe("Quotation line items (materials, services, labor, rentals, permits)."),
+  materialsServicesSubtotal: z.number().describe("Sum of all non-labor line totals. 0 if needs_info."),
+  laborSubtotal: z.number().describe("Sum of labor line totals. 0 if needs_info."),
+  taxOther: z.number().describe("Tax / other charges. 0 if none."),
+  total: z.number().describe("TOTAL QUOTE = materials+services + labor + tax. 0 if needs_info."),
   currency: z.string().describe("ISO currency code, e.g. 'USD'."),
   assumptions: z
     .array(z.string())
     .describe("Assumptions the estimate depends on, or the open questions if needs_info."),
-  notes: z.string().describe("Customer flags / advisories; '' if none. No pricing disclaimers."),
+  customerNotes: z
+    .array(z.string())
+    .describe("Compliance flags / advisories for the customer (NFPA references). No pricing disclaimers."),
 });
 
 export type EstimateQuote = z.infer<typeof estimateQuoteSchema>;
 
 /**
  * JSON Schema for the OpenAI `response_format: { type: "json_schema" }` structured
- * output. Hand-authored (rather than zod-to-json-schema) to keep the dependency
- * surface identical to a clean `main` — and because OpenAI strict mode requires
- * `additionalProperties: false` and every property listed in `required`.
+ * output. Hand-authored; strict mode requires `additionalProperties: false` and
+ * every property in `required`.
  */
 export const estimateQuoteJsonSchema = {
-  name: "cost_estimate",
+  name: "fire_protection_quote",
   strict: true,
   schema: {
     type: "object",
     additionalProperties: false,
     properties: {
       status: { type: "string", enum: ["estimate", "needs_info"] },
+      title: { type: "string" },
       identifiedEquipment: {
         type: "object",
         additionalProperties: false,
@@ -96,37 +101,41 @@ export const estimateQuoteJsonSchema = {
           type: "object",
           additionalProperties: false,
           properties: {
-            label: { type: "string" },
-            type: {
+            sourceSheet: { type: "string" },
+            code: { type: "string" },
+            description: { type: "string" },
+            kind: {
               type: "string",
-              enum: ["equipment", "part", "labor", "access", "other"],
+              enum: ["material", "service", "labor", "rental", "permit", "other"],
             },
             quantity: { type: "number" },
-            unitCost: { type: "number" },
-            amount: { type: "number" },
+            unit: { type: "string" },
+            unitPrice: { type: "number" },
+            lineTotal: { type: "number" },
           },
-          required: ["label", "type", "quantity", "unitCost", "amount"],
+          required: ["sourceSheet", "code", "description", "kind", "quantity", "unit", "unitPrice", "lineTotal"],
         },
       },
-      laborHours: { type: "number" },
-      laborRate: { type: "number" },
-      subtotal: { type: "number" },
+      materialsServicesSubtotal: { type: "number" },
+      laborSubtotal: { type: "number" },
+      taxOther: { type: "number" },
       total: { type: "number" },
       currency: { type: "string" },
       assumptions: { type: "array", items: { type: "string" } },
-      notes: { type: "string" },
+      customerNotes: { type: "array", items: { type: "string" } },
     },
     required: [
       "status",
+      "title",
       "identifiedEquipment",
       "lineItems",
-      "laborHours",
-      "laborRate",
-      "subtotal",
+      "materialsServicesSubtotal",
+      "laborSubtotal",
+      "taxOther",
       "total",
       "currency",
       "assumptions",
-      "notes",
+      "customerNotes",
     ],
   },
 } as const;
