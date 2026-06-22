@@ -87,12 +87,20 @@ with `:` are heartbeats — ignore them.
 > `done` carries a **`responseKind`** that tells you exactly what the turn produced.
 > Show an "Estimating…" spinner between `thinking` and `message` (no live typing).
 
+> **Behind the scenes** the estimate runs as a small LangGraph workflow
+> (`identify → build_quote | ask_questions`). It emits additive **`node`** (step
+> progress) and **`identified`** (early equipment ID) frames — purely optional; the
+> core `message`/`quote`/`questions`/`done` contract is unchanged, so you can ignore
+> them or use them for a progress stepper.
+
 ### Event types
 
 | `type`         | Payload                                  | UI meaning |
 | -------------- | ---------------------------------------- | ---------- |
 | `user_message` | `{ data: Message }`                      | The persisted user message. Render/confirm it. |
 | `thinking`     | `{}`                                     | Started. Show an "Estimating…" spinner. |
+| `node`         | `{ node, phase: "start"\|"end" }`        | *(optional)* graph step progress. `node ∈ identify \| build_quote \| ask_questions`. Drive a stepper ("Identifying… → Pricing…"). |
+| `identified`   | `{ data: IdentifiedEquipment \| null }`  | *(optional)* equipment recognized early (brand/model/category/issue/decision/confidence). Show a preview chip. |
 | `message`      | `{ content: string }`                    | **RENDER** — the assistant's chat-bubble text (concise markdown). |
 | `quote`        | `{ data: EstimateQuote }`                | **FORMAT** — render the quote card. Sent only on a quote turn. |
 | `questions`    | `{ data: { questions: FollowUpQuestion[] } }` | **FORMAT** — render option buttons + "Other". Sent only on a questions turn. |
@@ -103,8 +111,17 @@ with `:` are heartbeats — ignore them.
 `message`). `done.responseKind` is the authoritative signal of what to show:
 
 ```
-user_message → thinking → message → [quote | questions]? → done
+quote turn:     user_message → thinking
+  → node:identify(start) → identified → node:identify(end)
+  → node:build_quote(start) → message → quote → node:build_quote(end) → done
+
+questions turn: user_message → thinking
+  → node:identify(start) → identified → node:identify(end)
+  → node:ask_questions(start) → message → questions → node:ask_questions(end) → done
 ```
+
+If you don't want the progress UI, just handle `message` / `quote` / `questions` /
+`done` and ignore `node` / `identified`.
 
 - `responseKind: "quote"`     → a `quote` event was sent → render the bubble + card.
 - `responseKind: "questions"` → a `questions` event was sent → render the bubble + buttons.
@@ -249,9 +266,11 @@ streamEstimate(API_BASE, conversationId, { content: answer }, handlers);
 
 ```ts
 export interface EstimateEvent {
-  type: "user_message" | "thinking" | "message" | "quote" | "questions" | "done" | "error";
-  data?: any;            // user_message/quote: payload · questions: { questions } · done: Message
+  type: "user_message" | "thinking" | "node" | "identified" | "message" | "quote" | "questions" | "done" | "error";
+  data?: any;            // user_message/quote/identified: payload · questions: { questions } · done: Message
   content?: string;      // message: the chat-bubble text
+  node?: string;         // node: "identify" | "build_quote" | "ask_questions"
+  phase?: "start" | "end"; // node: lifecycle phase
   responseKind?: "quote" | "questions" | "message"; // on `done`
   error?: string;
 }
@@ -269,6 +288,8 @@ export async function streamEstimate(
   handlers: {
     onUserMessage?: (m: any) => void;
     onThinking?: () => void;
+    onNode?: (node: string, phase: "start" | "end") => void;     // optional progress
+    onIdentified?: (equipment: any) => void;                      // optional
     onMessage?: (text: string) => void;
     onQuote?: (quote: any) => void;
     onQuestions?: (questions: any[]) => void;
@@ -309,6 +330,8 @@ export async function streamEstimate(
       switch (ev.type) {
         case "user_message": handlers.onUserMessage?.(ev.data); break;
         case "thinking":     handlers.onThinking?.(); break;
+        case "node":         handlers.onNode?.(ev.node!, ev.phase!); break;
+        case "identified":   handlers.onIdentified?.(ev.data); break;
         case "message":      handlers.onMessage?.(ev.content ?? ""); break;
         case "quote":        handlers.onQuote?.(ev.data); break;
         case "questions":    handlers.onQuestions?.(ev.data?.questions ?? []); break;
@@ -376,8 +399,8 @@ function answer(option: { value: string }) { setQuestions(null); send(option.val
 ## Operational notes
 
 - **Photo input:** prefer `imageBase64` for a captured photo (no upload round-trip),
-  or pass a presigned `imageUrl` if you already upload images. The image is sent to
-  a single vision call that returns the typed result (message + quote/questions).
+  or pass a presigned `imageUrl` if you already upload images. The image goes to the
+  `identify` node (vision); pricing happens in a follow-on `build_quote` node.
 - **Persistence:** the user message and the final AI message are persisted
   automatically; the AI message carries `metadata.mode = "estimate"`,
   `metadata.responseKind`, and `metadata.quote` / `metadata.questions`. No extra

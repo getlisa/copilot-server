@@ -3,11 +3,9 @@ import { randomUUID } from "crypto";
 import logger from "../../lib/logger";
 import { conversationRepository } from "../repositories/conversation.repository";
 import { messageRepository } from "../repositories/message.repository";
-import {
-  generateEstimate,
-  type EstimateTurn,
-} from "../../copilot/estimate/estimateService";
-import type { FollowUpQuestion } from "../../copilot/estimate/estimateQuoteSchema";
+import { ZERO_USAGE, addUsage, type EstimateTurn, type Usage } from "../../copilot/estimate/estimateService";
+import type { EstimateQuote, FollowUpQuestion } from "../../copilot/estimate/estimateQuoteSchema";
+import { streamEstimateGraph, ESTIMATE_NODES } from "../../copilot/estimate/graph/graph";
 
 /**
  * DEMO-ONLY estimate-cost controller.
@@ -17,7 +15,12 @@ import type { FollowUpQuestion } from "../../copilot/estimate/estimateQuoteSchem
  * prompt, and LangGraph workflow.
  *
  * POST /api/v1/copilot/:conversationId/estimate/stream
- * SSE frames: user_message · thinking · message · quote · questions · done · error
+ *
+ * Runs the LangGraph estimate workflow (identify → build_quote | ask_questions) and
+ * relays its events as SSE frames:
+ *   user_message · thinking · node · identified · message · quote · questions · done · error
+ *   - `node`      : graph step lifecycle { node, phase: "start"|"end" } (progress)
+ *   - `identified`: the identified equipment (early, from the identify node)
  *   - `message`   : the chat-bubble text to RENDER
  *   - `quote`     : structured quote to FORMAT as a card
  *   - `questions` : structured follow-ups to FORMAT as option buttons
@@ -107,41 +110,71 @@ export class EstimateController {
       const signal = abortSignalForHttpRequest(res);
       const runId = randomUUID();
 
-      // Single structured call: the model returns the typed result (message +
-      // exactly one of quote / questions). No separate markdown stream, so the UI
-      // never receives the estimate twice.
-      const { result, usage } = await generateEstimate(
+      // Run the LangGraph workflow; relay node lifecycle + custom events as SSE.
+      const stream = streamEstimateGraph(
         { content, imageUrl, imageBase64, imageMimeType, history },
         signal
       );
 
-      // Decide what to render. Trust responseKind but validate the quote so the UI
-      // never gets an empty card; downgrade to a plain message if neither holds.
-      const quoteValid =
-        result.quote.status === "estimate" &&
-        result.quote.lineItems.length > 0 &&
-        Number.isFinite(result.quote.total) &&
-        result.quote.total > 0;
-      const hasQuestions = result.questions.length > 0;
+      let message = "";
+      let quote: EstimateQuote | null = null;
+      let questions: FollowUpQuestion[] | null = null;
+      let responseKind: "quote" | "questions" | "message" = "message";
+      let usage: Usage = ZERO_USAGE;
+      const seenNodeFrame = new Set<string>(); // dedup node start/end frames
 
-      let responseKind: "quote" | "questions" | "message";
-      if (result.responseKind === "quote" && quoteValid) responseKind = "quote";
-      else if (result.responseKind === "questions" && hasQuestions) responseKind = "questions";
-      else responseKind = "message";
+      for await (const ev of stream) {
+        const node = (ev as any).metadata?.langgraph_node as string | undefined;
+        const isNodeChain = !!node && ESTIMATE_NODES.has(node) && ev.name === node;
 
-      // 1) The chat-bubble text (render).
-      send({ type: "message", content: result.message });
+        if ((ev.event === "on_chain_start" || ev.event === "on_chain_end") && isNodeChain) {
+          const phase = ev.event === "on_chain_start" ? "start" : "end";
+          const key = `${node}:${phase}`;
+          if (!seenNodeFrame.has(key)) {
+            seenNodeFrame.add(key);
+            logger.info(`Estimate node ${phase}`, { conversationId, runId, node });
+            send({ type: "node", node, phase });
+          }
+          continue;
+        }
 
-      // 2) The formatted payload (card or option buttons).
-      if (responseKind === "quote") send({ type: "quote", data: result.quote });
-      else if (responseKind === "questions") send({ type: "questions", data: { questions: result.questions } });
+        if (ev.event === "on_custom_event") {
+          const data = (ev as any).data;
+          switch (ev.name) {
+            case "usage":
+              usage = addUsage(usage, data as Usage);
+              break;
+            case "identified":
+              logger.info("Estimate event: identified", { conversationId, runId });
+              send({ type: "identified", data });
+              break;
+            case "message":
+              message = data?.content ?? "";
+              logger.info("Estimate event: message", { conversationId, runId });
+              send({ type: "message", content: message });
+              break;
+            case "quote":
+              quote = data as EstimateQuote;
+              responseKind = "quote";
+              logger.info("Estimate event: quote", { conversationId, runId, total: quote?.total });
+              send({ type: "quote", data: quote });
+              break;
+            case "questions":
+              questions = (data?.questions ?? []) as FollowUpQuestion[];
+              responseKind = "questions";
+              logger.info("Estimate event: questions", { conversationId, runId, count: questions.length });
+              send({ type: "questions", data: { questions } });
+              break;
+          }
+        }
+      }
 
       // Persist the AI message. content = the bubble text; for a questions turn append
       // the questions as text so the next turn's history recalls what was asked.
       const persistedContent =
-        responseKind === "questions"
-          ? `${result.message}\n${questionsToText(result.questions)}`.trim()
-          : result.message || "(no response)";
+        responseKind === "questions" && questions
+          ? `${message}\n${questionsToText(questions)}`.trim()
+          : message || "(no response)";
 
       const aiMessage = await messageRepository.create({
         conversationId,
@@ -154,8 +187,8 @@ export class EstimateController {
           responseKind,
           modelUsed: ESTIMATE_MODEL,
           runId,
-          quote: responseKind === "quote" ? result.quote : null,
-          questions: responseKind === "questions" ? result.questions : null,
+          quote: responseKind === "quote" ? quote : null,
+          questions: responseKind === "questions" ? questions : null,
           promptTokens: usage.promptTokens,
           completionTokens: usage.completionTokens,
           totalTokens: usage.totalTokens,

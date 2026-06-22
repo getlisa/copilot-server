@@ -91,24 +91,27 @@ export const followUpQuestionSchema = z.object({
 export type FollowUpQuestion = z.infer<typeof followUpQuestionSchema>;
 
 /**
- * The single typed result of an estimate turn. `responseKind` tells the UI what the
- * turn produced and which payload to render as formatted UI:
- *   - "quote": render `quote` as the card.
- *   - "questions": render `questions` as option buttons.
- *   - "message": just the chat bubble (greeting / non-estimate reply).
- * `message` is always the concise chat-bubble text. Unused payloads are
- * empty/zeroed (strict schema requires every field present).
+ * `identify` node output: what the equipment is and whether we can price it yet.
+ * When canPrice is false, `questions` holds the required follow-ups.
  */
-export const estimateResultSchema = z.object({
-  responseKind: z.enum(["quote", "questions", "message"]),
-  message: z.string().describe("Concise markdown chat-bubble text. No itemized table."),
-  quote: estimateQuoteSchema.describe("Populated when responseKind='quote'; zeroed otherwise."),
+export const identifyResultSchema = z.object({
+  identification: identifiedEquipmentSchema,
+  canPrice: z.boolean().describe("True when there's enough to build a real quote."),
   questions: z
     .array(followUpQuestionSchema)
-    .describe("Populated when responseKind='questions'; [] otherwise."),
+    .describe("Required follow-ups when canPrice is false; [] otherwise."),
+  message: z.string().describe("Concise chat-bubble lead-in. No itemized table."),
 });
 
-export type EstimateResult = z.infer<typeof estimateResultSchema>;
+export type IdentifyResult = z.infer<typeof identifyResultSchema>;
+
+/** `build_quote` node output: the priced quotation + a concise chat-bubble message. */
+export const quoteResultSchema = z.object({
+  quote: estimateQuoteSchema,
+  message: z.string().describe("Concise chat-bubble lead-in incl. the headline total."),
+});
+
+export type QuoteResult = z.infer<typeof quoteResultSchema>;
 
 /**
  * JSON Schema for the OpenAI `response_format: { type: "json_schema" }` structured
@@ -182,48 +185,59 @@ export const estimateQuoteJsonSchema = {
   },
 } as const;
 
-/**
- * Strict JSON Schema for the single structured estimate turn — wraps the quote
- * schema and adds responseKind / message / questions. Reuses the quote object
- * schema above so the two never drift.
- */
-export const estimateResultJsonSchema = {
-  name: "estimate_result",
+/** Strict JSON Schema for one follow-up question (reused by the identify result). */
+const followUpQuestionJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    id: { type: "string" },
+    question: { type: "string" },
+    options: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          label: { type: "string" },
+          value: { type: "string" },
+        },
+        required: ["id", "label", "value"],
+      },
+    },
+    allowOther: { type: "boolean" },
+  },
+  required: ["id", "question", "options", "allowOther"],
+} as const;
+
+/** Strict JSON Schema for the `identify` node output. Reuses the equipment schema. */
+export const identifyResultJsonSchema = {
+  name: "identify_result",
   strict: true,
   schema: {
     type: "object",
     additionalProperties: false,
     properties: {
-      responseKind: { type: "string", enum: ["quote", "questions", "message"] },
+      identification: estimateQuoteJsonSchema.schema.properties.identifiedEquipment,
+      canPrice: { type: "boolean" },
+      questions: { type: "array", items: followUpQuestionJsonSchema },
       message: { type: "string" },
-      quote: estimateQuoteJsonSchema.schema,
-      questions: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            id: { type: "string" },
-            question: { type: "string" },
-            options: {
-              type: "array",
-              items: {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  id: { type: "string" },
-                  label: { type: "string" },
-                  value: { type: "string" },
-                },
-                required: ["id", "label", "value"],
-              },
-            },
-            allowOther: { type: "boolean" },
-          },
-          required: ["id", "question", "options", "allowOther"],
-        },
-      },
     },
-    required: ["responseKind", "message", "quote", "questions"],
+    required: ["identification", "canPrice", "questions", "message"],
+  },
+} as const;
+
+/** Strict JSON Schema for the `build_quote` node output. Reuses the quote schema. */
+export const quoteResultJsonSchema = {
+  name: "quote_result",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      quote: estimateQuoteJsonSchema.schema,
+      message: { type: "string" },
+    },
+    required: ["quote", "message"],
   },
 } as const;

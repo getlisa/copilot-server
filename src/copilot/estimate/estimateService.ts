@@ -1,28 +1,17 @@
 import OpenAI from "openai";
 import logger from "../../lib/logger";
-import { ESTIMATE_SYSTEM_PROMPT } from "./estimatePrompt";
-import {
-  estimateResultJsonSchema,
-  estimateResultSchema,
-  type EstimateResult,
-} from "./estimateQuoteSchema";
 
 /**
- * DEMO-ONLY estimate engine. Built directly on the `openai` SDK (no LangChain,
- * no copilot graph) so it stands alone and runs on a clean `main`. It mirrors the
- * vision pattern in `src/lib/imageSummary.ts`.
- *
- * A single vision + structured-output call returns the typed `EstimateResult`
- * (`responseKind` + `message` + `quote` + `questions`). The controller maps that
- * to SSE frames — there is no separate markdown stream, so the UI never receives
- * the estimate twice.
+ * Shared OpenAI plumbing for the estimate LangGraph nodes. Each node calls
+ * `callStructured` with its own system prompt + strict json_schema and validates
+ * the result with its zod schema. Built on the raw `openai` SDK (no @langchain/openai)
+ * so the node layer stays dependency-light; the graph wiring lives in ./graph.
  */
 
 const openai = new OpenAI();
 
-// Vision- and json_schema-capable model. Falls back through the same chain the
-// rest of the app uses, defaulting to a current multimodal model.
-const ESTIMATE_MODEL =
+// Vision- and json_schema-capable model. Same resolution as the rest of the app.
+export const ESTIMATE_MODEL =
   process.env.ESTIMATE_MODEL || process.env.OPENAI_AGENT_MODEL || "gpt-4o";
 
 export interface EstimateTurn {
@@ -30,7 +19,7 @@ export interface EstimateTurn {
   content: string;
 }
 
-export interface GenerateEstimateInput {
+export interface EstimateInput {
   content?: string;
   imageUrl?: string;
   imageBase64?: string;
@@ -38,17 +27,24 @@ export interface GenerateEstimateInput {
   history?: EstimateTurn[];
 }
 
-export interface GenerateEstimateResult {
-  result: EstimateResult;
-  usage: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
+export interface Usage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export const ZERO_USAGE: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+
+export function addUsage(a: Usage, b: Usage): Usage {
+  return {
+    promptTokens: a.promptTokens + b.promptTokens,
+    completionTokens: a.completionTokens + b.completionTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
   };
 }
 
-/** Build the multimodal user content (text + optional image) for the turn. */
-function buildUserContent(input: GenerateEstimateInput): any {
+/** Build the multimodal user content (text + optional image) for a turn. */
+export function buildUserContent(input: EstimateInput): any {
   const text =
     input.content?.trim() ||
     "Identify the part in this photo, decide repair vs. replace, and give me a cost estimate.";
@@ -68,77 +64,47 @@ function buildUserContent(input: GenerateEstimateInput): any {
 }
 
 /**
- * Run the estimator once and return the typed result. The model decides
- * `responseKind` ("quote" | "questions" | "message") and fills the matching
- * payload; the others are left empty/zeroed.
+ * One structured (json_schema) chat-completion call. Returns the parsed JSON
+ * (unvalidated — the caller validates with its zod schema) plus token usage.
  */
-export async function generateEstimate(
-  input: GenerateEstimateInput,
-  signal?: AbortSignal
-): Promise<GenerateEstimateResult> {
+export async function callStructured(opts: {
+  system: string;
+  userContent: any;
+  history?: EstimateTurn[];
+  jsonSchema: any;
+  signal?: AbortSignal;
+}): Promise<{ raw: unknown; usage: Usage }> {
   const messages: any[] = [
-    { role: "system", content: ESTIMATE_SYSTEM_PROMPT },
-    ...(input.history ?? []).map((m) => ({ role: m.role, content: m.content })),
-    { role: "user", content: buildUserContent(input) },
+    { role: "system", content: opts.system },
+    ...(opts.history ?? []).map((m) => ({ role: m.role, content: m.content })),
+    { role: "user", content: opts.userContent },
   ];
 
   const completion = await openai.chat.completions.create(
     {
       model: ESTIMATE_MODEL,
       messages,
-      response_format: { type: "json_schema", json_schema: estimateResultJsonSchema },
+      response_format: { type: "json_schema", json_schema: opts.jsonSchema },
     },
-    { signal }
+    { signal: opts.signal }
   );
 
-  const usage = {
+  const usage: Usage = {
     promptTokens: completion.usage?.prompt_tokens ?? 0,
     completionTokens: completion.usage?.completion_tokens ?? 0,
     totalTokens: completion.usage?.total_tokens ?? 0,
   };
 
-  const raw = completion.choices?.[0]?.message?.content;
-  if (!raw) {
-    return { result: fallbackResult("I couldn't generate an estimate just now. Please try again."), usage };
+  const rawText = completion.choices?.[0]?.message?.content;
+  let raw: unknown = null;
+  if (rawText) {
+    try {
+      raw = JSON.parse(rawText);
+    } catch (err) {
+      logger.warn("Estimate structured-output JSON parse failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    logger.warn("Estimate result JSON parse failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return { result: fallbackResult(raw), usage };
-  }
-
-  const validated = estimateResultSchema.safeParse(parsed);
-  if (!validated.success) {
-    logger.warn("Estimate result schema validation failed", { error: validated.error.message });
-    return { result: fallbackResult(typeof (parsed as any)?.message === "string" ? (parsed as any).message : raw), usage };
-  }
-
-  return { result: validated.data, usage };
-}
-
-/** Build a safe "message" result when structured output is unavailable. */
-function fallbackResult(message: string): EstimateResult {
-  return {
-    responseKind: "message",
-    message,
-    questions: [],
-    quote: {
-      status: "needs_info",
-      title: "",
-      identifiedEquipment: { brand: "", model: "", category: "", issue: "", decision: "repair", confidence: 0 },
-      lineItems: [],
-      materialsServicesSubtotal: 0,
-      laborSubtotal: 0,
-      taxOther: 0,
-      total: 0,
-      currency: "USD",
-      assumptions: [],
-      customerNotes: [],
-    },
-  };
+  return { raw, usage };
 }
