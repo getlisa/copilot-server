@@ -131,20 +131,21 @@ export async function extractQuote(
           {
             role: "system",
             content:
-              "Convert the fire-protection field response below into the structured JSON quote.\n" +
+              "Convert the fire-protection field response below into the structured JSON quotation.\n" +
               "FIRST decide `status`:\n" +
               "- 'needs_info' if the response is only asking clarifying/follow-up questions, or " +
-              "says information is not yet identified / no pricing was provided. In that case set " +
-              "lineItems to [], laborHours/laborRate/subtotal/total to 0, and put the open " +
-              "questions in `assumptions`.\n" +
-              "- 'estimate' ONLY if the response contains a complete itemized quote with real " +
+              "says information is not yet identified / no pricing was provided. Then set lineItems " +
+              "to [], all subtotals/total to 0, and put the open questions in `assumptions`.\n" +
+              "- 'estimate' ONLY if the response contains a complete itemized quotation with real " +
               "priced line items AND a numeric total.\n" +
-              "When status is 'estimate': flatten materials and labor into `lineItems`. For each " +
-              "material line, type is 'equipment'/'part'/'access'/'other', quantity*unitCost=amount. " +
-              "For each labor line, type='labor', quantity = typical hours (use the midpoint of any " +
-              "range), unitCost = hourly rate, amount = quantity*unitCost. `total` is a single " +
-              "number = sum of all line amounts (use range midpoints). Use only figures present in " +
-              "or directly implied by the response. Currency is USD unless stated.",
+              "When status is 'estimate': fill `lineItems` exactly as in the quotation. Each item has " +
+              "sourceSheet, code (the pricebook code, e.g. SP-010 / LH-002 / SV-002 / LB-030), " +
+              "description, kind ('material'|'service'|'labor'|'rental'|'permit'|'other'), quantity " +
+              "(hours for labor), unit (EA/HR/RL/DAY/CALL/…), unitPrice, and lineTotal = quantity*unitPrice. " +
+              "materialsServicesSubtotal = sum of all NON-labor lineTotals; laborSubtotal = sum of " +
+              "labor lineTotals; total = materialsServicesSubtotal + laborSubtotal + taxOther. Put " +
+              "NFPA compliance flags in customerNotes. Use only figures present in or implied by the " +
+              "response. Currency is USD unless stated.",
           },
           {
             role: "user",
