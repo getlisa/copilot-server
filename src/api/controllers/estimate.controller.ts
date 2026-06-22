@@ -4,10 +4,10 @@ import logger from "../../lib/logger";
 import { conversationRepository } from "../repositories/conversation.repository";
 import { messageRepository } from "../repositories/message.repository";
 import {
-  streamEstimate,
-  extractQuote,
+  generateEstimate,
   type EstimateTurn,
 } from "../../copilot/estimate/estimateService";
+import type { FollowUpQuestion } from "../../copilot/estimate/estimateQuoteSchema";
 
 /**
  * DEMO-ONLY estimate-cost controller.
@@ -17,8 +17,22 @@ import {
  * prompt, and LangGraph workflow.
  *
  * POST /api/v1/copilot/:conversationId/estimate/stream
- * SSE frames: user_message · thinking · chunk · quote · done · error
+ * SSE frames: user_message · thinking · message · quote · questions · done · error
+ *   - `message`   : the chat-bubble text to RENDER
+ *   - `quote`     : structured quote to FORMAT as a card
+ *   - `questions` : structured follow-ups to FORMAT as option buttons
+ *   - `done`      : carries `responseKind` ("quote" | "questions" | "message")
  */
+
+/** Render follow-up questions as plain text so model history recalls what was asked. */
+function questionsToText(questions: FollowUpQuestion[]): string {
+  return questions
+    .map((q, i) => {
+      const opts = q.options.map((o) => o.label).join(" / ");
+      return `${i + 1}. ${q.question}${opts ? ` (${opts})` : ""}`;
+    })
+    .join("\n");
+}
 
 const HISTORY_LIMIT = 8;
 const ESTIMATE_MODEL =
@@ -93,52 +107,69 @@ export class EstimateController {
       const signal = abortSignalForHttpRequest(res);
       const runId = randomUUID();
 
-      // 1) Stream the markdown estimate.
-      const { text, usage } = await streamEstimate(
+      // Single structured call: the model returns the typed result (message +
+      // exactly one of quote / questions). No separate markdown stream, so the UI
+      // never receives the estimate twice.
+      const { result, usage } = await generateEstimate(
         { content, imageUrl, imageBase64, imageMimeType, history },
-        { onChunk: (delta) => send({ type: "chunk", content: delta }) },
         signal
       );
 
-      // 2) Derive the structured quote card (best-effort, text-only).
-      // Only surface a card when the copilot actually produced a complete estimate
-      // — if it's asking follow-up questions, no card is shown until it has enough
-      // info to price the job.
-      const quote = await extractQuote(text, content, signal);
-      const quoteReady =
-        !!quote &&
-        quote.status === "estimate" &&
-        quote.lineItems.length > 0 &&
-        Number.isFinite(quote.total) &&
-        quote.total > 0;
-      if (quoteReady) send({ type: "quote", data: quote });
+      // Decide what to render. Trust responseKind but validate the quote so the UI
+      // never gets an empty card; downgrade to a plain message if neither holds.
+      const quoteValid =
+        result.quote.status === "estimate" &&
+        result.quote.lineItems.length > 0 &&
+        Number.isFinite(result.quote.total) &&
+        result.quote.total > 0;
+      const hasQuestions = result.questions.length > 0;
 
-      // Persist the AI message with the quote on metadata.
+      let responseKind: "quote" | "questions" | "message";
+      if (result.responseKind === "quote" && quoteValid) responseKind = "quote";
+      else if (result.responseKind === "questions" && hasQuestions) responseKind = "questions";
+      else responseKind = "message";
+
+      // 1) The chat-bubble text (render).
+      send({ type: "message", content: result.message });
+
+      // 2) The formatted payload (card or option buttons).
+      if (responseKind === "quote") send({ type: "quote", data: result.quote });
+      else if (responseKind === "questions") send({ type: "questions", data: { questions: result.questions } });
+
+      // Persist the AI message. content = the bubble text; for a questions turn append
+      // the questions as text so the next turn's history recalls what was asked.
+      const persistedContent =
+        responseKind === "questions"
+          ? `${result.message}\n${questionsToText(result.questions)}`.trim()
+          : result.message || "(no response)";
+
       const aiMessage = await messageRepository.create({
         conversationId,
         senderType: "AI",
         senderId: null,
-        content: text || "(no estimate)",
+        content: persistedContent,
         contentType: "TEXT",
         metadata: {
           mode: "estimate",
+          responseKind,
           modelUsed: ESTIMATE_MODEL,
           runId,
-          quote: quoteReady ? quote : null,
+          quote: responseKind === "quote" ? result.quote : null,
+          questions: responseKind === "questions" ? result.questions : null,
           promptTokens: usage.promptTokens,
           completionTokens: usage.completionTokens,
           totalTokens: usage.totalTokens,
         },
       });
 
-      send({ type: "done", data: aiMessage });
+      send({ type: "done", data: aiMessage, responseKind });
       clearInterval(heartbeat);
       res.end();
 
       logger.info("Estimate stream completed", {
         conversationId,
         messageId: aiMessage.id,
-        hasQuote: Boolean(quote),
+        responseKind,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

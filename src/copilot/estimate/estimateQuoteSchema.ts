@@ -69,6 +69,48 @@ export const estimateQuoteSchema = z.object({
 export type EstimateQuote = z.infer<typeof estimateQuoteSchema>;
 
 /**
+ * A follow-up question the copilot asks when the request is too vague to price.
+ * The UI renders `options` as buttons; `allowOther` (always true) adds an "Other"
+ * entry for typed/spoken free text.
+ */
+export const followUpQuestionSchema = z.object({
+  id: z.string().describe("Stable id for this question, e.g. 'ceiling_type'."),
+  question: z.string().describe("The question text shown to the technician."),
+  options: z
+    .array(
+      z.object({
+        id: z.string().describe("Stable option id."),
+        label: z.string().describe("Button label, e.g. 'Drop tile ceiling'."),
+        value: z.string().describe("Answer text sent back as `content` when picked."),
+      })
+    )
+    .describe("2-4 suggested single-select answers."),
+  allowOther: z.boolean().describe("Always true — UI shows an 'Other' free-text/voice entry."),
+});
+
+export type FollowUpQuestion = z.infer<typeof followUpQuestionSchema>;
+
+/**
+ * The single typed result of an estimate turn. `responseKind` tells the UI what the
+ * turn produced and which payload to render as formatted UI:
+ *   - "quote": render `quote` as the card.
+ *   - "questions": render `questions` as option buttons.
+ *   - "message": just the chat bubble (greeting / non-estimate reply).
+ * `message` is always the concise chat-bubble text. Unused payloads are
+ * empty/zeroed (strict schema requires every field present).
+ */
+export const estimateResultSchema = z.object({
+  responseKind: z.enum(["quote", "questions", "message"]),
+  message: z.string().describe("Concise markdown chat-bubble text. No itemized table."),
+  quote: estimateQuoteSchema.describe("Populated when responseKind='quote'; zeroed otherwise."),
+  questions: z
+    .array(followUpQuestionSchema)
+    .describe("Populated when responseKind='questions'; [] otherwise."),
+});
+
+export type EstimateResult = z.infer<typeof estimateResultSchema>;
+
+/**
  * JSON Schema for the OpenAI `response_format: { type: "json_schema" }` structured
  * output. Hand-authored; strict mode requires `additionalProperties: false` and
  * every property in `required`.
@@ -137,5 +179,51 @@ export const estimateQuoteJsonSchema = {
       "assumptions",
       "customerNotes",
     ],
+  },
+} as const;
+
+/**
+ * Strict JSON Schema for the single structured estimate turn — wraps the quote
+ * schema and adds responseKind / message / questions. Reuses the quote object
+ * schema above so the two never drift.
+ */
+export const estimateResultJsonSchema = {
+  name: "estimate_result",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      responseKind: { type: "string", enum: ["quote", "questions", "message"] },
+      message: { type: "string" },
+      quote: estimateQuoteJsonSchema.schema,
+      questions: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string" },
+            question: { type: "string" },
+            options: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  id: { type: "string" },
+                  label: { type: "string" },
+                  value: { type: "string" },
+                },
+                required: ["id", "label", "value"],
+              },
+            },
+            allowOther: { type: "boolean" },
+          },
+          required: ["id", "question", "options", "allowOther"],
+        },
+      },
+    },
+    required: ["responseKind", "message", "quote", "questions"],
   },
 } as const;
