@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { EstimateController } from "../controllers/estimate.controller";
 import { validate } from "../middlewares/validate";
-import { estimateStreamSchema } from "../schemas/estimate.schema";
+import { estimateStreamSchema, estimateSignSchema } from "../schemas/estimate.schema";
 
 const estimateRoute = Router();
 
@@ -20,8 +20,20 @@ estimateRoute.post(
 );
 
 /**
+ * @route   POST /api/v1/copilot/:conversationId/estimate/:messageId/sign
+ * @desc    Confirm an estimate with the customer's digital signature and generate the
+ *          final signed quotation PDF (stored in S3). Returns a downloadable URL.
+ * @access  Public (for demo)
+ */
+estimateRoute.post(
+  "/:conversationId/estimate/:messageId/sign",
+  validate(estimateSignSchema),
+  EstimateController.sign
+);
+
+/**
  * @route   GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
- * @desc    Re-presign + 302-redirect to the downloadable quotation PDF for a quote.
+ * @desc    Re-presign + 302-redirect to the downloadable signed quotation PDF.
  * @access  Public (for demo)
  */
 estimateRoute.get(

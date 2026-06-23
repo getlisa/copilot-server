@@ -24,3 +24,22 @@ export const estimateStreamSchema = z.object({
     ),
   query: z.object({}).passthrough(),
 });
+
+/**
+ * POST /api/v1/copilot/:conversationId/estimate/:messageId/sign
+ *
+ * Confirm an estimate with the customer's digital signature. `signatureBase64` may be a
+ * raw base64 string or a data URL (e.g. "data:image/png;base64,...") from a signature pad.
+ */
+export const estimateSignSchema = z.object({
+  params: z.object({
+    conversationId: z.string().uuid("conversationId must be a valid UUID"),
+    messageId: z.string().uuid("messageId must be a valid UUID"),
+  }),
+  body: z.object({
+    signatureBase64: z.string().min(1, "signatureBase64 is required"),
+    signatureMimeType: z.string().optional(),
+    signerName: z.string().optional(),
+  }),
+  query: z.object({}).passthrough(),
+});
