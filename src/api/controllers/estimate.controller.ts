@@ -8,7 +8,7 @@ import type { EstimateQuote, FollowUpQuestion } from "../../copilot/estimate/est
 import { streamEstimateGraph, ESTIMATE_NODES } from "../../copilot/estimate/graph/graph";
 import { buildQuotePdf } from "../../copilot/estimate/pdf/quotePdf";
 import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
-import { uploadBufferToS3, getPresignedUrlForKey } from "../../lib/s3";
+import { uploadBufferToS3, getPresignedUrlForKey, getObjectBufferFromS3 } from "../../lib/s3";
 
 const PDF_URL_TTL = 60 * 60 * 24; // 24h presigned download links
 
@@ -32,6 +32,22 @@ async function resolveThumbnail(input: {
     /* non-fatal — PDF just renders without a thumbnail */
   }
   return null;
+}
+
+/**
+ * Decode a customer signature into a Buffer. Accepts a raw base64 string or a data URL
+ * from a browser signature pad (e.g. "data:image/png;base64,iVBORw0...").
+ */
+function decodeSignature(input: string): Buffer | null {
+  if (!input || typeof input !== "string") return null;
+  const match = input.match(/^data:[^;]+;base64,(.*)$/s);
+  const b64 = (match ? match[1] : input).trim();
+  try {
+    const buffer = Buffer.from(b64, "base64");
+    return buffer.length > 0 ? buffer : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -196,33 +212,28 @@ export class EstimateController {
         }
       }
 
-      // On a quote turn, generate the quotation PDF, store it in S3, and presign a
-      // downloadable URL. Best-effort — failures never break the stream.
-      let pdf: { key: string; url: string; filename: string } | null = null;
+      // On a quote turn we do NOT generate the PDF yet — the customer must first
+      // confirm the estimate with a digital signature (see `sign`). We assign a stable
+      // estimate number now, and stash the uploaded equipment photo in S3 so the signed
+      // PDF can re-embed the thumbnail later. Best-effort — failures never break the stream.
       let estimateNumber: string | undefined;
+      let equipmentImageKey: string | null = null;
       if (responseKind === "quote" && quote) {
+        estimateNumber = `E${Date.now().toString(36).toUpperCase()}`;
         try {
-          const header = await loadQuoteHeader({
-            jobId: conversation.jobId as any,
-            userId: (conversation.userId ?? senderId) as any,
-          });
-          estimateNumber = `E${Date.now().toString(36).toUpperCase()}`;
-          const thumbnail = await resolveThumbnail({ imageBase64, imageMimeType, imageUrl });
-          const buffer = await buildQuotePdf({
-            quote,
-            header,
-            estimateNumber,
-            date: new Date(),
-            thumbnail: thumbnail ?? undefined,
-          });
-          const key = `estimates/${conversationId}/${runId}.pdf`;
-          await uploadBufferToS3({ key, buffer, contentType: "application/pdf" });
-          const filename = `Estimate-${estimateNumber}.pdf`;
-          const url = await getPresignedUrlForKey(key, PDF_URL_TTL, { downloadFilename: filename });
-          pdf = { key, url, filename };
-          logger.info("Estimate PDF generated", { conversationId, runId, key });
+          const thumb = await resolveThumbnail({ imageBase64, imageMimeType, imageUrl });
+          if (thumb) {
+            const ext = (thumb.mimeType?.split("/")[1] || "jpg").replace("jpeg", "jpg");
+            const key = `estimates/${conversationId}/${runId}-equipment.${ext}`;
+            await uploadBufferToS3({
+              key,
+              buffer: thumb.buffer,
+              contentType: thumb.mimeType || "image/jpeg",
+            });
+            equipmentImageKey = key;
+          }
         } catch (err) {
-          logger.warn("Estimate PDF generation failed", {
+          logger.warn("Estimate equipment image stash failed", {
             conversationId,
             runId,
             error: err instanceof Error ? err.message : String(err),
@@ -250,7 +261,13 @@ export class EstimateController {
           runId,
           quote:
             responseKind === "quote" && quote
-              ? { ...quote, pdfKey: pdf?.key ?? null, estimateNumber: estimateNumber ?? null }
+              ? {
+                  ...quote,
+                  estimateNumber: estimateNumber ?? null,
+                  equipmentImageKey,
+                  signed: false,
+                  pdfKey: null,
+                }
               : null,
           questions: responseKind === "questions" ? questions : null,
           promptTokens: usage.promptTokens,
@@ -259,10 +276,8 @@ export class EstimateController {
         },
       });
 
-      if (pdf) {
-        send({ type: "quote_pdf", url: pdf.url, key: pdf.key, filename: pdf.filename });
-      }
-      send({ type: "done", data: aiMessage, responseKind });
+      // A quote must be signed by the customer before its PDF is generated.
+      send({ type: "done", data: aiMessage, responseKind, requiresSignature: responseKind === "quote" });
       clearInterval(heartbeat);
       res.end();
 
@@ -299,7 +314,9 @@ export class EstimateController {
       const meta = (msg.metadata ?? {}) as any;
       const pdfKey: string | undefined = meta?.quote?.pdfKey;
       if (!pdfKey) {
-        return res.status(404).json({ success: false, error: { status: 404, message: "No PDF for this quote" } });
+        return res
+          .status(409)
+          .json({ success: false, error: { status: 409, message: "Estimate not signed yet — sign it to generate the PDF." } });
       }
       const filename = `Estimate-${meta?.quote?.estimateNumber ?? messageId}.pdf`;
       const url = await getPresignedUrlForKey(pdfKey, PDF_URL_TTL, { downloadFilename: filename });
@@ -307,6 +324,104 @@ export class EstimateController {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error("Estimate PDF download error", { conversationId, messageId, error: message });
+      return res.status(500).json({ success: false, error: { status: 500, message } });
+    }
+  }
+
+  /**
+   * POST /api/v1/copilot/:conversationId/estimate/:messageId/sign
+   *
+   * Confirm a previously-streamed estimate with the customer's digital signature, then
+   * generate the FINAL signed quotation PDF (signature embedded), store it in S3, and
+   * return a downloadable presigned URL. The quote message metadata is updated with the
+   * pdfKey + signed flag so the PDF can be re-downloaded later.
+   *
+   * Body: { signatureBase64 (raw base64 or data URL), signatureMimeType?, signerName? }
+   */
+  static async sign(req: Request, res: Response) {
+    const { conversationId, messageId } = req.params;
+    const signatureBase64: string = req.body?.signatureBase64 ?? "";
+    const signatureMimeType: string | undefined = req.body?.signatureMimeType;
+    const signerName: string | undefined = req.body?.signerName;
+
+    try {
+      const msg = await messageRepository.getById(messageId);
+      if (!msg || msg.conversationId !== conversationId) {
+        return res.status(404).json({ success: false, error: { status: 404, message: "Quote not found" } });
+      }
+
+      const meta = (msg.metadata ?? {}) as any;
+      const quote = meta?.quote as
+        | (EstimateQuote & { estimateNumber?: string | null; equipmentImageKey?: string | null })
+        | null;
+      if (meta?.mode !== "estimate" || meta?.responseKind !== "quote" || !quote) {
+        return res
+          .status(409)
+          .json({ success: false, error: { status: 409, message: "This message has no estimate to sign." } });
+      }
+
+      const signature = decodeSignature(signatureBase64);
+      if (!signature) {
+        return res
+          .status(400)
+          .json({ success: false, error: { status: 400, message: "Invalid or empty signature image." } });
+      }
+
+      // Rebuild the PDF inputs: header from the conversation, thumbnail from the stashed photo.
+      const conversation = await conversationRepository.getById(conversationId);
+      const header = await loadQuoteHeader({
+        jobId: conversation?.jobId as any,
+        userId: conversation?.userId as any,
+      });
+
+      let thumbnail: { buffer: Buffer; mimeType?: string } | undefined;
+      if (quote.equipmentImageKey) {
+        try {
+          thumbnail = { buffer: await getObjectBufferFromS3(quote.equipmentImageKey) };
+        } catch {
+          /* photo missing/unreadable — PDF just renders without a thumbnail */
+        }
+      }
+
+      const estimateNumber = quote.estimateNumber || `E${Date.now().toString(36).toUpperCase()}`;
+      const signedAt = new Date();
+      const buffer = await buildQuotePdf({
+        quote: quote as EstimateQuote,
+        header,
+        estimateNumber,
+        date: signedAt,
+        thumbnail,
+        signature: { buffer: signature, mimeType: signatureMimeType, signerName, signedAt },
+      });
+
+      const key = `estimates/${conversationId}/${messageId}.pdf`;
+      await uploadBufferToS3({ key, buffer, contentType: "application/pdf" });
+      const filename = `Estimate-${estimateNumber}.pdf`;
+      const url = await getPresignedUrlForKey(key, PDF_URL_TTL, { downloadFilename: filename });
+
+      // Persist the signed state (merge into existing metadata).
+      await messageRepository.update(messageId, {
+        metadata: {
+          ...meta,
+          quote: {
+            ...quote,
+            estimateNumber,
+            pdfKey: key,
+            signed: true,
+            signedAt: signedAt.toISOString(),
+            signerName: signerName ?? null,
+          },
+        },
+      });
+
+      logger.info("Estimate signed + PDF generated", { conversationId, messageId, key });
+      return res.json({
+        success: true,
+        data: { url, key, filename, estimateNumber, signedAt: signedAt.toISOString() },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("Estimate sign error", { conversationId, messageId, error: message });
       return res.status(500).json({ success: false, error: { status: 500, message } });
     }
   }

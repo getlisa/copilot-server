@@ -103,9 +103,12 @@ with `:` are heartbeats — ignore them.
 | `identified`   | `{ data: IdentifiedEquipment \| null }`  | *(optional)* equipment recognized early (brand/model/category/issue/decision/confidence). Show a preview chip. |
 | `message`      | `{ content: string }`                    | **RENDER** — the assistant's chat-bubble text (concise markdown). |
 | `quote`        | `{ data: EstimateQuote }`                | **FORMAT** — render the quote card. Sent only on a quote turn. |
-| `quote_pdf`    | `{ url, key, filename }`                 | *(quote turns)* the generated quotation PDF — a presigned, downloadable URL. Show a **"Download PDF"** button. |
 | `questions`    | `{ data: { questions: FollowUpQuestion[] } }` | **FORMAT** — render option buttons + "Other". Sent only on a questions turn. |
-| `done`         | `{ data: Message, responseKind }`        | Final state. `responseKind ∈ "quote" \| "questions" \| "message"`. |
+| `done`         | `{ data: Message, responseKind, requiresSignature }` | Final state. `responseKind ∈ "quote" \| "questions" \| "message"`. On a quote turn `requiresSignature` is `true` — show the **signature pad** to confirm before generating the PDF. |
+
+> **No PDF is generated during the stream.** The customer must first **confirm the
+> quote with a digital signature**. After they sign, call the **sign endpoint** (below)
+> to generate the final signed PDF and get a download link.
 | `error`        | `{ error: string }`                      | Something failed. Surface a retry. |
 
 **Exactly one** of `quote` / `questions` is sent per turn (or neither, for a plain
@@ -115,7 +118,8 @@ with `:` are heartbeats — ignore them.
 quote turn:     user_message → thinking
   → node:identify(start) → identified → node:identify(end)
   → node:build_quote(start) → message → quote → node:build_quote(end)
-  → quote_pdf → done
+  → done (requiresSignature: true)
+  … customer signs … → POST …/sign → signed PDF download URL
 
 questions turn: user_message → thinking
   → node:identify(start) → identified → node:identify(end)
@@ -214,27 +218,58 @@ rows. Render `lineTotal`/`total` as currency.
 
 ---
 
-## Quotation PDF (`quote_pdf`)
+## Signing the estimate → signed quotation PDF
 
-On every quote turn the backend renders a branded PDF quotation (Clara logo, company
-+ customer addresses, the line-item table, totals, signature, terms), stores it in
-S3, and emits a **`quote_pdf`** frame with a **presigned, downloadable** URL:
+The PDF is **not** generated during the stream. The flow is:
 
-```ts
-// quote_pdf payload
-{ url: string; key: string; filename: string }  // e.g. filename "Estimate-E0ABC12.pdf"
+1. The stream finishes with `done` + `requiresSignature: true` and the rendered quote card.
+2. The customer reviews the quote and **signs** on a signature pad (canvas).
+   Export the signature as a PNG **data URL** (`canvas.toDataURL("image/png")`).
+3. POST the signature to the **sign endpoint**. The backend renders the branded
+   quotation PDF (Clara logo, company + customer addresses, line-item table, totals,
+   **the embedded signature**, terms), stores it in S3, and returns a downloadable URL.
+
+```
+POST /api/v1/copilot/:conversationId/estimate/:messageId/sign
+Content-Type: application/json
+
+{
+  "signatureBase64": "data:image/png;base64,iVBORw0KGgo...",  // raw base64 also accepted
+  "signatureMimeType": "image/png",   // optional
+  "signerName": "Jane Doe"            // optional — printed under the signature line
+}
 ```
 
-- Show a **"Download PDF"** button that opens `url` (it serves with
-  `Content-Disposition: attachment`, so it downloads rather than rendering inline).
+`:messageId` is the **AI message's `id`** from the `done` frame (`done.data.id`).
+
+Response:
+
+```ts
+{
+  success: true,
+  data: {
+    url: string;          // presigned, downloadable (Content-Disposition: attachment)
+    key: string;
+    filename: string;     // e.g. "Estimate-E0ABC12.pdf"
+    estimateNumber: string;
+    signedAt: string;     // ISO timestamp
+  }
+}
+```
+
+- Show a **"Download PDF"** button that opens `url`.
 - If the user uploaded an equipment photo, it's embedded as a **thumbnail on the
   matching line item** automatically — nothing to do on the client.
-- The key is also persisted at `done.data.metadata.quote.pdfKey` (with
-  `metadata.quote.estimateNumber`).
+- After signing, the message metadata is updated with `quote.pdfKey`,
+  `quote.signed: true`, `quote.signedAt`, and `quote.signerName`.
+- Re-signing the same message regenerates and overwrites the PDF.
+
+Errors: `400` invalid/empty signature · `404` message not found · `409` the message
+isn't a quote turn (nothing to sign).
 
 ### Re-download later (presigned URLs expire)
 
-The `quote_pdf` URL is time-limited (~24h). To get a fresh link for a saved quote:
+The download URL is time-limited (~24h). To get a fresh link for a signed quote:
 
 ```
 GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
@@ -242,8 +277,8 @@ GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
 ```
 
 Use the AI message's `id` as `:messageId`. Just point a download/`<a download>` at this
-endpoint — it always re-presigns, so links never go stale. Returns 404 if that message
-has no PDF (e.g. a questions turn).
+endpoint — it always re-presigns, so links never go stale. Returns `409` if the
+estimate hasn't been signed yet (no PDF), `404` if the message doesn't exist.
 
 ---
 
@@ -301,13 +336,13 @@ streamEstimate(API_BASE, conversationId, { content: answer }, handlers);
 
 ```ts
 export interface EstimateEvent {
-  type: "user_message" | "thinking" | "node" | "identified" | "message" | "quote" | "quote_pdf" | "questions" | "done" | "error";
+  type: "user_message" | "thinking" | "node" | "identified" | "message" | "quote" | "questions" | "done" | "error";
   data?: any;            // user_message/quote/identified: payload · questions: { questions } · done: Message
   content?: string;      // message: the chat-bubble text
   node?: string;         // node: "identify" | "build_quote" | "ask_questions"
   phase?: "start" | "end"; // node: lifecycle phase
-  url?: string; key?: string; filename?: string; // quote_pdf
   responseKind?: "quote" | "questions" | "message"; // on `done`
+  requiresSignature?: boolean; // on `done` — true on a quote turn (collect signature, then POST …/sign)
   error?: string;
 }
 
@@ -328,9 +363,8 @@ export async function streamEstimate(
     onIdentified?: (equipment: any) => void;                      // optional
     onMessage?: (text: string) => void;
     onQuote?: (quote: any) => void;
-    onQuotePdf?: (pdf: { url: string; key: string; filename: string }) => void;
     onQuestions?: (questions: any[]) => void;
-    onDone?: (message: any, responseKind: string) => void;
+    onDone?: (message: any, responseKind: string, requiresSignature: boolean) => void;
     onError?: (msg: string) => void;
   },
   signal?: AbortSignal
@@ -371,13 +405,33 @@ export async function streamEstimate(
         case "identified":   handlers.onIdentified?.(ev.data); break;
         case "message":      handlers.onMessage?.(ev.content ?? ""); break;
         case "quote":        handlers.onQuote?.(ev.data); break;
-        case "quote_pdf":    handlers.onQuotePdf?.({ url: ev.url!, key: ev.key!, filename: ev.filename! }); break;
         case "questions":    handlers.onQuestions?.(ev.data?.questions ?? []); break;
-        case "done":         handlers.onDone?.(ev.data, ev.responseKind ?? "message"); break;
+        case "done":         handlers.onDone?.(ev.data, ev.responseKind ?? "message", ev.requiresSignature ?? false); break;
         case "error":        handlers.onError?.(ev.error ?? "Unknown error"); break;
       }
     }
   }
+}
+
+// Confirm the estimate with the customer's signature → returns the signed PDF URL.
+export async function signEstimate(
+  baseUrl: string,
+  conversationId: string,
+  messageId: string,                 // the AI message id from the `done` frame (done.data.id)
+  signatureDataUrl: string,          // canvas.toDataURL("image/png")
+  signerName?: string
+): Promise<{ url: string; key: string; filename: string; estimateNumber: string; signedAt: string }> {
+  const res = await fetch(
+    `${baseUrl}/api/v1/copilot/${conversationId}/estimate/${messageId}/sign`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ signatureBase64: signatureDataUrl, signatureMimeType: "image/png", signerName }),
+    }
+  );
+  const json = await res.json();
+  if (!res.ok || !json.success) throw new Error(json?.error?.message ?? `Sign failed: ${res.status}`);
+  return json.data;
 }
 ```
 

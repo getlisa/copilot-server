@@ -16,6 +16,8 @@ export interface QuotePdfInput {
   estimateNumber: string;
   date: Date;
   thumbnail?: { buffer: Buffer; mimeType?: string };
+  /** Customer's digital autograph; when present it is drawn in the signature block. */
+  signature?: { buffer: Buffer; mimeType?: string; signerName?: string; signedAt?: Date };
 }
 
 // Palette / geometry
@@ -52,7 +54,7 @@ function formatDate(d: Date): string {
 }
 
 export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
-  const { quote, header, estimateNumber, date, thumbnail } = input;
+  const { quote, header, estimateNumber, date, thumbnail, signature } = input;
 
   return new Promise<Buffer>((resolve, reject) => {
     try {
@@ -169,9 +171,23 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
 
       // ---- Signature (left, beside totals) ----
       const sigY = y - 64;
+      const SIG_W = 180;
+      if (signature) {
+        // Draw the customer's autograph just above the signature line.
+        try {
+          doc.image(signature.buffer, MARGIN, sigY - 2, { fit: [SIG_W, 30], align: "center", valign: "bottom" });
+        } catch {
+          /* bad signature image — fall through to the blank line */
+        }
+      }
       doc.font("Helvetica").fontSize(9).fillColor(MUTED);
-      doc.moveTo(MARGIN, sigY + 30).lineTo(MARGIN + 180, sigY + 30).strokeColor(LINE).lineWidth(1).stroke();
-      doc.text("Customer Signature", MARGIN, sigY + 36, { width: 180, align: "center" });
+      doc.moveTo(MARGIN, sigY + 30).lineTo(MARGIN + SIG_W, sigY + 30).strokeColor(LINE).lineWidth(1).stroke();
+      doc.text("Customer Signature", MARGIN, sigY + 36, { width: SIG_W, align: "center" });
+      if (signature) {
+        const who = signature.signerName ? signature.signerName : "Signed";
+        const when = signature.signedAt ? ` · ${formatDate(signature.signedAt)}` : "";
+        doc.font("Helvetica").fontSize(7.5).fillColor(MUTED).text(`${who}${when}`, MARGIN, sigY + 48, { width: SIG_W, align: "center" });
+      }
 
       // ---- Service Summary ----
       y += 18;

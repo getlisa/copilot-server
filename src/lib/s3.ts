@@ -59,6 +59,25 @@ export async function uploadBufferToS3(params: {
   return { key };
 }
 
+/** Download an object's bytes into a Buffer (used to re-embed a stored image in a PDF). */
+export async function getObjectBufferFromS3(key: string): Promise<Buffer> {
+  if (!bucket) {
+    throw new Error("S3 bucket not configured (S3_BUCKET missing)");
+  }
+  const normalizedKey = normalizeS3Key(key);
+  const out = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: normalizedKey }));
+  const body = out.Body as unknown as { transformToByteArray?: () => Promise<Uint8Array> };
+  if (body?.transformToByteArray) {
+    return Buffer.from(await body.transformToByteArray());
+  }
+  // Fallback: stream → buffer (Node stream)
+  const chunks: Buffer[] = [];
+  for await (const chunk of out.Body as unknown as AsyncIterable<Buffer>) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
 export async function getPresignedUrlForKey(
   key: string,
   expiresInSeconds: number = defaultTtl,
