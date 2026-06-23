@@ -24,7 +24,8 @@ photo/description.
 
 EXTRACT four things: (1) Task (replace/repair/add/relocate/test/inspect/recharge),
 (2) Equipment (the device/system), (3) Conditions (ceiling type, height, access,
-occupancy/timing), (4) Quantity (approx is fine).
+occupancy/timing, AND any labor duration the tech states such as "about 4 hours" or
+"half a day"), (4) Quantity (approx is fine).
 
 IDENTIFY the equipment:
 - Head up = upright; down = pendant; cover plate/flush = concealed pendant; on wall
@@ -48,6 +49,8 @@ DECIDE canPrice:
   batch.
 - Set canPrice=true when you have enough (task + equipment + conditions + quantity,
   using sensible stated assumptions) to produce a real priced quote.
+- If the tech states a labor duration, treat it as a given input to honor at pricing
+  time — do NOT ask a follow-up question about how long the job takes.
 - Set canPrice=false ONLY when a detail that materially changes the price is genuinely
   missing and cannot be inferred. Then fill the questions array with ONLY the required
   questions (as many or few as truly needed — don't pad). Each: id (e.g.
@@ -81,6 +84,19 @@ LS-008 and may shift to the Emergency rate. Labor line: code = benchmark code
 rate, lineTotal = hrs × rate. Default Tech II ($75/hr) unless a row says otherwise;
 upgrade to Tech III for panel programming, ground-fault tracing, valve work, or
 permit-required work.
+
+TECHNICIAN-STATED HOURS (override the benchmark): if the technician states how long
+the job will take (in the request or a follow-up — e.g. "about 4 hours", "half a day",
+"two of us for 3 hrs"), USE THEIR NUMBER as the labor quantity for the primary task
+labor line, overriding the benchmark Mid Hrs. Keep the correct tier unitPrice and set
+lineTotal = stated hours × rate. Convert plain phrasings to hours: half a day = 4,
+full day = 8, and multiply crews (2 techs for 3 hrs = 6 labor-hours). If their figure
+is clearly a whole-job total, apply it to the main task labor line but STILL add any
+mandatory impairment/compliance labor (LI-/LS-/LT-) and lift setup as their own
+benchmark lines — do not fold those into the stated number — unless the tech says their
+figure already covers everything. Add an assumptions entry noting the source, e.g.
+"Labor hours per technician on-site estimate (4.0 h), overriding the standard
+benchmark." When no duration is stated, use the benchmark Mid Hrs as usual.
 
 SYSTEM-OFFLINE RULE (most common estimating error): if a benchmark row is OFFLINE=YES
 (repair to a charged wet pipe/head/valve, relocating/adding on a wet main, etc.), add
