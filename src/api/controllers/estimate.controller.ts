@@ -7,10 +7,29 @@ import { ZERO_USAGE, addUsage, type EstimateTurn, type Usage } from "../../copil
 import type { EstimateQuote, FollowUpQuestion } from "../../copilot/estimate/estimateQuoteSchema";
 import { streamEstimateGraph, ESTIMATE_NODES } from "../../copilot/estimate/graph/graph";
 import { buildQuotePdf } from "../../copilot/estimate/pdf/quotePdf";
-import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
-import { uploadBufferToS3, getPresignedUrlForKey, getObjectBufferFromS3 } from "../../lib/s3";
+import { loadQuoteHeader, loadSuggestedCustomerEmail } from "../../copilot/estimate/pdf/quoteHeader";
+import { buildEstimateEmail } from "../../copilot/estimate/email/estimateEmailTemplate";
+import { uploadBufferToS3, getPresignedUrlForKey, getObjectBufferFromS3, publicUrlForKey } from "../../lib/s3";
+import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
 
-const PDF_URL_TTL = 60 * 60 * 24; // 24h presigned download links
+const PDF_URL_TTL = 60 * 60 * 24; // presigned fallback TTL (used only when no CDN)
+
+/**
+ * Resolve a downloadable URL for a stored PDF. Prefers a permanent CloudFront URL
+ * (never expires) when CLOUDFRONT_URL is configured; otherwise falls back to a
+ * time-limited presigned S3 URL. The object is uploaded with Content-Disposition so the
+ * static CloudFront URL still downloads with the right filename.
+ */
+async function resolvePdfUrl(key: string, downloadFilename: string): Promise<string> {
+  const cdnUrl = publicUrlForKey(key);
+  if (cdnUrl) return cdnUrl;
+  return getPresignedUrlForKey(key, PDF_URL_TTL, { downloadFilename });
+}
+
+/** Content-Disposition that makes a static (CloudFront) URL download with this name. */
+function pdfContentDisposition(filename: string): string {
+  return `attachment; filename="${filename}"`;
+}
 
 /** Resolve the uploaded equipment photo to a Buffer for embedding in the PDF. */
 async function resolveThumbnail(input: {
@@ -301,8 +320,8 @@ export class EstimateController {
 
   /**
    * GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
-   * Re-presign a fresh downloadable URL for a quote's stored PDF and 302-redirect to
-   * it (presigned links expire). 404 if the message has no PDF.
+   * 302-redirect to the stored PDF: a permanent CloudFront URL when configured, else a
+   * freshly-presigned S3 URL. 409 if the estimate isn't signed yet.
    */
   static async downloadPdf(req: Request, res: Response) {
     const { conversationId, messageId } = req.params;
@@ -319,7 +338,7 @@ export class EstimateController {
           .json({ success: false, error: { status: 409, message: "Estimate not signed yet — sign it to generate the PDF." } });
       }
       const filename = `Estimate-${meta?.quote?.estimateNumber ?? messageId}.pdf`;
-      const url = await getPresignedUrlForKey(pdfKey, PDF_URL_TTL, { downloadFilename: filename });
+      const url = await resolvePdfUrl(pdfKey, filename);
       return res.redirect(302, url);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -395,9 +414,17 @@ export class EstimateController {
       });
 
       const key = `estimates/${conversationId}/${messageId}.pdf`;
-      await uploadBufferToS3({ key, buffer, contentType: "application/pdf" });
       const filename = `Estimate-${estimateNumber}.pdf`;
-      const url = await getPresignedUrlForKey(key, PDF_URL_TTL, { downloadFilename: filename });
+      await uploadBufferToS3({
+        key,
+        buffer,
+        contentType: "application/pdf",
+        contentDisposition: pdfContentDisposition(filename),
+      });
+      const url = await resolvePdfUrl(key, filename);
+
+      // Suggest a customer email (from the job) for the frontend to confirm before emailing.
+      const suggestedCustomerEmail = await loadSuggestedCustomerEmail(conversation?.jobId as any);
 
       // Persist the signed state (merge into existing metadata).
       await messageRepository.update(messageId, {
@@ -410,6 +437,7 @@ export class EstimateController {
             signed: true,
             signedAt: signedAt.toISOString(),
             signerName: signerName ?? null,
+            suggestedCustomerEmail,
           },
         },
       });
@@ -417,11 +445,102 @@ export class EstimateController {
       logger.info("Estimate signed + PDF generated", { conversationId, messageId, key });
       return res.json({
         success: true,
-        data: { url, key, filename, estimateNumber, signedAt: signedAt.toISOString() },
+        data: { url, key, filename, estimateNumber, signedAt: signedAt.toISOString(), suggestedCustomerEmail },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error("Estimate sign error", { conversationId, messageId, error: message });
+      return res.status(500).json({ success: false, error: { status: 500, message } });
+    }
+  }
+
+  /**
+   * POST /api/v1/copilot/:conversationId/estimate/:messageId/email
+   *
+   * Email the SIGNED quotation PDF to the customer via SendGrid. The PDF is attached and
+   * a structured quote summary is rendered in the body.
+   *
+   * From = SENDGRID_FROM_EMAIL (company) when set, CC the technician; otherwise From =
+   * the technician's email (no CC). Reply-To = technician email.
+   *
+   * Body: { to } — the confirmed/edited or freshly-entered customer email.
+   */
+  static async emailEstimate(req: Request, res: Response) {
+    const { conversationId, messageId } = req.params;
+    const to: string = req.body?.to ?? "";
+
+    try {
+      if (!isEmailConfigured()) {
+        return res
+          .status(503)
+          .json({ success: false, error: { status: 503, message: "Email not configured (SENDGRID_API_KEY missing)." } });
+      }
+
+      const msg = await messageRepository.getById(messageId);
+      if (!msg || msg.conversationId !== conversationId) {
+        return res.status(404).json({ success: false, error: { status: 404, message: "Quote not found" } });
+      }
+
+      const meta = (msg.metadata ?? {}) as any;
+      const quote = meta?.quote as (EstimateQuote & { estimateNumber?: string | null; pdfKey?: string | null }) | null;
+      if (meta?.mode !== "estimate" || meta?.responseKind !== "quote" || !quote) {
+        return res
+          .status(409)
+          .json({ success: false, error: { status: 409, message: "This message has no estimate to email." } });
+      }
+      if (!quote.pdfKey) {
+        return res
+          .status(409)
+          .json({ success: false, error: { status: 409, message: "Sign the estimate first — no signed PDF to email yet." } });
+      }
+
+      // Rebuild header (company name + technician email/name) and fetch the signed PDF.
+      const conversation = await conversationRepository.getById(conversationId);
+      const header = await loadQuoteHeader({
+        jobId: conversation?.jobId as any,
+        userId: conversation?.userId as any,
+      });
+      const pdfBuffer = await getObjectBufferFromS3(quote.pdfKey);
+
+      // Sender resolution: company email (env) → CC technician; else technician email.
+      const technicianEmail = header.companyEmail || ""; // loadQuoteHeader maps tech.email here
+      const from = SENDGRID_FROM_EMAIL || technicianEmail;
+      if (!from) {
+        return res.status(503).json({
+          success: false,
+          error: { status: 503, message: "No sender available (set SENDGRID_FROM_EMAIL or a technician email)." },
+        });
+      }
+      const usingCompanyFrom = Boolean(SENDGRID_FROM_EMAIL) && from !== technicianEmail;
+      const cc = usingCompanyFrom && technicianEmail ? technicianEmail : undefined;
+      const replyTo = technicianEmail || undefined;
+      const fromName = SENDGRID_FROM_NAME || header.companyName || undefined;
+
+      const estimateNumber = quote.estimateNumber || messageId;
+      const { subject, html, text } = buildEstimateEmail({ header, quote: quote as EstimateQuote, estimateNumber });
+
+      await sendEmail({
+        to,
+        from,
+        fromName,
+        replyTo,
+        cc,
+        subject,
+        html,
+        text,
+        attachment: { filename: `Estimate-${estimateNumber}.pdf`, content: pdfBuffer, type: "application/pdf" },
+      });
+
+      const sentAt = new Date().toISOString();
+      await messageRepository.update(messageId, {
+        metadata: { ...meta, quote: { ...quote, emailedTo: to, emailedAt: sentAt } },
+      });
+
+      logger.info("Estimate emailed", { conversationId, messageId, to, cc: cc ?? null });
+      return res.json({ success: true, data: { to, from, cc: cc ?? null, sentAt } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("Estimate email error", { conversationId, messageId, error: message });
       return res.status(500).json({ success: false, error: { status: 500, message } });
     }
   }

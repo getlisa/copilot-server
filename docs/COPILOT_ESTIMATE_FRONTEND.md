@@ -253,6 +253,7 @@ Response:
     filename: string;     // e.g. "Estimate-E0ABC12.pdf"
     estimateNumber: string;
     signedAt: string;     // ISO timestamp
+    suggestedCustomerEmail: string | null; // from the job (if any) — pre-fill the email step
   }
 }
 ```
@@ -267,18 +268,74 @@ Response:
 Errors: `400` invalid/empty signature · `404` message not found · `409` the message
 isn't a quote turn (nothing to sign).
 
-### Re-download later (presigned URLs expire)
+### Link lifetime & re-download
 
-The download URL is time-limited (~24h). To get a fresh link for a signed quote:
+- **With CloudFront configured (prod):** the `url` returned by `sign` is a **permanent
+  CloudFront URL that never expires** — you can store it and reuse it forever.
+- **Without CloudFront (local/dev):** the `url` is a presigned S3 link that expires
+  (presigned URLs can live at most 7 days).
+
+Either way, this endpoint always returns a working link:
 
 ```
 GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
-→ 302 redirect to a fresh presigned download URL
+→ 302 redirect to the PDF (permanent CloudFront URL, or a fresh presigned URL)
 ```
 
-Use the AI message's `id` as `:messageId`. Just point a download/`<a download>` at this
-endpoint — it always re-presigns, so links never go stale. Returns `409` if the
-estimate hasn't been signed yet (no PDF), `404` if the message doesn't exist.
+Use the AI message's `id` as `:messageId`. Point a download/`<a download>` at it and
+you never have to worry about stale links. Returns `409` if the estimate isn't signed
+yet (no PDF), `404` if the message doesn't exist.
+
+---
+
+## Emailing the estimate to the customer
+
+After the estimate is **signed** (PDF generated), the technician can email it to the
+customer. The signed PDF is attached automatically; the body is a structured quote
+summary.
+
+**Getting the customer's address — two cases:**
+1. **Suggested from the DB:** the `sign` response returns `suggestedCustomerEmail`
+   (pulled from the job). If it's non-null, show a **confirm box pre-filled** with it —
+   "Send the estimate to `jane@acme.com`?" — with an **editable** field so the tech can
+   correct it, then a **Send** button.
+2. **Not in the DB:** if `suggestedCustomerEmail` is `null`, show an **empty email input
+   box** for the tech to type the customer's address.
+
+Either way, the frontend sends the final, confirmed address as `to` — the server never
+emails without one.
+
+```
+POST /api/v1/copilot/:conversationId/estimate/:messageId/email
+Content-Type: application/json
+
+{ "to": "customer@example.com" }
+```
+
+`:messageId` is the AI message's `id` (same one you signed).
+
+Response:
+
+```ts
+{
+  success: true,
+  data: {
+    to: string;
+    from: string;        // company email (env) or technician email
+    cc: string | null;   // technician email when the company address is the sender
+    sentAt: string;      // ISO timestamp
+  }
+}
+```
+
+- The PDF is attached as `Estimate-<estimateNumber>.pdf` — nothing to upload from the client.
+- **From / CC:** sent from the company email when configured (CC's the technician), else
+  from the technician's email (no CC). Reply-To is the technician.
+- After a successful send the message metadata gets `quote.emailedTo` + `quote.emailedAt`.
+
+Errors: `400` invalid/missing email · `404` message not found · `409` not a quote turn
+or **not signed yet** (sign before emailing) · `503` email not configured on the server
+(`SENDGRID_API_KEY` missing).
 
 ---
 
@@ -431,6 +488,26 @@ export async function signEstimate(
   );
   const json = await res.json();
   if (!res.ok || !json.success) throw new Error(json?.error?.message ?? `Sign failed: ${res.status}`);
+  return json.data; // { url, key, filename, estimateNumber, signedAt, suggestedCustomerEmail }
+}
+
+// Email the signed estimate PDF to the customer (call after signing + confirming the address).
+export async function sendEstimateEmail(
+  baseUrl: string,
+  conversationId: string,
+  messageId: string,
+  to: string                         // the confirmed/edited or typed-in customer email
+): Promise<{ to: string; from: string; cc: string | null; sentAt: string }> {
+  const res = await fetch(
+    `${baseUrl}/api/v1/copilot/${conversationId}/estimate/${messageId}/email`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to }),
+    }
+  );
+  const json = await res.json();
+  if (!res.ok || !json.success) throw new Error(json?.error?.message ?? `Email failed: ${res.status}`);
   return json.data;
 }
 ```

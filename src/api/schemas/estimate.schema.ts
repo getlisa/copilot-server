@@ -43,3 +43,20 @@ export const estimateSignSchema = z.object({
   }),
   query: z.object({}).passthrough(),
 });
+
+/**
+ * POST /api/v1/copilot/:conversationId/estimate/:messageId/email
+ *
+ * Email the signed estimate PDF to the customer. `to` is the confirmed/edited address
+ * (suggested from the job when available) or the one the technician typed in.
+ */
+export const estimateEmailSchema = z.object({
+  params: z.object({
+    conversationId: z.string().uuid("conversationId must be a valid UUID"),
+    messageId: z.string().uuid("messageId must be a valid UUID"),
+  }),
+  body: z.object({
+    to: z.string().email("to must be a valid email address"),
+  }),
+  query: z.object({}).passthrough(),
+});

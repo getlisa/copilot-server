@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { EstimateController } from "../controllers/estimate.controller";
 import { validate } from "../middlewares/validate";
-import { estimateStreamSchema, estimateSignSchema } from "../schemas/estimate.schema";
+import { estimateStreamSchema, estimateSignSchema, estimateEmailSchema } from "../schemas/estimate.schema";
 
 const estimateRoute = Router();
 
@@ -29,6 +29,17 @@ estimateRoute.post(
   "/:conversationId/estimate/:messageId/sign",
   validate(estimateSignSchema),
   EstimateController.sign
+);
+
+/**
+ * @route   POST /api/v1/copilot/:conversationId/estimate/:messageId/email
+ * @desc    Email the signed quotation PDF to the customer (SendGrid). Body: { to }.
+ * @access  Public (for demo)
+ */
+estimateRoute.post(
+  "/:conversationId/estimate/:messageId/email",
+  validate(estimateEmailSchema),
+  EstimateController.emailEstimate
 );
 
 /**

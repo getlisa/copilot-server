@@ -154,8 +154,9 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
       }
 
       // ---- Totals (right-aligned key/value) ----
+      // Gap below the last line item so the totals + signature block don't crowd it.
       const subtotal = (quote.materialsServicesSubtotal || 0) + (quote.laborSubtotal || 0);
-      y += 8;
+      y += 28;
       const totalsX = 330;
       const totalRow = (label: string, value: string, bold = false) => {
         doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(9.5).fillColor(INK);

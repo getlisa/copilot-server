@@ -9,7 +9,13 @@ const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
 const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
 const configuredTtl = Number(process.env.S3_SIGNED_URL_TTL ?? "900");
 const defaultTtl = Number.isFinite(configuredTtl) && configuredTtl > 0 ? configuredTtl : 900;
-const MAX_TTL = 60 * 60 * 24 * 90; // S3 presign hard limit: 90 days
+const MAX_TTL = 60 * 60 * 24 * 7; // SigV4 presign hard limit: 7 days (cannot be longer)
+
+// Optional CloudFront/CDN base URL that fronts the bucket. When set, public object URLs
+// are served through it and DO NOT EXPIRE (unlike presigned S3 URLs, which max out at 7
+// days). The distribution must serve the bucket objects publicly (no CloudFront signed
+// URLs/cookies) for these links to work without expiry.
+const cloudfrontBase = (process.env.CLOUDFRONT_URL || "").trim().replace(/\/+$/, "");
 
 if (!bucket) {
   // We keep this non-fatal to allow local dev without S3, but will throw if used without config.
@@ -41,6 +47,8 @@ export async function uploadBufferToS3(params: {
   key: string;
   buffer: Buffer;
   contentType: string;
+  /** Set on the object so a static (CloudFront) URL still downloads with this filename. */
+  contentDisposition?: string;
 }): Promise<{ key: string }> {
   if (!bucket) {
     throw new Error("S3 bucket not configured (S3_BUCKET missing)");
@@ -53,10 +61,26 @@ export async function uploadBufferToS3(params: {
       Key: key,
       Body: params.buffer,
       ContentType: params.contentType,
+      ...(params.contentDisposition ? { ContentDisposition: params.contentDisposition } : {}),
     })
   );
 
   return { key };
+}
+
+/** Is a CloudFront/CDN base URL configured (so we can serve non-expiring links)? */
+export function hasPublicCdn(): boolean {
+  return Boolean(cloudfrontBase);
+}
+
+/**
+ * Permanent public URL for an object via CloudFront, or null when no CDN is configured.
+ * Never expires (the object's Content-Disposition controls download-vs-inline).
+ */
+export function publicUrlForKey(key: string): string | null {
+  if (!cloudfrontBase) return null;
+  const normalizedKey = normalizeS3Key(key);
+  return `${cloudfrontBase}/${normalizedKey.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 /** Download an object's bytes into a Buffer (used to re-embed a stored image in a PDF). */

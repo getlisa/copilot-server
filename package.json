@@ -26,6 +26,7 @@
     "@langchain/langgraph": "^1.4.2",
     "@openai/agents": "^0.3.4",
     "@prisma/client": "^6.19.0",
+    "@sendgrid/mail": "^8.1.6",
     "@types/cors": "^2.8.19",
     "@types/multer": "^2.0.0",
     "@types/pdfkit": "^0.17.6",

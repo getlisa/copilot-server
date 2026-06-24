@@ -28,6 +28,39 @@ const DEFAULTS: QuoteHeader = {
   technicianName: "",
 };
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Best-effort customer email for a job. The DB has no customer-email column, so we look
+ * in jobs.meta_data under common keys. Returns the first valid-looking address, or null
+ * (in which case the frontend collects one). Used to *suggest* an address to confirm.
+ */
+export async function loadSuggestedCustomerEmail(
+  jobId: bigint | number | string | null | undefined
+): Promise<string | null> {
+  if (jobId == null) return null;
+  try {
+    const job = await prisma.jobs.findUnique({ where: { id: BigInt(jobId as any) } });
+    const meta = (job?.meta_data ?? null) as Record<string, unknown> | null;
+    if (!meta || typeof meta !== "object") return null;
+    const candidates = [
+      meta.customer_email,
+      meta.customerEmail,
+      meta.email,
+      meta.contact_email,
+      meta.contactEmail,
+    ];
+    for (const c of candidates) {
+      if (typeof c === "string" && EMAIL_RE.test(c.trim())) return c.trim();
+    }
+  } catch (err) {
+    logger.warn("loadSuggestedCustomerEmail failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return null;
+}
+
 /** Flatten a Prisma JSON address (or company city/state) into a single string. */
 function formatJsonAddress(addr: unknown): string {
   if (!addr || typeof addr !== "object") return "";
