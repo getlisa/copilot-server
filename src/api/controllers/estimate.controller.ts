@@ -9,26 +9,32 @@ import { streamEstimateGraph, ESTIMATE_NODES } from "../../copilot/estimate/grap
 import { buildQuotePdf } from "../../copilot/estimate/pdf/quotePdf";
 import { loadQuoteHeader, loadSuggestedCustomerEmail } from "../../copilot/estimate/pdf/quoteHeader";
 import { buildEstimateEmail } from "../../copilot/estimate/email/estimateEmailTemplate";
-import { uploadBufferToS3, getPresignedUrlForKey, getObjectBufferFromS3, publicUrlForKey } from "../../lib/s3";
+import { uploadBufferToS3, getPresignedUrlForKey, getObjectBufferFromS3 } from "../../lib/s3";
 import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
 
-const PDF_URL_TTL = 60 * 60 * 24; // presigned fallback TTL (used only when no CDN)
+// TTL for the optional presigned "directUrl" — 7 days is the SigV4 hard maximum.
+const PDF_URL_TTL =
+  Number(process.env.ESTIMATE_PDF_URL_TTL) > 0
+    ? Number(process.env.ESTIMATE_PDF_URL_TTL)
+    : 60 * 60 * 24 * 7;
 
-/**
- * Resolve a downloadable URL for a stored PDF. Prefers a permanent CloudFront URL
- * (never expires) when CLOUDFRONT_URL is configured; otherwise falls back to a
- * time-limited presigned S3 URL. The object is uploaded with Content-Disposition so the
- * static CloudFront URL still downloads with the right filename.
- */
-async function resolvePdfUrl(key: string, downloadFilename: string): Promise<string> {
-  const cdnUrl = publicUrlForKey(key);
-  if (cdnUrl) return cdnUrl;
-  return getPresignedUrlForKey(key, PDF_URL_TTL, { downloadFilename });
-}
-
-/** Content-Disposition that makes a static (CloudFront) URL download with this name. */
+/** Content-Disposition that makes a download serve with this filename. */
 function pdfContentDisposition(filename: string): string {
   return `attachment; filename="${filename}"`;
+}
+
+/** Public base URL of this API (env override, else derived from forwarded headers). */
+function publicApiBase(req: Request): string {
+  const env = (process.env.PUBLIC_API_BASE_URL || "").trim().replace(/\/+$/, "");
+  if (env) return env;
+  const proto = (req.headers["x-forwarded-proto"] as string)?.split(",")[0]?.trim() || req.protocol;
+  const host = (req.headers["x-forwarded-host"] as string) || req.get("host") || "";
+  return `${proto}://${host}`;
+}
+
+/** The permanent download link for a quote's PDF — our own streaming endpoint. */
+function pdfDownloadUrl(req: Request, conversationId: string, messageId: string): string {
+  return `${publicApiBase(req)}/api/v1/copilot/${conversationId}/estimate/${messageId}/pdf`;
 }
 
 /** Resolve the uploaded equipment photo to a Buffer for embedding in the PDF. */
@@ -320,8 +326,9 @@ export class EstimateController {
 
   /**
    * GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
-   * 302-redirect to the stored PDF: a permanent CloudFront URL when configured, else a
-   * freshly-presigned S3 URL. 409 if the estimate isn't signed yet.
+   * Stream the stored signed PDF straight from S3. This is a PERMANENT link (it never
+   * expires — no presigning), so it's the canonical URL to share/store. Add `?inline=1`
+   * to view in-browser instead of downloading. 409 if the estimate isn't signed yet.
    */
   static async downloadPdf(req: Request, res: Response) {
     const { conversationId, messageId } = req.params;
@@ -338,8 +345,20 @@ export class EstimateController {
           .json({ success: false, error: { status: 409, message: "Estimate not signed yet — sign it to generate the PDF." } });
       }
       const filename = `Estimate-${meta?.quote?.estimateNumber ?? messageId}.pdf`;
-      const url = await resolvePdfUrl(pdfKey, filename);
-      return res.redirect(302, url);
+
+      let buffer: Buffer;
+      try {
+        buffer = await getObjectBufferFromS3(pdfKey);
+      } catch {
+        return res.status(404).json({ success: false, error: { status: 404, message: "PDF no longer available." } });
+      }
+
+      const disposition = req.query.inline ? "inline" : "attachment";
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `${disposition}; filename="${filename}"`);
+      res.setHeader("Content-Length", String(buffer.length));
+      res.setHeader("Cache-Control", "private, no-cache");
+      return res.end(buffer);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error("Estimate PDF download error", { conversationId, messageId, error: message });
@@ -421,7 +440,10 @@ export class EstimateController {
         contentType: "application/pdf",
         contentDisposition: pdfContentDisposition(filename),
       });
-      const url = await resolvePdfUrl(key, filename);
+      // Permanent download link = our own streaming endpoint (never expires). Also hand
+      // back a presigned direct-to-S3 link (up to 7 days) for clients that want one.
+      const url = pdfDownloadUrl(req, conversationId, messageId);
+      const directUrl = await getPresignedUrlForKey(key, PDF_URL_TTL, { downloadFilename: filename });
 
       // Suggest a customer email (from the job) for the frontend to confirm before emailing.
       const suggestedCustomerEmail = await loadSuggestedCustomerEmail(conversation?.jobId as any);
@@ -445,7 +467,7 @@ export class EstimateController {
       logger.info("Estimate signed + PDF generated", { conversationId, messageId, key });
       return res.json({
         success: true,
-        data: { url, key, filename, estimateNumber, signedAt: signedAt.toISOString(), suggestedCustomerEmail },
+        data: { url, directUrl, key, filename, estimateNumber, signedAt: signedAt.toISOString(), suggestedCustomerEmail },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

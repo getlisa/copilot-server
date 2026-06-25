@@ -68,7 +68,6 @@ export const createConversationSchema = z.object({
     userId: z.string().min(1, "User ID is required"),
     jobId: z.string().nullable(),
     channelType: channelTypeSchema,
-    conversationId: z.string().optional(),
     members: z.array(z.string()).optional(),
     metadata: z
       .object({

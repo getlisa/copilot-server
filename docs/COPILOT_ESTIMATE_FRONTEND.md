@@ -248,7 +248,8 @@ Response:
 {
   success: true,
   data: {
-    url: string;          // presigned, downloadable (Content-Disposition: attachment)
+    url: string;          // PERMANENT download link (our API, streams the PDF — never expires)
+    directUrl: string;    // presigned direct-to-S3 link (downloadable, expires in ≤7 days)
     key: string;
     filename: string;     // e.g. "Estimate-E0ABC12.pdf"
     estimateNumber: string;
@@ -258,7 +259,10 @@ Response:
 }
 ```
 
-- Show a **"Download PDF"** button that opens `url`.
+- Show a **"Download PDF"** button that opens **`url`** — it's a permanent link (our own
+  endpoint streams the PDF from S3), so you can store/share it and it never goes stale.
+- `directUrl` is an optional presigned link straight to S3 (expires in ≤7 days) if you
+  specifically need a direct-S3 URL; for normal use prefer `url`.
 - If the user uploaded an equipment photo, it's embedded as a **thumbnail on the
   matching line item** automatically — nothing to do on the client.
 - After signing, the message metadata is updated with `quote.pdfKey`,
@@ -270,21 +274,21 @@ isn't a quote turn (nothing to sign).
 
 ### Link lifetime & re-download
 
-- **With CloudFront configured (prod):** the `url` returned by `sign` is a **permanent
-  CloudFront URL that never expires** — you can store it and reuse it forever.
-- **Without CloudFront (local/dev):** the `url` is a presigned S3 link that expires
-  (presigned URLs can live at most 7 days).
-
-Either way, this endpoint always returns a working link:
+The `url` from `sign` is our own endpoint that **streams the PDF straight from S3**, so
+it **never expires** — store it, email it, reuse it forever, no CloudFront needed:
 
 ```
 GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
-→ 302 redirect to the PDF (permanent CloudFront URL, or a fresh presigned URL)
+→ streams the PDF (Content-Disposition: attachment)
+→ add ?inline=1 to view in-browser instead of downloading
 ```
 
-Use the AI message's `id` as `:messageId`. Point a download/`<a download>` at it and
-you never have to worry about stale links. Returns `409` if the estimate isn't signed
-yet (no PDF), `404` if the message doesn't exist.
+Use the AI message's `id` as `:messageId`. Point a `<a download>` / "Download PDF"
+button at it. Returns `409` if the estimate isn't signed yet (no PDF), `404` if the
+message (or stored PDF) doesn't exist.
+
+> The presigned `directUrl` from `sign` still works but expires within 7 days (a hard
+> AWS limit on presigned URLs) — use `url` for anything you need to persist.
 
 ---
 
@@ -477,7 +481,15 @@ export async function signEstimate(
   messageId: string,                 // the AI message id from the `done` frame (done.data.id)
   signatureDataUrl: string,          // canvas.toDataURL("image/png")
   signerName?: string
-): Promise<{ url: string; key: string; filename: string; estimateNumber: string; signedAt: string }> {
+): Promise<{
+  url: string;            // permanent streaming link (never expires)
+  directUrl: string;      // presigned direct-to-S3 link (≤7 days)
+  key: string;
+  filename: string;
+  estimateNumber: string;
+  signedAt: string;
+  suggestedCustomerEmail: string | null;
+}> {
   const res = await fetch(
     `${baseUrl}/api/v1/copilot/${conversationId}/estimate/${messageId}/sign`,
     {
@@ -488,7 +500,7 @@ export async function signEstimate(
   );
   const json = await res.json();
   if (!res.ok || !json.success) throw new Error(json?.error?.message ?? `Sign failed: ${res.status}`);
-  return json.data; // { url, key, filename, estimateNumber, signedAt, suggestedCustomerEmail }
+  return json.data; // { url, directUrl, key, filename, estimateNumber, signedAt, suggestedCustomerEmail }
 }
 
 // Email the signed estimate PDF to the customer (call after signing + confirming the address).
