@@ -29,7 +29,23 @@ app.use(
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
   })
 );
-app.use(express.json({ limit: "50mb" }));
+// Parse JSON bodies. Some native clients (ClaraWearables, AskAI) POST JSON without a
+// proper `Content-Type: application/json` header, which would otherwise leave req.body
+// undefined and surface as confusing "body Required" / destructure errors. So we also
+// parse when the content-type is missing, text/plain, or octet-stream — but NOT for
+// multipart/form-data (image uploads via multer) or urlencoded forms.
+app.use(
+  express.json({
+    limit: "50mb",
+    type: (req) => {
+      const ct = (req.headers["content-type"] || "").toLowerCase();
+      if (!ct) return true; // no header → assume JSON
+      if (ct.includes("multipart/form-data")) return false;
+      if (ct.includes("application/x-www-form-urlencoded")) return false;
+      return /application\/json|\+json|text\/plain|application\/octet-stream/.test(ct);
+    },
+  })
+);
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Request logging middleware
@@ -39,6 +55,8 @@ app.use((req, res, next) => {
   logger.request(req.method, req.url, {
     query: Object.keys(req.query).length > 0 ? req.query : undefined,
     bodyKeys: req.body ? Object.keys(req.body) : undefined,
+    bodyParsed: req.body !== undefined,
+    contentType: req.headers["content-type"] ?? "(none)",
     ip: req.ip,
     userAgent: req.headers["user-agent"],
   });

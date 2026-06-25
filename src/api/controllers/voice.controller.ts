@@ -26,7 +26,7 @@ export class VoiceController {
    */
   static async start(req: Request, res: Response) {
     try {
-      const { conversationId, userId } = req.body as {
+      const { conversationId, userId } = (req.body ?? {}) as {
         conversationId?: string;
         userId?: string;
       };
@@ -71,7 +71,7 @@ export class VoiceController {
    */
   static async sendAudio(req: Request, res: Response) {
     try {
-      const { sessionId, audioBase64, commit } = req.body as {
+      const { sessionId, audioBase64, commit } = (req.body ?? {}) as {
         sessionId?: string;
         audioBase64?: string;
         commit?: boolean;
@@ -153,7 +153,7 @@ export class VoiceController {
    * Body: { sessionId: string }
    */
   static async stop(req: Request, res: Response) {
-    const { sessionId } = req.body as { sessionId?: string };
+    const { sessionId } = (req.body ?? {}) as { sessionId?: string };
     if (!sessionId) {
       return res.status(400).json({ error: "sessionId is required" });
     }
@@ -174,7 +174,7 @@ export class VoiceController {
    * Body: { audioBase64: string, mimeType?: string, language?: string }
    */
   static async transcribe(req: Request, res: Response) {
-    const { audioBase64, mimeType, language } = req.body as {
+    const { audioBase64, mimeType, language } = (req.body ?? {}) as {
       audioBase64?: string;
       mimeType?: string;
       language?: string;
@@ -279,7 +279,7 @@ export class VoiceController {
    * Uses gpt-4o-mini-tts and returns audio/mpeg binary.
    */
   static async tts(req: Request, res: Response) {
-    const { text, voice } = req.body as { text?: string; voice?: string };
+    const { text, voice } = (req.body ?? {}) as { text?: string; voice?: string };
 
     if (!text || !text.trim()) {
       return res.status(400).json({ error: "text is required" });
