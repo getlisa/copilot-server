@@ -73,6 +73,8 @@ export async function callStructured(opts: {
   history?: EstimateTurn[];
   jsonSchema: any;
   signal?: AbortSignal;
+  /** Override the model (e.g. a cheap classifier for the router). Defaults to ESTIMATE_MODEL. */
+  model?: string;
 }): Promise<{ raw: unknown; usage: Usage }> {
   const messages: any[] = [
     { role: "system", content: opts.system },
@@ -82,7 +84,7 @@ export async function callStructured(opts: {
 
   const completion = await openai.chat.completions.create(
     {
-      model: ESTIMATE_MODEL,
+      model: opts.model ?? ESTIMATE_MODEL,
       messages,
       response_format: { type: "json_schema", json_schema: opts.jsonSchema },
     },
