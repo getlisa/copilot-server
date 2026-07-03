@@ -1,13 +1,13 @@
 import { RealtimeVoiceSession, RealtimeVoiceOptions } from "../handler/RealtimeVoiceSession";
-import { ClaraAgent, getClaraAgent } from "./ClaraAgent";
+import { runToCompletion } from "../copilot/orchestrator/runOrchestrator";
 import type { AgentContext } from "../types/agent.types";
 import logger from "../lib/logger";
 
 /**
- * Voice-first Clara agent: OpenAI Realtime (audio) for STT/TTS + Agent SDK (Clara) for reasoning.
+ * Voice-first Clara agent: OpenAI Realtime (audio) for STT/TTS + the LangGraph
+ * orchestrator (general agent) for reasoning.
  */
 export class ClaraVoiceAgent {
-  private clara?: ClaraAgent;
   private voiceSession: RealtimeVoiceSession;
   private context?: AgentContext;
 
@@ -30,9 +30,7 @@ export class ClaraVoiceAgent {
   }
 
   async init(): Promise<void> {
-    if (!this.clara) {
-      this.clara = await getClaraAgent();
-    }
+    // No agent warm-up needed; the orchestrator graph is compiled lazily on first use.
   }
 
   async start(conversationId: string, userId: string): Promise<void> {
@@ -61,13 +59,19 @@ export class ClaraVoiceAgent {
 
   private async handleTranscription(text: string): Promise<void> {
     if (!text.trim()) return;
-    if (!this.clara || !this.context) {
+    if (!this.context) {
       logger.warn("Voice agent not initialized; ignoring transcription");
       return;
     }
 
     try {
-      const response = await this.clara.processMessage(text, this.context);
+      const response = await runToCompletion({
+        conversationId: this.context.conversationId,
+        userId: this.context.userId,
+        content: text,
+        modeHint: "general",
+        timezone: this.context.timezone,
+      });
       if (response.content) {
         this.voiceSession.sendText(response.content);
       }

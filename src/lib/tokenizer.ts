@@ -1,6 +1,8 @@
 import { encoding_for_model, get_encoding, TiktokenModel } from "@dqbd/tiktoken";
-import { AgentInputItem } from "@openai/agents";
 import dotenv from "dotenv";
+
+/** Minimal structural type for token counting (was `AgentInputItem` from @openai/agents). */
+type TokenizableItem = { content?: Array<{ type?: string; text?: string }> };
 
 dotenv.config();
 
@@ -30,7 +32,7 @@ function countTokens(texts: string[], model: string): number {
  * Non-text content (images, audio, etc.) is ignored for token estimation.
  */
 export function countTokensForMessages(
-  messages: AgentInputItem[],
+  messages: TokenizableItem[],
   model: string
 ): number {
   const segments: string[] = [];

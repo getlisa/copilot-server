@@ -1,11 +1,30 @@
 import { Router } from "express";
 import { EstimateController } from "../controllers/estimate.controller";
+import { CopilotController } from "../controllers/copilot.controller";
 import { validate } from "../middlewares/validate";
 import { estimateStreamSchema, estimateSignSchema, estimateEmailSchema } from "../schemas/estimate.schema";
 
 const estimateRoute = Router();
 
 // Note: No auth middleware yet, for parity with the existing copilot/chat routes.
+
+/**
+ * @route   POST /api/v1/copilot/:conversationId/stream
+ * @desc    UNIFIED copilot endpoint. Runs the LangGraph orchestrator (router →
+ *          general | estimate) and streams named SSE frames (user_message, thinking,
+ *          routing, node, chunk, tool_call, citations, sources, followUps, identified,
+ *          message, quote, questions, done, error). The router auto-selects the agent;
+ *          an optional body `mode` ("estimate"|"general") is treated as a prior.
+ * @access  Public (for testing)
+ */
+estimateRoute.post("/:conversationId/stream", CopilotController.stream);
+
+/**
+ * @route   POST /api/v1/copilot/:conversationId/send
+ * @desc    Non-streaming variant of the unified copilot endpoint.
+ * @access  Public (for testing)
+ */
+estimateRoute.post("/:conversationId/send", CopilotController.send);
 
 /**
  * @route   POST /api/v1/copilot/:conversationId/estimate/stream
@@ -40,6 +59,17 @@ estimateRoute.post(
   "/:conversationId/estimate/:messageId/email",
   validate(estimateEmailSchema),
   EstimateController.emailEstimate
+);
+
+/**
+ * @route   GET /api/v1/copilot/:conversationId/estimate/:messageId/preview
+ * @desc    Stream an UNSIGNED draft of the quotation PDF (inline) so the customer can
+ *          preview the estimate before signing. Generated on the fly; no signature.
+ * @access  Public (for demo)
+ */
+estimateRoute.get(
+  "/:conversationId/estimate/:messageId/preview",
+  EstimateController.previewPdf
 );
 
 /**

@@ -367,6 +367,73 @@ export class EstimateController {
   }
 
   /**
+   * GET /api/v1/copilot/:conversationId/estimate/:messageId/preview
+   *
+   * Stream an UNSIGNED draft of the quotation PDF so the customer can preview the
+   * estimate before committing a signature. Generated on the fly (never stored), served
+   * inline (`?download=1` to force a download). Works as soon as the quote exists — it
+   * does NOT require the estimate to be signed (that's `downloadPdf`).
+   */
+  static async previewPdf(req: Request, res: Response) {
+    const { conversationId, messageId } = req.params;
+    try {
+      const msg = await messageRepository.getById(messageId);
+      if (!msg || msg.conversationId !== conversationId) {
+        return res.status(404).json({ success: false, error: { status: 404, message: "Quote not found" } });
+      }
+
+      const meta = (msg.metadata ?? {}) as any;
+      const quote = meta?.quote as
+        | (EstimateQuote & { estimateNumber?: string | null; equipmentImageKey?: string | null })
+        | null;
+      const isEstimate = meta?.mode === "estimate" || meta?.route === "estimate";
+      if (!isEstimate || meta?.responseKind !== "quote" || !quote) {
+        return res
+          .status(409)
+          .json({ success: false, error: { status: 409, message: "This message has no estimate to preview." } });
+      }
+
+      // Rebuild the PDF inputs (header from the conversation, thumbnail from the stashed photo).
+      const conversation = await conversationRepository.getById(conversationId);
+      const header = await loadQuoteHeader({
+        jobId: conversation?.jobId as any,
+        userId: conversation?.userId as any,
+      });
+
+      let thumbnail: { buffer: Buffer; mimeType?: string } | undefined;
+      if (quote.equipmentImageKey) {
+        try {
+          thumbnail = { buffer: await getObjectBufferFromS3(quote.equipmentImageKey) };
+        } catch {
+          /* photo missing/unreadable — preview just renders without a thumbnail */
+        }
+      }
+
+      const estimateNumber = quote.estimateNumber || `E${Date.now().toString(36).toUpperCase()}`;
+      // No `signature` → buildQuotePdf renders the unsigned draft (empty signature area).
+      const buffer = await buildQuotePdf({
+        quote: quote as EstimateQuote,
+        header,
+        estimateNumber,
+        date: new Date(),
+        thumbnail,
+      });
+
+      const filename = `Estimate-${estimateNumber}-PREVIEW.pdf`;
+      const disposition = req.query.download ? "attachment" : "inline";
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `${disposition}; filename="${filename}"`);
+      res.setHeader("Content-Length", String(buffer.length));
+      res.setHeader("Cache-Control", "private, no-cache");
+      return res.end(buffer);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("Estimate preview error", { conversationId, messageId, error: message });
+      return res.status(500).json({ success: false, error: { status: 500, message } });
+    }
+  }
+
+  /**
    * POST /api/v1/copilot/:conversationId/estimate/:messageId/sign
    *
    * Confirm a previously-streamed estimate with the customer's digital signature, then

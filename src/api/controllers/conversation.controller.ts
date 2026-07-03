@@ -8,7 +8,6 @@ import logger from "../../lib/logger";
 import prisma from "../../lib/prisma";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
 import { trackFileEvent } from "../../lib/events";
-import { getClaraAgent } from "../../agent/ClaraAgent";
 import { summarizeImageUrl } from "../../lib/imageSummary";
 import { RequestWithUser } from "../middlewares/auth";
 import {
