@@ -2,6 +2,7 @@ import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { callStructured, EstimateTurn } from "../estimate/estimateService";
 import { matchPricebook } from "./pricebookMatch";
+import { enqueueResolve } from "./homeDepotCatalog";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
 
 /**
@@ -269,13 +270,19 @@ export async function runEstimatingTurn(opts: {
     const match =
       (explicitCode ? byCode.get(explicitCode) : undefined) ??
       matchPricebook(description, matchable);
-    return match
-      ? {
-          pricebookCode: match.code,
-          unitPrice: match.unitPrice,
-          unit: match.unit,
-        }
-      : { pricebookCode: null, unitPrice: null, unit: null };
+    if (match) {
+      return {
+        pricebookCode: match.code,
+        unitPrice: match.unitPrice,
+        unit: match.unit,
+      };
+    }
+    // Pricebook miss. Stay unpriced (the `unmatched` flag) rather than guess, and kick off a
+    // background Home Depot resolve: a cold search is ~13s, far too slow to block this turn.
+    // If it resolves, the item is written to this company's pricebook and the line is
+    // backfilled, so matchPricebook() hits it from then on with no API call.
+    enqueueResolve(description, opts.companyId);
+    return { pricebookCode: null, unitPrice: null, unit: null };
   };
 
   for (const op of output.operations) {

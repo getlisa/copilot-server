@@ -388,20 +388,48 @@ model PricebookItem {
   unitPrice   Decimal  @map("unit_price") @db.Decimal(12, 2)
   synonyms    String[] @default([])
 
+  /// Where this row came from. MANUAL rows are company-authored and never touched by the
+  /// resolver; HOME_DEPOT rows are written by the catalog resolver on a pricebook miss so
+  /// matchPricebook() finds them on the NEXT turn with no extra API call — the pricebook
+  /// learns. Refresh and admin purge both key off this.
+  source          PricebookSource @default(MANUAL)
+  /// PROVISIONAL until a technician accepts the line it was created for. A bad resolve
+  /// would otherwise become the company's permanent price for that item.
+  provisional     Boolean         @default(false)
+  /// Home Depot product identity (source = HOME_DEPOT only).
+  externalId      String?         @map("external_id")
+  externalLink    String?         @map("external_link")
+  brand           String?
+  rating          Decimal?        @db.Decimal(3, 2)
+  /// Pack size behind unitPrice — guards a 12-pack price being stored as a unit price.
+  packageQuantity Decimal?        @map("package_quantity") @db.Decimal(12, 2)
+  /// Last time the external price was confirmed. Drives the refresh job.
+  lastResolvedAt  DateTime?       @map("last_resolved_at")
+
   @@unique([companyId, code])
   @@index([companyId])
+  @@index([companyId, source])
+  @@index([externalId])
   @@map("pricebook_items")
+  @@schema("public")
+}
+
+enum PricebookSource {
+  MANUAL
+  HOME_DEPOT
+
+  @@map("pricebook_source")
   @@schema("public")
 }
 
 /// Problem-to-material associations taught by technicians (pre-seeded for MVP).
 model KbEntry {
-  id                  Int      @id @default(autoincrement())
-  companyId           Int      @map("company_id")
+  id                  Int     @id @default(autoincrement())
+  companyId           Int     @map("company_id")
   problem             String
-  materialDescription String   @map("material_description")
-  pricebookCode       String?  @map("pricebook_code")
-  defaultQuantity     Decimal  @default(1) @map("default_quantity") @db.Decimal(12, 2)
+  materialDescription String  @map("material_description")
+  pricebookCode       String? @map("pricebook_code")
+  defaultQuantity     Decimal @default(1) @map("default_quantity") @db.Decimal(12, 2)
   unit                String?
 
   @@index([companyId])
