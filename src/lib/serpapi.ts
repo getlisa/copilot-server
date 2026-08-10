@@ -27,6 +27,25 @@ const COOLDOWN_MS = Number(process.env.SERP_KEY_COOLDOWN_MS) > 0
   : 15 * 60 * 1000;
 
 /**
+ * Per-request timeout. A cold search measures ~13s, so 25s is generous; without this a
+ * degraded upstream hangs the caller indefinitely (observed: the product engine returning
+ * nothing for 90s+, which stalled the resolver for minutes per item).
+ */
+const REQUEST_TIMEOUT_MS = Number(process.env.SERP_REQUEST_TIMEOUT_MS) > 0
+  ? Number(process.env.SERP_REQUEST_TIMEOUT_MS)
+  : 25_000;
+
+/**
+ * Retries for TRANSIENT failures — 5xx, timeouts, socket errors. These are upstream blips,
+ * not key problems, so they retry on the SAME key rather than rotating (rotating would burn
+ * the pool on an outage). Distinct from the quota path, which does rotate.
+ */
+const TRANSIENT_RETRIES = 2;
+const TRANSIENT_BACKOFF_MS = 1_000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
  * `engine=home_depot_product` requires a delivery ZIP — without one SerpApi returns a bare
  * `null` body rather than an error. Home Depot prices are store-specific, so this SHOULD be
  * set per company (SERP_DELIVERY_ZIP) once regional pricing matters. Until then this default
@@ -154,28 +173,50 @@ async function request(params: Record<string, string>, signal?: AbortSignal): Pr
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     url.searchParams.set("api_key", key.value);
 
-    let res: Response;
-    try {
-      res = await fetch(url, { signal });
-    } catch (err) {
-      if ((err as any)?.name === "AbortError") throw err;
-      throw new SerpApiError(err instanceof Error ? err.message : String(err));
+    let transientErr: string | null = null;
+
+    for (let attempt = 0; attempt <= TRANSIENT_RETRIES; attempt++) {
+      if (attempt > 0) await sleep(TRANSIENT_BACKOFF_MS * attempt);
+
+      // Caller abort and our own timeout are both honoured; whichever fires first wins.
+      const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+      const composed = signal ? AbortSignal.any([signal, timeout]) : timeout;
+
+      let res: Response;
+      try {
+        res = await fetch(url, { signal: composed });
+      } catch (err) {
+        // A caller-initiated abort is final; our timeout and socket errors are transient.
+        if (signal?.aborted) throw err;
+        transientErr = err instanceof Error ? err.message : String(err);
+        continue;
+      }
+
+      const body = await res.json().catch(() => null);
+
+      if (isQuotaError(res.status, body)) {
+        markExhausted(key, body?.error ?? `HTTP ${res.status}`);
+        break; // rotate to the next key
+      }
+      if (res.status >= 500) {
+        transientErr = `SerpApi HTTP ${res.status}`;
+        continue; // upstream blip — same key, try again
+      }
+      if (!res.ok) {
+        throw new SerpApiError(body?.error ?? `SerpApi HTTP ${res.status}`, res.status);
+      }
+      if (body?.error) {
+        // Non-quota API error (e.g. `sort` is not supported for Home Depot US) — never retry.
+        throw new SerpApiError(body.error);
+      }
+      return body;
     }
 
-    const body = await res.json().catch(() => null);
-
-    if (isQuotaError(res.status, body)) {
-      markExhausted(key, body?.error ?? `HTTP ${res.status}`);
-      continue; // retry on the next key
+    // Exhausted transient retries on this key without a quota signal → surface it rather
+    // than silently rotating through every key during an upstream outage.
+    if (transientErr) {
+      throw new SerpApiError(`${transientErr} (after ${TRANSIENT_RETRIES + 1} attempts)`);
     }
-    if (!res.ok) {
-      throw new SerpApiError(body?.error ?? `SerpApi HTTP ${res.status}`, res.status);
-    }
-    if (body?.error) {
-      // Non-quota API error (e.g. `sort` is not supported for Home Depot US) — do not retry.
-      throw new SerpApiError(body.error);
-    }
-    return body;
   }
 }
 
