@@ -60,8 +60,13 @@ export interface ResolvedCatalogItem {
   packageQuantity?: number;
 }
 
+/**
+ * Gated on keys alone — the delivery ZIP has a working default (see lib/serpapi.ts), so a
+ * SERP_API_KEY_* is the only thing needed to switch the catalog on. With no key configured
+ * this is a no-op and pricing behaviour is exactly as it was before the catalog existed.
+ */
 export function isCatalogEnabled(): boolean {
-  return keysConfigured() > 0 && Boolean(process.env.SERP_DELIVERY_ZIP);
+  return keysConfigured() > 0;
 }
 
 /**

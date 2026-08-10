@@ -26,6 +26,18 @@ const COOLDOWN_MS = Number(process.env.SERP_KEY_COOLDOWN_MS) > 0
   ? Number(process.env.SERP_KEY_COOLDOWN_MS)
   : 15 * 60 * 1000;
 
+/**
+ * `engine=home_depot_product` requires a delivery ZIP — without one SerpApi returns a bare
+ * `null` body rather than an error. Home Depot prices are store-specific, so this SHOULD be
+ * set per company (SERP_DELIVERY_ZIP) once regional pricing matters. Until then this default
+ * keeps the resolver working with no configuration; it is a ZIP verified against this API.
+ */
+const DEFAULT_DELIVERY_ZIP = "04401";
+
+export function deliveryZip(): string {
+  return process.env.SERP_DELIVERY_ZIP?.trim() || DEFAULT_DELIVERY_ZIP;
+}
+
 interface PoolKey {
   /** 1-based pool index, safe to log. The value itself never is. */
   index: number;
@@ -239,15 +251,12 @@ export async function getHomeDepotProduct(
   productId: string,
   opts?: { deliveryZip?: string; signal?: AbortSignal }
 ): Promise<HdProductDetail | null> {
-  const deliveryZip = opts?.deliveryZip ?? process.env.SERP_DELIVERY_ZIP;
-  if (!deliveryZip) {
-    throw new SerpApiError(
-      "delivery_zip is required for engine=home_depot_product (set SERP_DELIVERY_ZIP)"
-    );
-  }
-
   const body = await request(
-    { engine: "home_depot_product", product_id: productId, delivery_zip: deliveryZip },
+    {
+      engine: "home_depot_product",
+      product_id: productId,
+      delivery_zip: opts?.deliveryZip ?? deliveryZip(),
+    },
     opts?.signal
   );
   const r = body?.product_results;
