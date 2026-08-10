@@ -42,6 +42,9 @@ model companies {
   created_at       DateTime           @default(now()) @db.Timestamp(6)
   updated_at       DateTime           @default(now()) @db.Timestamp(6)
   address          Json?              @default("{}")
+  phone            String?            @db.VarChar(20)
+  email            String?            @db.VarChar(200)
+  license_number   String?            @db.VarChar(100)
   company_configs  company_configs?
   crm_connections  crm_connections?
   crm_entity_links crm_entity_links[]

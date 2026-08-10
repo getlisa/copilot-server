@@ -9,6 +9,11 @@ import {
 import { matchPricebook } from "../../copilot/estimating/pricebookMatch";
 import { toQuoteDto, toLineItemDto } from "../../copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
+import { buildProposalDocx } from "../../copilot/estimating/proposalDocx";
+import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating/proposalEmail";
+import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
+import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
+import { getPresignedUrlForKey } from "../../lib/s3";
 import { EstimateTurn } from "../../copilot/estimate/estimateService";
 
 /**
@@ -38,6 +43,36 @@ async function loadOwnedQuote(quoteId: string, userId: bigint) {
     include: { lineItems: true },
   });
 }
+
+/** Shared proposal assembly: header from DB branding, DOCX buffer, and the DTO. */
+async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: quote.conversationId },
+  });
+  const header = await loadQuoteHeader({
+    jobId: conversation?.jobId,
+    userId: quote.userId,
+    companyId: quote.companyId,
+  });
+  const dto = toQuoteDto(quote);
+  const projectTitle =
+    header.customerName !== "Customer" ? `Work for ${header.customerName}` : "Scope of Work";
+  const buffer = await buildProposalDocx({
+    header,
+    projectTitle,
+    projectAddress: header.serviceAddress,
+    date: new Date(),
+    scopeItems: dto.lineItems.map((item) =>
+      item.quantity != null
+        ? `${item.description} — ${item.quantity}${item.unit ? ` ${item.unit}` : ""}`
+        : item.description
+    ),
+    total: dto.total,
+  });
+  return { header, dto, projectTitle, buffer };
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 async function matcherFor(companyId: number) {
   const pricebook = await prisma.pricebookItem.findMany({ where: { companyId } });
@@ -102,11 +137,32 @@ export class QuoteController {
         id: true,
         senderType: true,
         content: true,
+        contentType: true,
+        attachments: true,
         metadata: true,
         createdAt: true,
       },
     });
-    res.json({ success: true, data: { ...toQuoteDto(quote), messages } });
+    // Stored presigned URLs expire — re-sign image attachments from their s3Key.
+    const hydrated = await Promise.all(
+      messages.map(async (m) => {
+        const atts = Array.isArray(m.attachments) ? (m.attachments as any[]) : [];
+        if (atts.length === 0) return m;
+        const attachments = await Promise.all(
+          atts.map(async (a) => {
+            const s3Key = a?.metadata?.s3Key;
+            if (!s3Key) return a;
+            try {
+              return { ...a, url: await getPresignedUrlForKey(s3Key) };
+            } catch {
+              return a;
+            }
+          })
+        );
+        return { ...m, attachments };
+      })
+    );
+    res.json({ success: true, data: { ...toQuoteDto(quote), messages: hydrated } });
   }
 
   /** POST /api/v1/quotes/:quoteId/messages — one agent turn. */
@@ -115,6 +171,9 @@ export class QuoteController {
     if (!user) return;
     const content = typeof req.body?.content === "string" ? req.body.content.trim() : "";
     if (!content) return fail(res, 400, "content is required"); // nothing said → no line item, no guess
+    const imageUrls: string[] = Array.isArray(req.body?.imageUrls)
+      ? req.body.imageUrls.filter((u: unknown) => typeof u === "string").slice(0, 4)
+      : [];
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED")
@@ -126,14 +185,22 @@ export class QuoteController {
       select: { senderType: true, content: true, metadata: true },
     });
 
-    await prisma.message.create({
-      data: {
-        conversationId: quote.conversationId,
-        senderType: "USER",
-        senderId: user.userId,
-        content,
-      },
-    });
+    // With images, the upload endpoint already persisted this turn's USER message
+    // (IMAGE message with attachments) — creating another would duplicate it, and
+    // that trailing row must not also appear in history as a prior turn.
+    if (imageUrls.length > 0) {
+      const last = priorMessages[priorMessages.length - 1];
+      if (last?.senderType === "USER" && last.content === content) priorMessages.pop();
+    } else {
+      await prisma.message.create({
+        data: {
+          conversationId: quote.conversationId,
+          senderType: "USER",
+          senderId: user.userId,
+          content,
+        },
+      });
+    }
 
     const history: EstimateTurn[] = priorMessages
       .filter((m) => m.senderType === "USER" || m.senderType === "AI")
@@ -151,6 +218,7 @@ export class QuoteController {
         utterance: content,
         history,
         followUpsAsked: countRecentFollowUps(priorMessages),
+        imageUrls,
       });
     } catch (err) {
       logger.error("Estimating turn failed", {
@@ -160,12 +228,35 @@ export class QuoteController {
       return fail(res, 502, "The agent could not process that — please try again");
     }
 
+    // Clarifying questions ship as the buddy chat's block format so the UI
+    // renders them as multiple-choice chips with an "Other" free-text box.
+    const metadata: Record<string, unknown> = { isFollowUpQuestion: turn.isFollowUpQuestion };
+    if (turn.questions.length > 0) {
+      metadata.blocks = [
+        { kind: "markdown", text: turn.reply },
+        {
+          kind: "questions",
+          data: {
+            questions: turn.questions.map((q, qi) => ({
+              id: `q${qi + 1}`,
+              question: q.question,
+              options: q.options.map((opt, oi) => ({
+                id: `q${qi + 1}o${oi + 1}`,
+                label: opt,
+                value: opt,
+              })),
+              allowOther: true,
+            })),
+          },
+        },
+      ];
+    }
     const aiMessage = await prisma.message.create({
       data: {
         conversationId: quote.conversationId,
         senderType: "AI",
         content: turn.reply,
-        metadata: { isFollowUpQuestion: turn.isFollowUpQuestion },
+        metadata: metadata as any,
       },
     });
 
@@ -355,5 +446,77 @@ export class QuoteController {
         `attachment; filename="quote-${stamp}-${dto.status.toLowerCase()}.docx"`
       )
       .send(buffer);
+  }
+
+  /** GET /api/v1/quotes/:quoteId/proposal-docx — branded bid-proposal Word export. */
+  static async downloadProposalDocx(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    const { buffer } = await buildProposalParts(quote);
+    const stamp = new Date().toISOString().slice(0, 10);
+    res
+      .setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      )
+      .setHeader("Content-Disposition", `attachment; filename="proposal-${stamp}.docx"`)
+      .send(buffer);
+  }
+
+  /** GET /api/v1/quotes/:quoteId/email-draft — drafted proposal email for in-app review. */
+  static async emailDraft(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    const { header, dto, projectTitle } = await buildProposalParts(quote);
+    const draft = draftProposalEmail({
+      header,
+      projectTitle,
+      lineItems: dto.lineItems,
+      total: dto.total,
+    });
+    res.json({
+      success: true,
+      data: { to: String(req.user?.email ?? ""), ...draft },
+    });
+  }
+
+  /**
+   * POST /api/v1/quotes/:quoteId/email — send the reviewed proposal email, DOCX attached.
+   * Body: { to, subject, body } as reviewed/edited in the app.
+   */
+  static async emailProposal(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    if (!isEmailConfigured())
+      return fail(res, 503, "Email is not configured on the server");
+    const to = String(req.body?.to ?? "").trim();
+    if (!EMAIL_RE.test(to)) return fail(res, 400, "A valid recipient email is required");
+    const subject = String(req.body?.subject ?? "").trim();
+    const body = String(req.body?.body ?? "").trim();
+    if (!subject || !body) return fail(res, 400, "Subject and body are required");
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    if (!quote) return fail(res, 404, "Quote not found");
+
+    const { header, buffer } = await buildProposalParts(quote);
+    await sendEmail({
+      to,
+      from: SENDGRID_FROM_EMAIL,
+      fromName: SENDGRID_FROM_NAME || header.companyName,
+      ...(header.companyEmail ? { replyTo: header.companyEmail } : {}),
+      subject,
+      html: renderProposalHtml(header, body),
+      text: body,
+      attachment: {
+        filename: `proposal-${new Date().toISOString().slice(0, 10)}.docx`,
+        content: buffer,
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      },
+    });
+    logger.info("Proposal emailed", { quoteId: quote.id, to });
+    res.json({ success: true, data: { sent: true, to } });
   }
 }

@@ -16,9 +16,9 @@ import { QuoteLineItem, PricebookItem } from "@prisma/client";
  *  - quantity/description changes update the existing row, never duplicate
  *  - a reference matching >1 existing items → ambiguous op (tap-to-select, no guessing)
  *  - missing quantity stays null — never invented
- *  - described problem → KB lookup: single match → agent-suggested proposal;
- *    several/none → follow-up question, capped at 2, then fall back to asking
- *    the technician to name the material directly
+ *  - described problem/job → KB lookup: single match → agent-suggested proposal;
+ *    otherwise the agent scopes it from its own trade knowledge: clarify needs
+ *    (follow-ups capped at 2) → propose an itemized list → add on confirmation
  */
 
 interface AgentOp {
@@ -38,10 +38,16 @@ interface AgentOp {
   kbEntryId: number | null;
 }
 
+interface AgentQuestion {
+  question: string;
+  options: string[];
+}
+
 interface AgentOutput {
   operations: AgentOp[];
   reply: string;
   isFollowUpQuestion: boolean;
+  questions: AgentQuestion[] | null;
 }
 
 const nullable = (t: string) => ({ type: [t, "null"] });
@@ -96,12 +102,26 @@ const TURN_JSON_SCHEMA = {
       },
       reply: { type: "string" },
       isFollowUpQuestion: { type: "boolean" },
+      questions: {
+        type: ["array", "null"],
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            question: { type: "string" },
+            options: { type: "array", items: { type: "string" } },
+          },
+          required: ["question", "options"],
+        },
+      },
     },
-    required: ["operations", "reply", "isFollowUpQuestion"],
+    required: ["operations", "reply", "isFollowUpQuestion", "questions"],
   },
 };
 
-const SYSTEM_PROMPT = `You are the Estimating Agent for a field-service technician building a quote by talking through a job. Parse each utterance into explicit line-item operations against the CURRENT LINE ITEMS you are given. You never price anything — pricing happens downstream against the org's pricebook.
+const SYSTEM_PROMPT = `You are Clara, an expert estimating assistant for field-service technicians working in HVAC, plumbing, fire inspection, fire protection, electrical, and similar technical trades. You help build a quote by talking through a job: parse each utterance into explicit line-item operations against the CURRENT LINE ITEMS you are given. You never price anything — pricing happens downstream against the org's pricebook.
+
+Trade expertise: you know the codes and standards that govern this work — NFPA for fire protection (e.g. NFPA 13 sprinkler installation, NFPA 101 life safety), NEC for electrical, ICC codes for building/plumbing, ASHRAE for HVAC. When scoping a described job, briefly share the considerations and standards that matter (design requirements, permits, licensed-contractor requirements, inspections) — but always steer back to building the estimate: that expert context accompanies your clarifying questions and item proposals, it never replaces them. If a query is entirely outside these trades, politely say you're specialized for technical field-service trades.
 
 Rules:
 - Multiple items in one statement → one add_item per item.
@@ -111,14 +131,19 @@ Rules:
 - If a spoken reference ("that one", "the panel") could match MORE THAN ONE existing line item, NEVER guess: emit ambiguous_reference with action ("remove" or "update"), candidateItemIds, referenceText, and any pending change fields (description/quantity/unit). Do not also emit the underlying op.
 - Never invent a quantity. Item named without one → add_item with quantity null.
 - Units: keep what the technician said (ft, EA, etc.), else null.
+- The technician may attach photos. Use them to identify equipment, materials, model/size details, and site conditions when parsing items or scoping a job — but still never invent quantities or prices from a photo alone.
 
-Described problems (no material named): check the KNOWLEDGE BASE ENTRIES provided.
-- Exactly one entry clearly fits → kb_proposal with its kbEntryId (quantity from the entry unless the technician said one). In your reply, make clear this is a suggestion they must confirm.
-- Several entries fit similarly, or none clearly → ask ONE short follow-up question (isFollowUpQuestion true, no operations).
-- You will be told how many follow-ups were already asked for the current problem. If 2 were already asked, do NOT ask another: ask them to name the material directly (isFollowUpQuestion false).
-- If the knowledge base list is EMPTY, say you don't have a suggestion for this one yet and ask them to name the material or item they need (isFollowUpQuestion false).
+Whenever you ask ANY clarifying question (isFollowUpQuestion true), also populate the questions array with the same question(s) as multiple-choice: 2-5 short, likely answer options each. Set questions to null when you are not asking anything.
 
-Reply: one or two short sentences confirming what changed, in plain language. Point to the Invoice tab for quantities, prices, and anything flagged. If the input is small talk or empty of intent, reply briefly with no operations.`;
+Described problems or jobs (no specific material named, e.g. "need to install an EV charger"):
+- Check the KNOWLEDGE BASE ENTRIES first. Exactly one entry clearly fits → kb_proposal with its kbEntryId (quantity from the entry unless the technician said one). In your reply, make clear this is a suggestion they must confirm.
+- Otherwise, use your own trade knowledge to scope the job. Follow this sequence:
+  1. CLARIFY: if details that materially change the equipment list are unknown (e.g. for an EV charger: level/amperage, distance from the panel, indoor or outdoor, panel capacity), ask in ONE round (isFollowUpQuestion true, no operations): populate the questions array with 1-4 short questions, each with 2-5 likely answer options covering the common cases (the UI adds an "Other" free-text box automatically). Keep the reply itself to a brief lead-in with any expert context. You will be told how many follow-up rounds were already asked; after 2, stop asking and proceed with reasonable assumptions, stating them.
+  2. PROPOSE: reply with a clearly itemized list of the equipment/materials needed — each with a quantity and unit where sensible — and ask the technician to confirm before you add anything (isFollowUpQuestion false, NO operations yet).
+  3. CONFIRM & ADD: when the technician confirms (or confirms with changes), emit one add_item per agreed item with its quantity and unit. If they adjust the list, apply their adjustments.
+- Never add proposed items to the quote before the technician confirms them in chat.
+
+Reply: respond like a friendly, knowledgeable tradesperson — conversational and helpful, not robotic. Confirm what changed in plain language; when you added or changed multiple items, list them as short markdown bullets. When scoping a job, lead with a sentence or two of relevant expert context (key requirements, applicable standards) before your question or proposed list. Point to the Invoice tab for quantities, prices, and anything flagged. Keep replies concise enough to be read aloud — expert context is a couple of sentences, not a lecture. If the input is small talk or empty of intent, reply naturally with no operations.`;
 
 interface KbEntryLite {
   id: number;
@@ -182,6 +207,8 @@ export function countRecentFollowUps(
 export interface AgentTurnResult {
   reply: string;
   isFollowUpQuestion: boolean;
+  /** Clarifying questions as multiple-choice (rendered with an "Other" box in the UI). */
+  questions: AgentQuestion[];
 }
 
 export async function runEstimatingTurn(opts: {
@@ -190,6 +217,8 @@ export async function runEstimatingTurn(opts: {
   utterance: string;
   history: EstimateTurn[];
   followUpsAsked: number;
+  /** Presigned URLs of photos attached to this turn (vision input). */
+  imageUrls?: string[];
 }): Promise<AgentTurnResult> {
   const [items, kbEntries, pricebook] = await Promise.all([
     prisma.quoteLineItem.findMany({
@@ -200,14 +229,15 @@ export async function runEstimatingTurn(opts: {
     prisma.pricebookItem.findMany({ where: { companyId: opts.companyId } }),
   ]);
 
+  const turnContext = buildTurnContext(items, kbEntries, opts.followUpsAsked, opts.utterance);
   const { raw } = await callStructured({
     system: SYSTEM_PROMPT,
-    userContent: buildTurnContext(
-      items,
-      kbEntries,
-      opts.followUpsAsked,
-      opts.utterance
-    ),
+    userContent: opts.imageUrls?.length
+      ? [
+          { type: "text", text: turnContext },
+          ...opts.imageUrls.map((url) => ({ type: "image_url", image_url: { url } })),
+        ]
+      : turnContext,
     history: opts.history,
     jsonSchema: TURN_JSON_SCHEMA,
   });
@@ -218,6 +248,7 @@ export async function runEstimatingTurn(opts: {
     return {
       reply: "Sorry, I didn't catch that — please repeat it or type it instead.",
       isFollowUpQuestion: false,
+      questions: [],
     };
   }
 
@@ -348,5 +379,13 @@ export async function runEstimatingTurn(opts: {
   return {
     reply: output.reply,
     isFollowUpQuestion: output.isFollowUpQuestion === true,
+    questions: (output.questions ?? []).filter(
+      (q) =>
+        q &&
+        typeof q.question === "string" &&
+        q.question.trim() &&
+        Array.isArray(q.options) &&
+        q.options.length > 0
+    ),
   };
 }

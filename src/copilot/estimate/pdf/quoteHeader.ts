@@ -15,6 +15,8 @@ export interface QuoteHeader {
   billingAddress: string;
   serviceAddress: string;
   technicianName: string;
+  logoUrl: string | null;
+  licenseNumber: string;
 }
 
 const DEFAULTS: QuoteHeader = {
@@ -26,6 +28,8 @@ const DEFAULTS: QuoteHeader = {
   billingAddress: "",
   serviceAddress: "",
   technicianName: "",
+  logoUrl: null,
+  licenseNumber: "",
 };
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -74,6 +78,7 @@ function formatJsonAddress(addr: unknown): string {
 export async function loadQuoteHeader(conversation: {
   jobId?: bigint | number | string | null;
   userId?: bigint | number | string | null;
+  companyId?: number | null;
 }): Promise<QuoteHeader> {
   const header: QuoteHeader = { ...DEFAULTS };
 
@@ -83,9 +88,11 @@ export async function loadQuoteHeader(conversation: {
         ? await prisma.jobs.findUnique({ where: { id: BigInt(conversation.jobId as any) } })
         : null;
 
-    const company = job
-      ? await prisma.companies.findUnique({ where: { id: job.company_id } })
-      : null;
+    const companyId = job?.company_id ?? conversation.companyId ?? null;
+    const company =
+      companyId != null
+        ? await prisma.companies.findUnique({ where: { id: companyId } })
+        : null;
 
     const techId = conversation.userId ?? job?.technician_id ?? null;
     const tech =
@@ -101,11 +108,16 @@ export async function loadQuoteHeader(conversation: {
           .filter((v) => v && String(v).trim())
           .join(", ");
       if (compAddr) header.companyAddress = compAddr;
+      header.logoUrl = company.logo_url ?? null;
+      header.licenseNumber = company.license_number ?? "";
+      header.companyPhone = company.phone ?? "";
+      header.companyEmail = company.email ?? "";
     }
     if (tech) {
       header.technicianName = `${tech.first_name ?? ""} ${tech.last_name ?? ""}`.trim();
-      header.companyPhone = tech.phone_number ?? "";
-      header.companyEmail = tech.email ?? "";
+      // Company-level contact wins; technician info fills the gaps.
+      header.companyPhone ||= tech.phone_number ?? "";
+      header.companyEmail ||= tech.email ?? "";
     }
     if (job) {
       header.customerName = job.job_target_name || header.customerName;

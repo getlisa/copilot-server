@@ -20,5 +20,8 @@ quoteRoute.delete("/:quoteId/items/:itemId", QuoteController.removeItem);
 quoteRoute.post("/:quoteId/complete", QuoteController.complete);
 quoteRoute.post("/:quoteId/reopen", QuoteController.reopen);
 quoteRoute.get("/:quoteId/docx", QuoteController.downloadDocx);
+quoteRoute.get("/:quoteId/proposal-docx", QuoteController.downloadProposalDocx);
+quoteRoute.get("/:quoteId/email-draft", QuoteController.emailDraft);
+quoteRoute.post("/:quoteId/email", QuoteController.emailProposal);
 
 export { quoteRoute };

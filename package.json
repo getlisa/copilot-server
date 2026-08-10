@@ -29,6 +29,7 @@
     "@types/cors": "^2.8.19",
     "@types/multer": "^2.0.0",
     "@types/pdfkit": "^0.17.6",
+    "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "docx": "^9.7.1",
     "dotenv": "^17.2.3",
