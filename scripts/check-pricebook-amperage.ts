@@ -26,6 +26,12 @@ const BOOK: [string, string, string, number, string[]][] = [
   ["EL-011", "GFCI Receptacle 20A Self-Test", "EA", 18.98, ["gfci", "gfci receptacle", "gfci outlet", "ground fault outlet"]],
   ["EL-012", 'EMT Conduit 3/4" (10ft)', "STICK", 10.88, ["emt", "emt conduit", "conduit", "electrical conduit"]],
   ["LB-002", "Labor — Tech II Journeyman (per hour)", "HR", 75, ["labor", "journeyman"]],
+
+  // Real cached Home Depot rows from production (company 1, quote e3657733, 2026-08-11).
+  // Descriptions and prices are verbatim; synonyms are what the resolver stores — the
+  // technician-facing description of whichever line resolved the row first.
+  ["HD-100137321", "1/2 in. Electrical Metallic Tube (EMT) Set-Screw Connector", "EA", 0.85, ["1/2 in EMT set screw connector"]],
+  ["HD-100144234", "1/2 in. Standard Fitting Electric Metallic Tube (EMT) Set Screw Coupling", "EA", 0.59, ["1/2 in EMT coupling"]],
 ];
 
 const items = BOOK.map(([code, description, unit, unitPrice, synonyms], i) => ({
@@ -61,6 +67,20 @@ const CASES: [string, string | null][] = [
   // ...while correct requests must still resolve, including pole count spoken as a word.
   ["30A double pole circuit breaker", "EL-008"],
   ["20A single pole circuit breaker", "EL-007"],
+
+  // --- Wrong-PRODUCT rejections. Parts of one system share every measurement and differ
+  // only in the product noun, so spec tokens cannot separate them: each of these matched the
+  // $0.85 set-screw connector row at 2 of 3 tokens ("1/2in" + "emt") and put its price and
+  // its Home Depot link on the line. Observed on a live customer quote, not hypothesised.
+  ["1/2 in EMT conduit", null], // ~$12 per 10 ft stick, shown as $0.85
+  ["1/2 in EMT strap", null],
+  ["1/2 in EMT elbow", null],
+  ["1/2 in EMT one-hole strap", null],
+  // ...and the rows must still match the requests they genuinely are.
+  ["1/2 in EMT set screw connector", "HD-100137321"],
+  ["1/2 in EMT coupling", "HD-100144234"],
+  // A plural request must still reach a singular row (and vice versa) through the noun test.
+  ["1/2 in EMT couplings", "HD-100144234"],
 ];
 
 const t = tokenize("20 amp breaker");

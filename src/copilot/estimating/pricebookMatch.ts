@@ -77,6 +77,30 @@ function specTokens(tokens: string[]): string[] {
   return tokens.filter((t) => /\d/.test(t));
 }
 
+/**
+ * The product noun: the last token carrying no measurement. In the noun phrases technicians
+ * and searchTerms use — "1/2 in EMT conduit", "20A single pole circuit breaker", "12 gauge
+ * wire" — this is the head noun, the thing actually being bought. Everything before it
+ * qualifies it.
+ *
+ * It is a HARD constraint for the same reason measurements are, and it catches what they
+ * cannot: matching parts of one system share every spec and differ only here. Verified on
+ * production quote e3657733 (2026-08-11), where one cached row — a $0.85 1/2 in EMT
+ * set-screw connector — was also serving the "1/2 in EMT conduit" and "1/2 in EMT strap"
+ * lines. Both scored 2 of 3 tokens (the size and "EMT" both hit) and cleared the 0.6
+ * threshold, so each line showed the connector's price AND its Home Depot product link, on
+ * a customer-facing quote, for a ~$12 stick of conduit.
+ *
+ * The rule only ever rejects: a line the catalog can't confirm stays blank for the
+ * technician, which is the whole premise of never inventing a price.
+ */
+function productNoun(tokens: string[]): string | null {
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    if (!/\d/.test(tokens[i])) return tokens[i];
+  }
+  return null;
+}
+
 export function tokenize(text: string): string[] {
   return canonicalizeUnits(text)
     .toLowerCase()
@@ -103,6 +127,7 @@ export function matchPricebook<T extends MatchablePricebookItem>(
   const qTokens = tokenize(query);
   if (qTokens.length === 0) return null;
   const required = specTokens(qTokens);
+  const noun = productNoun(qTokens);
 
   let best: T | null = null;
   let bestScore = 0;
@@ -117,6 +142,9 @@ export function matchPricebook<T extends MatchablePricebookItem>(
     // a different product, however well the remaining words score. Rejecting it leaves the
     // line blank for the technician, which is always preferable to a near-miss price.
     if (!required.every((t) => haySet.has(t))) continue;
+    // HARD CONSTRAINT: the row must name the same kind of thing. Fittings, straps, conduit
+    // and connectors of one size are otherwise indistinguishable by score.
+    if (noun && !variants(noun).some((v) => haySet.has(v))) continue;
     let hit = 0;
     for (const t of qTokens) {
       if (variants(t).some((v) => haySet.has(v))) hit += 1;
