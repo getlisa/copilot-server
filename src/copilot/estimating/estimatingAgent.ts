@@ -31,6 +31,18 @@ interface AgentOp {
     | "kb_proposal";
   itemId: string | null;
   description: string | null;
+  /**
+   * Terse, catalog-shaped name for the PART behind this line — the thing pricing matches on.
+   * `description` stays human-readable for the quote; this is what a supplier would call it.
+   *
+   * Added because prose descriptions are unmatchable by construction. In three consecutive
+   * real quotes, 11 of 13 lines read like "Subpanel or load-management solution for EV
+   * circuit capacity" or "Make-safe and test restored lighting/switch circuit" — scope, not
+   * products. No catalog stocks those and no threshold can match them, so every line came
+   * back unpriced. The model already knows it means "6 AWG THHN copper wire"; it just was
+   * never asked.
+   */
+  searchTerm: string | null;
   quantity: number | null;
   unit: string | null;
   action: "remove" | "update" | null;
@@ -78,6 +90,7 @@ const TURN_JSON_SCHEMA = {
             },
             itemId: nullable("string"),
             description: nullable("string"),
+            searchTerm: nullable("string"),
             quantity: nullable("number"),
             unit: nullable("string"),
             action: { type: ["string", "null"], enum: ["remove", "update", null] },
@@ -92,6 +105,7 @@ const TURN_JSON_SCHEMA = {
             "type",
             "itemId",
             "description",
+            "searchTerm",
             "quantity",
             "unit",
             "action",
@@ -131,6 +145,16 @@ Rules:
 - Removing something → remove_item with its itemId.
 - If a spoken reference ("that one", "the panel") could match MORE THAN ONE existing line item, NEVER guess: emit ambiguous_reference with action ("remove" or "update"), candidateItemIds, referenceText, and any pending change fields (description/quantity/unit). Do not also emit the underlying op.
 - Never invent a quantity. Item named without one → add_item with quantity null.
+- EVERY add_item and kb_proposal MUST carry a searchTerm: the terse, catalog-shaped name of the PART, as a supplier would list it. description stays readable for the customer; searchTerm is what pricing matches on, so it decides whether the line gets a price at all.
+  - Name the product and its rating/size ONLY. No verbs, no scope, no conditionals, no "as needed", no "if required", no "and miscellaneous".
+  - Include the spec that identifies it: amperage, gauge, size, voltage, capacity.
+  - "Branch circuit wiring repair/replacement"                     → searchTerm "12 AWG THHN wire"
+  - "EV charger circuit wiring"                                    → searchTerm "6 AWG THHN wire"
+  - "60A 2-pole breaker for the EV circuit"                        → searchTerm "60A double pole circuit breaker"
+  - "Accessible junction box(es) and cover(s), as needed"          → searchTerm "4 in square junction box"
+  - "Wire connectors / repair consumables, as needed"              → searchTerm "wire connectors"
+  - "Conduit for EV charger circuit"                               → searchTerm "3/4 in EMT conduit"
+  - If a line is genuinely pure labor, diagnosis, or testing with no material to buy, set searchTerm null — it is not a purchasable part and must not be priced as one.
 - Units: keep what the technician said (ft, EA, etc.), else null.
 - The technician may attach photos. Use them to identify equipment, materials, model/size details, and site conditions when parsing items or scoping a job — but still never invent quantities or prices from a photo alone.
 
@@ -266,9 +290,22 @@ export async function runEstimatingTurn(opts: {
   let nextSort =
     items.length > 0 ? Math.max(...items.map((i) => i.sortOrder)) + 1 : 0;
 
-  const priceFields = (description: string, explicitCode?: string | null) => {
+  /**
+   * `searchTerm` is the catalog-shaped part name and is tried FIRST; `description` is prose
+   * written for the customer and matches poorly (measured: 11 of 13 lines across three real
+   * quotes were unmatchable scope text). A null searchTerm on a labor/diagnostic line is a
+   * deliberate signal that there is nothing to buy — so don't fall back to the description
+   * and don't spend a Home Depot lookup on it.
+   */
+  const priceFields = (
+    description: string,
+    explicitCode?: string | null,
+    searchTerm?: string | null
+  ) => {
+    const term = searchTerm?.trim() || null;
     const match =
       (explicitCode ? byCode.get(explicitCode) : undefined) ??
+      (term ? matchPricebook(term, matchable) : null) ??
       matchPricebook(description, matchable);
     if (match) {
       return {
@@ -281,7 +318,8 @@ export async function runEstimatingTurn(opts: {
     // background Home Depot resolve: a cold search is ~13s, far too slow to block this turn.
     // If it resolves, the item is written to this company's pricebook and the line is
     // backfilled, so matchPricebook() hits it from then on with no API call.
-    enqueueResolve(description, opts.companyId);
+    // Only worth an API call when we have a part name; prose and pure-labor lines are skipped.
+    if (term) enqueueResolve(term, opts.companyId, description);
     return { pricebookCode: null, unitPrice: null, unit: null };
   };
 
@@ -290,7 +328,7 @@ export async function runEstimatingTurn(opts: {
       switch (op.type) {
         case "add_item": {
           if (!op.description) break;
-          const priced = priceFields(op.description);
+          const priced = priceFields(op.description, null, op.searchTerm);
           await prisma.quoteLineItem.create({
             data: {
               quoteId: opts.quoteId,
@@ -308,7 +346,7 @@ export async function runEstimatingTurn(opts: {
           const kb = kbEntries.find((k) => k.id === op.kbEntryId);
           if (!kb) break;
           const description = op.description ?? kb.materialDescription;
-          const priced = priceFields(description, kb.pricebookCode);
+          const priced = priceFields(description, kb.pricebookCode, op.searchTerm);
           await prisma.quoteLineItem.create({
             data: {
               quoteId: opts.quoteId,
@@ -332,7 +370,7 @@ export async function runEstimatingTurn(opts: {
           if (op.description != null && op.description !== existing.description) {
             data.description = op.description;
             if (!existing.manuallyEdited) {
-              const priced = priceFields(op.description);
+              const priced = priceFields(op.description, null, op.searchTerm);
               data.pricebookCode = priced.pricebookCode;
               data.unitPrice = priced.unitPrice;
               if (priced.unit && op.unit == null) data.unit = priced.unit;
