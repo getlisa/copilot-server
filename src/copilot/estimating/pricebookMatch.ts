@@ -46,15 +46,35 @@ const UNIT_CANON: Record<string, string> = {
 function canonicalizeUnits(text: string): string {
   return (
     text
-      // Inch marks: catalog descriptions write 3/4" while technicians type 3/4 in. Fold both
-      // to the same token or "3/4 in EMT conduit" misses 'EMT Conduit 3/4" (10ft)'.
-      .replace(/(\d(?:[\d./]*\d)?)\s*(?:"|''|”)/g, "$1 in")
-      .replace(/(\d(?:[\d./]*\d)?)\s*-?\s*(?:inches|inch)\b/gi, "$1 in")
+      // Pole count spoken as a word: "double pole" must match "2-Pole" and vice versa, or a
+      // 2-pole request scores against a single-pole row on the remaining tokens alone.
+      .replace(/\b(single|double|triple)\s*-?\s*(?:pole|poles|p)\b/gi, (_m, w: string) =>
+        `${({ single: 1, double: 2, triple: 3 } as Record<string, number>)[w.toLowerCase()]}p`
+      )
+      // Inch marks and words, INCLUDING the bare "in" the prompt teaches the model to emit.
+      // Without the last form, "4 in square junction box" lost its 4 to the bare-digit filter
+      // below and matched a 2 in box at score 1.0 — full confidence, wrong size.
+      .replace(/(\d(?:[\d./]*\d)?)\s*(?:"|''|”)/g, "$1in")
+      .replace(/(\d(?:[\d./]*\d)?)\s*-?\s*(?:inches|inch|in)\b/gi, "$1in")
       .replace(
         /(\d+(?:\.\d+)?)\s*-?\s*(amperes|ampere|amps|amp|awg|gauge|ga|volts|volt|poles|pole|watts|watt|a|v|w|p)\b/gi,
         (_m, n: string, unit: string) => `${n}${UNIT_CANON[unit.toLowerCase()] ?? unit.toLowerCase()}`
       )
   );
+}
+
+/**
+ * Tokens that carry a measurement — amperage, gauge, size, pole count. These are HARD
+ * constraints, not score contributors.
+ *
+ * Scoring alone cannot protect them: `score = hits / queryTokens`, so a single missed token
+ * out of four still scores 0.75 and clears MATCH_THRESHOLD. Verified consequences before this
+ * guard: "60A double pole circuit breaker" matched a 30A row ($14.50 for a ~$70 part),
+ * "6 AWG THHN wire" matched 12AWG, "3/4 in EMT conduit" matched 1/2 in. Each is a plausible
+ * price on a customer-facing quote, which is the exact failure this system exists to prevent.
+ */
+function specTokens(tokens: string[]): string[] {
+  return tokens.filter((t) => /\d/.test(t));
 }
 
 export function tokenize(text: string): string[] {
@@ -82,6 +102,7 @@ export function matchPricebook<T extends MatchablePricebookItem>(
 ): T | null {
   const qTokens = tokenize(query);
   if (qTokens.length === 0) return null;
+  const required = specTokens(qTokens);
 
   let best: T | null = null;
   let bestScore = 0;
@@ -91,6 +112,11 @@ export function matchPricebook<T extends MatchablePricebookItem>(
       `${item.description} ${item.synonyms.join(" ")} ${item.code}`
     );
     const haySet = new Set(hay.flatMap(variants));
+
+    // HARD CONSTRAINT: every measurement in the query must be present. A row missing one is
+    // a different product, however well the remaining words score. Rejecting it leaves the
+    // line blank for the technician, which is always preferable to a near-miss price.
+    if (!required.every((t) => haySet.has(t))) continue;
     let hit = 0;
     for (const t of qTokens) {
       if (variants(t).some((v) => haySet.has(v))) hit += 1;

@@ -49,6 +49,18 @@ const CASES: [string, string | null][] = [
   ["Panel repair/replacement components for indoor flush-mount panel", null],
   ["Branch circuit wiring repair/replacement", null],
   ["Wire connectors/lugs/terminations", null],
+
+  // --- Wrong-spec rejections. Every one of these MATCHED and produced a plausible wrong
+  // price before spec tokens became a hard constraint; all four were verified against the
+  // real module by independent reviewers. A near-miss must leave the line blank.
+  ["60A double pole circuit breaker", null], // matched EL-008 30A at $14.50 for a ~$70 part
+  ["100A double pole circuit breaker", null], // matched EL-008 30A
+  ["6 AWG THHN wire", null], // matched EL-001 12AWG
+  ["4 in square junction box", null], // integer inches were erased; matched a 2 in box at 1.0
+  ["2 in square junction box", null], // no 2 in row seeded either — must not fall back
+  // ...while correct requests must still resolve, including pole count spoken as a word.
+  ["30A double pole circuit breaker", "EL-008"],
+  ["20A single pole circuit breaker", "EL-007"],
 ];
 
 const t = tokenize("20 amp breaker");

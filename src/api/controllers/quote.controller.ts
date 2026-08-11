@@ -328,7 +328,10 @@ export class QuoteController {
         sortOrder: nextSort,
       },
     });
-    res.status(201).json({ success: true, data: toLineItemDto(item) });
+    res.status(201).json({
+      success: true,
+      data: toLineItemDto(item, await catalogFor({ companyId: user.companyId, lineItems: [item] })),
+    });
   }
 
   /**
@@ -431,7 +434,7 @@ export class QuoteController {
       data: { status: "COMPLETED", completedAt: new Date() },
       include: { lineItems: true },
     });
-    res.json({ success: true, data: toQuoteDto(updated) });
+    res.json({ success: true, data: await quoteDtoWithProducts(updated) });
   }
 
   /** POST /api/v1/quotes/:quoteId/reopen — back to Draft; never touches line items (US9). */
@@ -445,7 +448,7 @@ export class QuoteController {
       data: { status: "DRAFT", completedAt: null },
       include: { lineItems: true },
     });
-    res.json({ success: true, data: toQuoteDto(updated) });
+    res.json({ success: true, data: await quoteDtoWithProducts(updated) });
   }
 
   /** GET /api/v1/quotes/:quoteId/docx — basic Word export, marked per current state (US7). */

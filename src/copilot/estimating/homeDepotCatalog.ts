@@ -190,7 +190,7 @@ const SCOPE_WORDS = new Set([
  */
 function tokenAliases(t: string): string[] {
   const out = new Set<string>([t]);
-  const m = t.match(/^(\d+(?:\.\d+)?)(a|amp|awg|v|volt|w|watt|ga|gauge|lb|lbs|in|ft)$/);
+  const m = t.match(/^(\d+(?:\.\d+)?)(a|amp|awg|v|volt|w|watt|ga|gauge|lb|lbs|in|ft|p)$/);
   if (m) {
     const [, n, unit] = m;
     const family: Record<string, string[]> = {
@@ -200,10 +200,11 @@ function tokenAliases(t: string): string[] {
       w: ["watt", "watts"], watt: ["w", "watts"],
       lb: ["lbs", "pound"], lbs: ["lb", "pound"],
       in: ["inch", "inches"], ft: ["foot", "feet"],
+      p: ["pole", "poles"],
     };
-    // Both the bare number and every "<n> <unit>" spelling — titles hyphenate or space them,
-    // and tokenize() drops bare digits, so the number alone must be matched as a substring.
-    out.add(n);
+    // Only "<n> <unit>" spellings — NEVER the bare number. `title.includes("20")` was
+    // satisfied by "120/240-Volt", so a 15 Amp breaker scored 4/4 against a 20A request and
+    // gate 2 lost the ability to check the one attribute it exists to check.
     for (const u of [unit, ...(family[unit] ?? [])]) out.add(`${n} ${u}`).add(`${n}-${u}`);
   }
   return [...out];
@@ -216,7 +217,9 @@ function tokenAliases(t: string): string[] {
  */
 function specFilter(description: string, candidates: HdSearchProduct[]): HdSearchProduct[] {
   const wanted = tokenize(description).filter((t) => !SCOPE_WORDS.has(t));
-  if (wanted.length === 0) return candidates;
+  // Every token is a scope word ("branch circuit wiring") → this names work, not a product.
+  // Returning all candidates here made gate 2 a no-op AND skipped the irrigation denylist.
+  if (wanted.length === 0) return [];
   return candidates.filter((c) => {
     if (c.brand && BRAND_DENYLIST.has(c.brand.toLowerCase())) return false;
     const title = c.title.toLowerCase();
@@ -256,6 +259,17 @@ export async function resolveFromHomeDepot(
   // old `< 2` floor did to every two-token term.
   if (resultSets.length === 0) return null;
   if (resultSets.length === 1) {
+    // Distinguish "only one variant existed" (the intended relaxation for short two-token
+    // terms) from "the other searches failed". Conflating them made gate 1 strictly MORE
+    // permissive the worse the upstream was behaving — the opposite of what a guard should do.
+    if (variants.length > 1) {
+      logger.warn("Catalog: searches failed, declining to price without the absence check", {
+        description,
+        variants: variants.length,
+        succeeded: resultSets.length,
+      });
+      return null;
+    }
     logger.info("Catalog: single query variant, absence check skipped", { description });
   }
 
@@ -337,10 +351,15 @@ export async function resolveFromHomeDepot(
       },
     });
   } catch (err) {
-    logger.warn("Catalog upsert failed", {
+    // Persistence is a precondition of pricing. Returning a price whose pricebook row does not
+    // exist left the line with an HD- code that no future resolve could repair (all three OR
+    // arms of the backfill go false), no product provenance in the DTO, and a re-resolve on
+    // every later turn. Leaving it unpriced is recoverable; a dangling code is not.
+    logger.error("Catalog upsert failed; refusing to price the line", {
       code,
       error: err instanceof Error ? err.message : String(err),
     });
+    return null;
   }
 
   logger.info("Catalog resolved", { description, code, unitPrice, brand: winner.brand });
@@ -366,11 +385,24 @@ export async function resolveFromHomeDepot(
 export function enqueueResolve(
   searchTerm: string,
   companyId: number,
-  /** The line's human-readable description, so the backfill can find the row it came from. */
-  lineDescription?: string
+  /** The line's human-readable description, kept only for logging and synonyms. */
+  lineDescription?: string,
+  /**
+   * The specific line item(s) this resolve is for. The backfill updates ONLY these rows.
+   *
+   * Previously the backfill matched on `description` string equality across every DRAFT quote
+   * in the company, which four independent reviewers flagged: two lines sharing a description
+   * but resolving different searchTerms would each overwrite the other (whichever SerpApi call
+   * returned first won, and the loser silently displayed the wrong product's price and link),
+   * and one technician's turn mutated prices on colleagues' in-progress quotes.
+   */
+  lineItemIds?: string[]
 ): void {
   if (!isCatalogEnabled()) return;
-  const key = `${companyId}::${searchTerm.trim().toLowerCase()}`;
+  // Keyed on the term AND the target, so two lines wanting the same part both get priced —
+  // keying on the term alone silently dropped the second line's enqueue and left it blank
+  // forever, since priceFields never re-runs for an existing row.
+  const key = `${companyId}::${searchTerm.trim().toLowerCase()}::${(lineItemIds ?? []).join(",")}`;
   if (inFlight.has(key)) return;
   inFlight.add(key);
 
@@ -379,9 +411,15 @@ export function enqueueResolve(
       const resolved = await resolveFromHomeDepot(searchTerm, companyId);
       if (!resolved) return;
 
-      // Backfill by the line's own description — the searchTerm is a catalog name and won't
-      // equal what is stored on the row.
-      //
+      // Update ONLY the line(s) this resolve was started for. With no ids there is nothing
+      // safe to target — matching on description text sprayed one product's price across
+      // every same-description line in the company — so skip the backfill entirely and let
+      // the next turn pick the price up from the cache.
+      if (!lineItemIds || lineItemIds.length === 0) {
+        logger.info("Catalog resolved but no target line ids; cached only", { searchTerm });
+        return;
+      }
+
       // Home Depot is the price source for every material line, so this also OVERRIDES a
       // placeholder taken from the company's own book (any code not prefixed HD-). Without
       // that, priceFields showing a MANUAL price while the resolve ran would leave
@@ -389,7 +427,7 @@ export function enqueueResolve(
       // forever. A technician's own edit always wins — manuallyEdited rows are never touched.
       const { count } = await prisma.quoteLineItem.updateMany({
         where: {
-          description: lineDescription ?? searchTerm,
+          id: { in: lineItemIds },
           manuallyEdited: false,
           quote: { companyId, status: "DRAFT" },
           OR: [

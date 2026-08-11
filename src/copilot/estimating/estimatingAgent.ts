@@ -332,29 +332,67 @@ export async function runEstimatingTurn(opts: {
     searchTerm?: string | null
   ) => {
     const term = searchTerm?.trim() || null;
-    const find = (items: typeof matchable) =>
-      (term ? matchPricebook(term, items) : null) ?? matchPricebook(description, items);
+    const blank = { pricebookCode: null, unitPrice: null, unit: null, resolveTerm: null };
+
+    // 0. An explicit KB code is a curated, exact identity mapping. It outranks any fuzzy
+    //    match, and its line must not be re-resolved — the backfill would otherwise overwrite
+    //    a human-chosen code with whatever the catalog returned for a generated searchTerm.
+    const curated = explicitCode ? byCode.get(explicitCode) : undefined;
+    if (curated) {
+      return {
+        pricebookCode: curated.code,
+        unitPrice: curated.unitPrice,
+        unit: curated.unit,
+        resolveTerm: null,
+      };
+    }
+
+    // A null searchTerm means "not a purchasable part" (labour, diagnosis, testing). Honour it
+    // literally: no lookup at all. Falling back to the prose description here priced labour
+    // lines as parts — "Install 20A breaker" matched a $7.26 breaker and even attached its
+    // product link, asserting that the labour line WAS that breaker.
+    if (!term) return blank;
+
+    const find = (items: typeof matchable) => matchPricebook(term, items);
 
     // 1. Already resolved from Home Depot for this company → reuse it, spend nothing.
     const cached = find(hdItems);
     if (cached) {
-      return { pricebookCode: cached.code, unitPrice: cached.unitPrice, unit: cached.unit };
+      return {
+        pricebookCode: cached.code,
+        unitPrice: cached.unitPrice,
+        unit: cached.unit,
+        resolveTerm: null,
+      };
     }
 
-    // 2. Not cached → always consult Home Depot. Backgrounded because a cold search is ~13s,
-    //    far too slow to block the turn; on success it upserts the row and backfills the line.
-    if (term) enqueueResolve(term, opts.companyId, description);
-
+    // 2. Not cached → the caller resolves from Home Depot AFTER the row exists, so the
+    //    backfill can target it by id. Returning the term rather than enqueueing here is what
+    //    makes that possible; enqueueing inline had no id to aim at and matched on text.
     // 3. Meanwhile show the company's own price if the book has it, so a line the book covers
-    //    is never blank while the resolve runs. A KB proposal's explicit code wins here.
-    const own =
-      (explicitCode ? byCode.get(explicitCode) : undefined) ?? find(manualItems);
+    //    is never blank while the resolve runs.
+    const own = find(manualItems);
     if (own) {
-      return { pricebookCode: own.code, unitPrice: own.unitPrice, unit: own.unit };
+      return {
+        pricebookCode: own.code,
+        unitPrice: own.unitPrice,
+        unit: own.unit,
+        resolveTerm: term,
+      };
     }
 
     // 4. Nothing anywhere — stay unpriced (the `unmatched` flag) rather than guess.
-    return { pricebookCode: null, unitPrice: null, unit: null };
+    return { ...blank, resolveTerm: term };
+  };
+
+  /** Start a Home Depot resolve for a row that now has an id the backfill can target. */
+  const resolveFor = (
+    priced: { resolveTerm: string | null },
+    row: { id: string; description: string }
+  ) => {
+    if (priced.resolveTerm) {
+      enqueueResolve(priced.resolveTerm, opts.companyId, row.description, [row.id]);
+    }
   };
 
   for (const op of output.operations) {
@@ -363,7 +401,7 @@ export async function runEstimatingTurn(opts: {
         case "add_item": {
           if (!op.description) break;
           const priced = priceFields(op.description, null, op.searchTerm);
-          await prisma.quoteLineItem.create({
+          const created = await prisma.quoteLineItem.create({
             data: {
               quoteId: opts.quoteId,
               description: op.description,
@@ -374,6 +412,7 @@ export async function runEstimatingTurn(opts: {
               sortOrder: nextSort++,
             },
           });
+          resolveFor(priced, created);
           break;
         }
         case "kb_proposal": {
@@ -381,7 +420,7 @@ export async function runEstimatingTurn(opts: {
           if (!kb) break;
           const description = op.description ?? kb.materialDescription;
           const priced = priceFields(description, kb.pricebookCode, op.searchTerm);
-          await prisma.quoteLineItem.create({
+          const createdKb = await prisma.quoteLineItem.create({
             data: {
               quoteId: opts.quoteId,
               description,
@@ -393,6 +432,7 @@ export async function runEstimatingTurn(opts: {
               sortOrder: nextSort++,
             },
           });
+          resolveFor(priced, createdKb);
           break;
         }
         case "update_item": {
@@ -401,19 +441,31 @@ export async function runEstimatingTurn(opts: {
           const data: Record<string, unknown> = {};
           if (op.quantity != null) data.quantity = op.quantity;
           if (op.unit != null) data.unit = op.unit;
+          let repriced: { resolveTerm: string | null } | null = null;
           if (op.description != null && op.description !== existing.description) {
             data.description = op.description;
             if (!existing.manuallyEdited) {
               const priced = priceFields(op.description, null, op.searchTerm);
-              data.pricebookCode = priced.pricebookCode;
-              data.unitPrice = priced.unitPrice;
-              if (priced.unit && op.unit == null) data.unit = priced.unit;
+              repriced = priced;
+              // Only overwrite an existing price when a replacement was actually found.
+              // Clearing it unconditionally meant that editing a line's wording during an
+              // upstream outage silently unpriced it, with nothing scheduled to restore it.
+              if (priced.unitPrice != null) {
+                data.pricebookCode = priced.pricebookCode;
+                data.unitPrice = priced.unitPrice;
+                if (priced.unit && op.unit == null) data.unit = priced.unit;
+              }
             }
           }
           if (Object.keys(data).length > 0)
             await prisma.quoteLineItem.update({
               where: { id: op.itemId },
               data,
+            });
+          if (repriced)
+            resolveFor(repriced, {
+              id: op.itemId,
+              description: op.description ?? existing.description,
             });
           break;
         }

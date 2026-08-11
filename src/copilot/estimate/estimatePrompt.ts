@@ -114,9 +114,13 @@ unglamorous consumables (connectors, couplings, straps, ground screws) — a
 materials list missing them cannot be shopped.
 
 OFF-PRICEBOOK MATERIALS: when a material isn't in the PRICEBOOK (e.g. electrical
-parts), use code "MISC" and sourceSheet "Field Materials", set unitPrice to a
-realistic retail price, and add an assumptions entry noting the price is a field
-estimate pending supplier lookup. Never borrow an unrelated pricebook code.
+parts), still list the line — use code "PENDING" and sourceSheet "Field Materials",
+set unitPrice AND lineTotal to 0, and add an assumptions entry naming the item as
+awaiting a supplier price. Do NOT estimate, guess or recall a retail price: a number
+you invent is indistinguishable on the customer's quote from one taken from the
+pricebook, and the price column is the one place this system must never be wrong.
+Never borrow an unrelated pricebook code either — a wrong real code is worse than a
+blank, because it looks verified.
 
 SYSTEM-OFFLINE RULE (most common estimating error): if a benchmark row is OFFLINE=YES
 (repair to a charged wet pipe/head/valve, relocating/adding on a wet main, etc.), add

@@ -194,7 +194,19 @@ async function request(params: Record<string, string>, signal?: AbortSignal): Pr
 
       const body = await res.json().catch(() => null);
 
+      // A 200 with an empty or unparseable body is an availability failure, not a fact about
+      // the catalog. Returning it as success made the documented zero-byte product reply read
+      // as "not stocked" and skipped the retry loop entirely.
+      if (res.ok && body === null) {
+        transientErr = "empty or unparseable response body";
+        continue;
+      }
+
       if (isQuotaError(res.status, body)) {
+        // Clear the transient error first: a stale value from an earlier attempt would make
+        // the post-loop throw fire and skip key rotation — defeating the pool in exactly the
+        // mixed degraded-plus-quota case it exists for.
+        transientErr = null;
         markExhausted(key, body?.error ?? `HTTP ${res.status}`);
         break; // rotate to the next key
       }

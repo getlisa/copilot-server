@@ -12,9 +12,17 @@ COPY ./prisma ./prisma
 RUN npm install
 
 COPY ./src ./src
+COPY ./scripts ./scripts
 COPY tsconfig.json .
 
 RUN npx prisma generate
+
+# Verification gate: typecheck plus the hermetic pricing assertions (no network, no DB, no
+# credentials). A build that would misprice a line item fails here instead of shipping — the
+# pricing invariant is the one thing this service must not get wrong. Credentialed checks
+# (check:electrical, check:catalog) stay manual; they need API keys and spend search quota.
+RUN npm test
+
 RUN npx tsc
 
 # Stage 2: runtime
