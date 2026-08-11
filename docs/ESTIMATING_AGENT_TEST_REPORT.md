@@ -153,7 +153,7 @@ A single resolve hung 112–198s then gave up, discarding three passing gates ov
 
 The backfill only touched rows with a null `unitPrice`. Under Home-Depot-first pricing the placeholder from the company book leaves it non-null, so the update would skip the row and pin the book price forever — silently defeating the change.
 
-### D9 — Gate 4 blocks everything, so nothing gets a price or a link *(MITIGATED)*
+### D9 — Gate 4 blocks everything, so nothing gets a price or a link *(FIXED)*
 
 Section 3 called `home_depot_product` "the dominant failure". As of 2026-08-12 it is a total one: **every** product lookup in production fails.
 
@@ -163,15 +163,26 @@ Catalog: no usable unit price  productId=202304641
 … 14 more, consecutively, zero successes
 ```
 
-Confirmed upstream by direct request with a fresh key: **45s, HTTP 000, zero bytes**. The `home_depot` search engine on the same key answers in 12s. So three gates agree on a product and the resolve is then discarded at the last step — no pricebook row, no code on the line, and therefore no product link. That is the whole of "links stopped appearing".
+Four variants were tried, all zero bytes: bare `product_id`; SerpApi's own generated URL with `store_id` and `delivery_zip`; a second product; and a mainstream delivery ZIP. The `home_depot` search engine answered on the same key in 12s throughout, so this was never quota, our parameters, or our ZIP.
 
-The fallback derives the unit price from the search result, which carries both inputs the product endpoint uses — the price, and the pack size stated in the title:
+**The engine works — the synchronous reply is what hangs.** Submitting the identical search with `async=true` returns a job in ~0.6s, and reading the archive gives the complete record:
 
 ```
-100144234  "… Set-Screw Coupling (5-Pack)"  price 2.95  →  2.95 / 5 = $0.59
+async submit          HTTP 200   0.64s   status: Success
+archive read          HTTP 200   0.35s
+  price 2.95 · price_per_unit 0.59 · package_quantity 5 · availability_type Available
 ```
 
-$0.59/EA is exactly what the product endpoint had stored for that row before it broke. A title advertising bulk with no number is refused rather than divided. Guarded by `scripts/check-pack-parsing.ts`, 15/15, in the CI gate.
+`getHomeDepotProduct` now submits async and reads the archive with the same pool key (the archive is account-scoped, so a rotated key would 404). End-to-end through the real client: **1.03s** for HD-100144234 and **0.92s** for HD-316097627, both with full economics and a canonical `www.homedepot.com` link — against 75s of timeouts and a null before. It is the same single billed search, and it stops burning quota on calls that time out with nothing to show.
+
+A second-line fallback derives the unit price from the search result, which carries both inputs the product endpoint uses — the price, and the pack size stated in the title:
+
+```
+100144234  "… Set-Screw Coupling (5-Pack)"   2.95  →  2.95 / 5  = $0.59   (endpoint: 0.59)
+316097627  "… Set-Screw Coupling (50-Pack)"  17.48 →  17.48 / 50 = $0.35   (endpoint: 0.35)
+```
+
+Both agree with the endpoint's own `price_per_unit`. A title advertising bulk with no number is refused rather than divided. Guarded by `scripts/check-pack-parsing.ts`, 15/15, in the CI gate.
 
 **Not fixed by this:** quota. Both keys are on SerpApi's Free Plan, 250 searches/month — key 1 is spent, key 2 has 82 left. At ~4 searches per item that is roughly 20 more items for the month, whatever the code does. Dropping the product call also returns ~20% of the spend per item.
 

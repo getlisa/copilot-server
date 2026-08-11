@@ -156,6 +156,18 @@ export class SerpApiError extends Error {
  * On quota/429 the key is cooled down and the call is retried on the next available key.
  */
 async function request(params: Record<string, string>, signal?: AbortSignal): Promise<any> {
+  return (await requestWithKey(params, signal)).body;
+}
+
+/**
+ * As `request`, but also reports which pool key served the call. Async searches need this:
+ * the result archive is scoped to the account that submitted it, so the follow-up read has to
+ * present the SAME key — a rotated one gets someone else's 404.
+ */
+async function requestWithKey(
+  params: Record<string, string>,
+  signal?: AbortSignal
+): Promise<{ body: any; key: PoolKey }> {
   const tried = new Set<number>();
 
   for (;;) {
@@ -221,7 +233,7 @@ async function request(params: Record<string, string>, signal?: AbortSignal): Pr
         // Non-quota API error (e.g. `sort` is not supported for Home Depot US) — never retry.
         throw new SerpApiError(body.error);
       }
-      return body;
+      return { body, key };
     }
 
     // Exhausted transient retries on this key without a quota signal → surface it rather
@@ -320,22 +332,76 @@ export interface HdProductDetail extends HdSearchProduct {
   storeSku?: string;
 }
 
+/** How many times to read the archive before giving up, and the wait between reads. */
+const ASYNC_POLLS = 6;
+const ASYNC_POLL_MS = 1_500;
+
+/** Read a completed async search back from SerpApi's archive. Archive reads are not billed. */
+async function fetchArchive(
+  jsonEndpoint: string,
+  key: PoolKey,
+  signal?: AbortSignal
+): Promise<any> {
+  const url = new URL(jsonEndpoint);
+  url.searchParams.set("api_key", key.value);
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const composed = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const res = await fetch(url, { signal: composed });
+  return res.json().catch(() => null);
+}
+
 /**
- * `engine=home_depot_product`. `delivery_zip` is REQUIRED — without it SerpApi returns a
- * bare `null` body rather than an error, so it is validated up front.
+ * `engine=home_depot_product`, submitted ASYNCHRONOUSLY.
+ *
+ * The synchronous form of this engine does not answer: measured 2026-08-12 at 40–60s and zero
+ * bytes across four variants — bare product_id, SerpApi's own generated URL with store_id, a
+ * second product, and a different delivery ZIP — while `home_depot` search on the same key
+ * answered in 12s. Every resolve in production was dying here, which is why priced lines and
+ * their product links stopped appearing.
+ *
+ * Submitting the same search with `async=true` returns in ~0.6s and the archive read gives the
+ * full record ~0.35s later, price_per_unit and availability included. So the engine works; it
+ * is the synchronous reply that hangs. Same one billed search either way — and it stops
+ * burning quota on calls that time out with nothing to show.
+ *
+ * `delivery_zip` is REQUIRED: without it SerpApi returns a bare `null` body rather than an error.
  */
 export async function getHomeDepotProduct(
   productId: string,
   opts?: { deliveryZip?: string; signal?: AbortSignal }
 ): Promise<HdProductDetail | null> {
-  const body = await request(
+  const { body: submitted, key } = await requestWithKey(
     {
       engine: "home_depot_product",
       product_id: productId,
       delivery_zip: opts?.deliveryZip ?? deliveryZip(),
+      async: "true",
     },
     opts?.signal
   );
+
+  const endpoint = submitted?.search_metadata?.json_endpoint;
+  if (typeof endpoint !== "string" || !endpoint) {
+    logger.warn("SerpApi async submit returned no archive endpoint", { productId });
+    return null;
+  }
+
+  let body: any = null;
+  for (let attempt = 0; attempt < ASYNC_POLLS; attempt++) {
+    body = await fetchArchive(endpoint, key, opts?.signal);
+    const status = body?.search_metadata?.status;
+    if (status === "Success") break;
+    if (status === "Error") {
+      logger.warn("SerpApi async search failed", { productId, error: body?.error });
+      return null;
+    }
+    await sleep(ASYNC_POLL_MS);
+  }
+  if (body?.search_metadata?.status !== "Success") {
+    logger.warn("SerpApi async search did not complete", { productId, polls: ASYNC_POLLS });
+    return null;
+  }
+
   const r = body?.product_results;
   if (!r) return null;
 

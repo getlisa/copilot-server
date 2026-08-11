@@ -38,9 +38,10 @@ import { tokenize } from "./pricebookMatch";
  *      2/12, choosing a 4 lb extinguisher for a 10 lb line and an EMT connector for EMT
  *      conduit.
  *   4. one product call on the WINNER only, for price_per_unit — search returns pack price
- *      only, so a 12-pack at $95.99 would otherwise be stored as a $95.99 unit price. When
- *      that endpoint is unreachable (its normal state as of 2026-08-12) the same division is
- *      done over the search result, whose title states the pack size — see unitPriceFromSearch.
+ *      only, so a 12-pack at $95.99 would otherwise be stored as a $95.99 unit price. That
+ *      call is submitted asynchronously (see getHomeDepotProduct); if it still comes back
+ *      empty, the same division is done over the search result, whose title states the pack
+ *      size — see unitPriceFromSearch.
  */
 
 /**
@@ -232,16 +233,18 @@ function specFilter(description: string, candidates: HdSearchProduct[]): HdSearc
 }
 
 /**
- * Unit price from the SEARCH result, for when `home_depot_product` cannot be reached.
+ * Unit price from the SEARCH result, for when `home_depot_product` returns nothing usable.
  *
- * That endpoint is the dominant failure in this pipeline — measured as a 45s zero-byte hang on
- * a direct request with a fresh key, so it is upstream and not something retrying fixes — and
- * it fails AFTER three gates have already agreed on a product, discarding the whole resolve and
- * leaving the line unpriced with no product link.
+ * Historically that was every call: the synchronous engine hung 40–60s with zero bytes,
+ * discarding a resolve AFTER three gates had already agreed on a product, which is what left
+ * lines unpriced and linkless. Submitting asynchronously fixed that, so this is now a safety
+ * net rather than the main path — a resolve should not be discarded because one call of two
+ * came back empty.
  *
- * This is not a second opinion on the price: the product endpoint itself returns
+ * It is not a second opinion on the price: the product endpoint itself returns
  * `price / package_quantity`, and both inputs are present in the search result. Verified
- * against a row it had already priced — HD-100144234, "(5-Pack)" at $2.95, stored $0.59.
+ * against both paths on the same items — HD-100144234 "(5-Pack)" $2.95 → $0.59 and
+ * HD-316097627 "(50-Pack)" $17.48 → $0.35, each matching the endpoint's own price_per_unit.
  */
 function unitPriceFromSearch(
   product: HdSearchProduct
