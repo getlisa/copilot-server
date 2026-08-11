@@ -139,7 +139,7 @@ So asking the assistant "give me the link" fails because it genuinely cannot see
 
 ### D4 — Amperage ignored in matching *(FIXED — `d44f531`)*
 
-`tokenize` dropped bare digits, so `"20 amp breaker"` reduced to `[amp, breaker]` and scored 1.0 against **every** breaker. First row won the tie, so a 20A request matched a **15A breaker** — a silently wrong price on the exact attribute specified. Now folds `20 amp` / `20-Amp` / `12 gauge` onto the compact form. Guarded by `scripts/check-pricebook-amperage.ts`, 14/14.
+`tokenize` dropped bare digits, so `"20 amp breaker"` reduced to `[amp, breaker]` and scored 1.0 against **every** breaker. First row won the tie, so a 20A request matched a **15A breaker** — a silently wrong price on the exact attribute specified. Now folds `20 amp` / `20-Amp` / `12 gauge` onto the compact form. Guarded by `scripts/check-pricebook-amperage.ts` (14/14 then, 28/28 now — see D8).
 
 ### D5 — Correct products rejected by the spec filter *(FIXED — `d44f531`)*
 
@@ -152,6 +152,20 @@ A single resolve hung 112–198s then gave up, discarding three passing gates ov
 ### D7 — Backfill couldn't override a book placeholder *(FIXED — `275190f`)*
 
 The backfill only touched rows with a null `unitPrice`. Under Home-Depot-first pricing the placeholder from the company book leaves it non-null, so the update would skip the row and pin the book price forever — silently defeating the change.
+
+### D8 — One cached row served three different parts *(FIXED — `072b8b0`)*
+
+Found by auditing production, not by a test. On quote `e3657733` three lines shared code `HD-100137321`, a **$0.85 1/2 in EMT set-screw connector**:
+
+| Line | Code shown | Price shown | Truth |
+|---|---|---|---|
+| 1/2 in EMT set screw connector | HD-100137321 | $0.85 | correct |
+| 1/2 in EMT conduit | HD-100137321 | $0.85 | a 10 ft stick is ~$12 |
+| 1/2 in EMT one-hole strap | HD-100137321 | $0.85 | wrong part |
+
+Each wrong line scored **2 of 3 tokens** — the size and `emt` both hit, only the noun differed — clearing the 0.6 threshold. Because the price came from a real catalog row, each line also displayed that connector's Home Depot link, so the quote asserted the conduit *was* the connector.
+
+Spec tokens are structurally unable to catch this: matching parts of one system share every measurement. The product noun (last token carrying no measurement) is now a hard constraint too. The suite grew 21 → **28**, pinning the four wrong products and the two correct ones from the real quote. Blast radius at the time of the fix: 9 Home-Depot-priced lines in production, 2 wrong, both on an unedited DRAFT.
 
 ---
 
@@ -249,7 +263,7 @@ Prompt guardrails are advisory; the ones that matter are enforced in code. This 
 ## 9. Reproducing these results
 
 ```bash
-# Pure, no network or DB — amperage/variant regression suite
+# Pure, no network or DB — amperage/variant/product-noun regression suite (28 assertions)
 npx tsx scripts/check-pricebook-amperage.ts
 
 # 10 electrical problem statements through the real prompt (LLM calls, no searches)
