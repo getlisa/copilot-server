@@ -345,20 +345,27 @@ export async function resolveFromHomeDepot(
  * company's open quotes that carries this description, so the `unmatched` flag clears on
  * its own (flags are derived, so nothing else has to be updated).
  */
-export function enqueueResolve(description: string, companyId: number): void {
+export function enqueueResolve(
+  searchTerm: string,
+  companyId: number,
+  /** The line's human-readable description, so the backfill can find the row it came from. */
+  lineDescription?: string
+): void {
   if (!isCatalogEnabled()) return;
-  const key = `${companyId}::${description.trim().toLowerCase()}`;
+  const key = `${companyId}::${searchTerm.trim().toLowerCase()}`;
   if (inFlight.has(key)) return;
   inFlight.add(key);
 
   void (async () => {
     try {
-      const resolved = await resolveFromHomeDepot(description, companyId);
+      const resolved = await resolveFromHomeDepot(searchTerm, companyId);
       if (!resolved) return;
 
+      // Backfill by the line's own description — the searchTerm is a catalog name and won't
+      // equal what is stored on the row.
       const { count } = await prisma.quoteLineItem.updateMany({
         where: {
-          description,
+          description: lineDescription ?? searchTerm,
           unitPrice: null,
           totalPrice: null,
           manuallyEdited: false,
@@ -370,10 +377,10 @@ export function enqueueResolve(description: string, companyId: number): void {
           pricebookCode: resolved.code,
         },
       });
-      if (count > 0) logger.info("Catalog backfilled unpriced lines", { description, count });
+      if (count > 0) logger.info("Catalog backfilled unpriced lines", { searchTerm, count });
     } catch (err) {
       logger.warn("Catalog resolve job failed", {
-        description,
+        searchTerm,
         error: err instanceof Error ? err.message : String(err),
       });
     } finally {

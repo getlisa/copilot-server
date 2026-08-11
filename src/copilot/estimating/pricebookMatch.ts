@@ -44,9 +44,16 @@ const UNIT_CANON: Record<string, string> = {
 };
 
 function canonicalizeUnits(text: string): string {
-  return text.replace(
-    /(\d+(?:\.\d+)?)\s*-?\s*(amperes|amperes|ampere|amps|amp|awg|gauge|ga|volts|volt|poles|pole|watts|watt|a|v|w|p)\b/gi,
-    (_m, n: string, unit: string) => `${n}${UNIT_CANON[unit.toLowerCase()] ?? unit.toLowerCase()}`
+  return (
+    text
+      // Inch marks: catalog descriptions write 3/4" while technicians type 3/4 in. Fold both
+      // to the same token or "3/4 in EMT conduit" misses 'EMT Conduit 3/4" (10ft)'.
+      .replace(/(\d(?:[\d./]*\d)?)\s*(?:"|''|”)/g, "$1 in")
+      .replace(/(\d(?:[\d./]*\d)?)\s*-?\s*(?:inches|inch)\b/gi, "$1 in")
+      .replace(
+        /(\d+(?:\.\d+)?)\s*-?\s*(amperes|ampere|amps|amp|awg|gauge|ga|volts|volt|poles|pole|watts|watt|a|v|w|p)\b/gi,
+        (_m, n: string, unit: string) => `${n}${UNIT_CANON[unit.toLowerCase()] ?? unit.toLowerCase()}`
+      )
   );
 }
 
