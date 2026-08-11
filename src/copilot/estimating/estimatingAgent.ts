@@ -147,6 +147,7 @@ Rules:
 - Removing something → remove_item with its itemId.
 - If a spoken reference ("that one", "the panel") could match MORE THAN ONE existing line item, NEVER guess: emit ambiguous_reference with action ("remove" or "update"), candidateItemIds, referenceText, and any pending change fields (description/quantity/unit). Do not also emit the underlying op.
 - Never invent a quantity. Item named without one → add_item with quantity null.
+- CURRENT LINE ITEMS may include product details for priced lines (brand, price, rating, link). If the technician asks for a product link, price, brand or rating, answer from those details with NO operations. Reproduce a link EXACTLY as given, character for character — never shorten, rewrite or guess a URL, and never invent one for a line that has none. If a line has no product details, say it isn't priced from the catalog yet rather than guessing.
 - EVERY add_item and kb_proposal MUST carry a searchTerm: the terse, catalog-shaped name of the PART, as a supplier would list it. description stays readable for the customer; searchTerm is what pricing matches on, so it decides whether the line gets a price at all.
   - Name the product and its rating/size ONLY. No verbs, no scope, no conditionals, no "as needed", no "if required", no "and miscellaneous".
   - Include the spec that identifies it: amperage, gauge, size, voltage, capacity.
@@ -186,16 +187,30 @@ function buildTurnContext(
   items: QuoteLineItem[],
   kbEntries: KbEntryLite[],
   followUpsAsked: number,
-  utterance: string
+  utterance: string,
+  /** Pricebook rows keyed by code, so priced lines can expose product link/brand/rating. */
+  catalog?: Map<string, PricebookItem>
 ): string {
+  // Product provenance is included so the agent can answer "what's the link / brand / price"
+  // from context instead of guessing or web-searching. Keyed off the line's pricebookCode.
   const itemLines =
     items.length === 0
       ? "(none yet)"
       : items
-          .map(
-            (i) =>
-              `- id=${i.id} | ${i.description} | qty=${i.quantity ?? "MISSING"}${i.unit ? " " + i.unit : ""}${i.agentSuggested ? " | agent-suggested, unconfirmed" : ""}${i.ambiguousAction ? " | pending ambiguous reference" : ""}`
-          )
+          .map((i) => {
+            const cat = i.pricebookCode ? catalog?.get(i.pricebookCode) : undefined;
+            const product = cat
+              ? ` | product: ${cat.brand ? cat.brand + " " : ""}${cat.description}` +
+                ` | price: $${Number(cat.unitPrice)}/${cat.unit}` +
+                (cat.rating != null ? ` | rating: ${Number(cat.rating)}` : "") +
+                (cat.externalLink ? ` | link: ${cat.externalLink}` : "")
+              : "";
+            return (
+              `- id=${i.id} | ${i.description} | qty=${i.quantity ?? "MISSING"}${i.unit ? " " + i.unit : ""}` +
+              `${i.agentSuggested ? " | agent-suggested, unconfirmed" : ""}` +
+              `${i.ambiguousAction ? " | pending ambiguous reference" : ""}${product}`
+            );
+          })
           .join("\n");
   const kbLines =
     kbEntries.length === 0
@@ -257,7 +272,8 @@ export async function runEstimatingTurn(opts: {
     prisma.pricebookItem.findMany({ where: { companyId: opts.companyId } }),
   ]);
 
-  const turnContext = buildTurnContext(items, kbEntries, opts.followUpsAsked, opts.utterance);
+  const catalog = new Map(pricebook.map((p) => [p.code, p]));
+  const turnContext = buildTurnContext(items, kbEntries, opts.followUpsAsked, opts.utterance, catalog);
   const { raw } = await callStructured({
     system: SYSTEM_PROMPT,
     userContent: opts.imageUrls?.length

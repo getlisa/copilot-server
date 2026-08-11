@@ -7,7 +7,7 @@ import {
   countRecentFollowUps,
 } from "../../copilot/estimating/estimatingAgent";
 import { matchPricebook } from "../../copilot/estimating/pricebookMatch";
-import { toQuoteDto, toLineItemDto } from "../../copilot/estimating/quoteDto";
+import { toQuoteDto, toLineItemDto, type CatalogIndex } from "../../copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
 import { buildProposalDocx } from "../../copilot/estimating/proposalDocx";
 import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating/proposalEmail";
@@ -44,6 +44,27 @@ async function loadOwnedQuote(quoteId: string, userId: bigint) {
   });
 }
 
+/**
+ * Catalog rows for the codes a quote actually uses, so each line can carry its product link,
+ * brand and rating. Only HOME_DEPOT rows matter to the DTO, but fetching by code keeps this a
+ * single indexed query regardless of source.
+ */
+async function catalogFor(
+  quote: { companyId: number; lineItems: { pricebookCode: string | null }[] }
+): Promise<CatalogIndex> {
+  const codes = [...new Set(quote.lineItems.map((i) => i.pricebookCode).filter((c): c is string => !!c))];
+  if (codes.length === 0) return new Map();
+  const rows = await prisma.pricebookItem.findMany({
+    where: { companyId: quote.companyId, code: { in: codes } },
+  });
+  return new Map(rows.map((r) => [r.code, r]));
+}
+
+/** toQuoteDto with product provenance attached. */
+async function quoteDtoWithProducts(quote: Parameters<typeof toQuoteDto>[0] & { companyId: number }) {
+  return toQuoteDto(quote, await catalogFor(quote));
+}
+
 /** Shared proposal assembly: header from DB branding, DOCX buffer, and the DTO. */
 async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
   const conversation = await prisma.conversation.findUnique({
@@ -54,7 +75,7 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     userId: quote.userId,
     companyId: quote.companyId,
   });
-  const dto = toQuoteDto(quote);
+  const dto = await quoteDtoWithProducts(quote);
   const projectTitle =
     header.customerName !== "Customer" ? `Work for ${header.customerName}` : "Scope of Work";
   const buffer = await buildProposalDocx({
@@ -108,7 +129,7 @@ export class QuoteController {
       },
       include: { lineItems: true },
     });
-    res.status(201).json({ success: true, data: toQuoteDto(quote) });
+    res.status(201).json({ success: true, data: await quoteDtoWithProducts(quote) });
   }
 
   /** GET /api/v1/quotes?status=DRAFT|COMPLETED — the technician's own chats only. */
@@ -121,7 +142,7 @@ export class QuoteController {
       include: { lineItems: true },
       orderBy: { createdAt: "desc" },
     });
-    res.json({ success: true, data: quotes.map(toQuoteDto) });
+    res.json({ success: true, data: await Promise.all(quotes.map((q) => quoteDtoWithProducts(q))) });
   }
 
   /** GET /api/v1/quotes/:quoteId — quote + items + full message history (resume). */
@@ -162,7 +183,7 @@ export class QuoteController {
         return { ...m, attachments };
       })
     );
-    res.json({ success: true, data: { ...toQuoteDto(quote), messages: hydrated } });
+    res.json({ success: true, data: { ...(await quoteDtoWithProducts(quote)), messages: hydrated } });
   }
 
   /** POST /api/v1/quotes/:quoteId/messages — one agent turn. */
@@ -271,7 +292,7 @@ export class QuoteController {
           metadata: aiMessage.metadata,
           createdAt: aiMessage.createdAt,
         },
-        quote: toQuoteDto(updated!),
+        quote: await quoteDtoWithProducts(updated!),
       },
     });
   }
@@ -346,7 +367,7 @@ export class QuoteController {
       }
       await prisma.quoteLineItem.delete({ where: { id: item.id } }); // drop placeholder
       const updated = await loadOwnedQuote(quote.id, user.userId);
-      return res.json({ success: true, data: toQuoteDto(updated!) });
+      return res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
     }
 
     const data: Record<string, unknown> = {};
@@ -375,7 +396,7 @@ export class QuoteController {
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
     await prisma.quoteLineItem.update({ where: { id: item.id }, data });
     const updated = await loadOwnedQuote(quote.id, user.userId);
-    res.json({ success: true, data: toQuoteDto(updated!) });
+    res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
 
   /** DELETE /api/v1/quotes/:quoteId/items/:itemId */
@@ -389,7 +410,7 @@ export class QuoteController {
     if (!item) return fail(res, 404, "Line item not found");
     await prisma.quoteLineItem.delete({ where: { id: item.id } });
     const updated = await loadOwnedQuote(quote.id, user.userId);
-    res.json({ success: true, data: toQuoteDto(updated!) });
+    res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
 
   /** POST /api/v1/quotes/:quoteId/complete — gated on unresolved blocking flags (US6/US9). */
@@ -398,7 +419,7 @@ export class QuoteController {
     if (!user) return;
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
-    const dto = toQuoteDto(quote);
+    const dto = await quoteDtoWithProducts(quote);
     if (dto.blockingFlagCount > 0)
       return fail(
         res,
@@ -433,7 +454,7 @@ export class QuoteController {
     if (!user) return;
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
-    const dto = toQuoteDto(quote);
+    const dto = await quoteDtoWithProducts(quote);
     const buffer = await buildQuoteDocx(dto);
     const stamp = new Date(dto.createdAt).toISOString().slice(0, 16).replace(/[:T]/g, "-");
     res

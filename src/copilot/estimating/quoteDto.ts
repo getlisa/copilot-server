@@ -1,4 +1,4 @@
-import { Quote, QuoteLineItem } from "@prisma/client";
+import { PricebookItem, Quote, QuoteLineItem } from "@prisma/client";
 
 /**
  * Serialization + flag derivation for quotes. Flags are DERIVED from row state,
@@ -19,6 +19,25 @@ export const BLOCKING_FLAGS = [
 
 export type LineItemFlag = (typeof BLOCKING_FLAGS)[number] | "manually_edited";
 
+/**
+ * Catalog provenance for a line priced from an external source (currently Home Depot).
+ * Present only when the line's pricebookCode resolves to a row with source = HOME_DEPOT.
+ *
+ * The link is RENDERED by the client as an anchor — never regenerated from text — because a
+ * model retyping a long product URL can silently corrupt the slug or id.
+ */
+export interface LineItemProduct {
+  productId: string | null;
+  /** Canonical www.homedepot.com URL. */
+  link: string | null;
+  brand: string | null;
+  rating: number | null;
+  /** Pack size behind unitPrice, so a 12-pack can't read as a unit price. */
+  packageQuantity: number | null;
+  /** True until a technician accepts the line this was resolved for. */
+  provisional: boolean;
+}
+
 export interface LineItemDto {
   id: string;
   description: string;
@@ -27,6 +46,8 @@ export interface LineItemDto {
   unitPrice: number | null;
   totalPrice: number | null;
   pricebookCode: string | null;
+  /** Null when the line is unpriced or priced from the company's own book. */
+  product: LineItemProduct | null;
   flags: LineItemFlag[];
   ambiguousAction: {
     action: "remove" | "update";
@@ -72,7 +93,28 @@ export function effectiveTotal(item: QuoteLineItem): number | null {
   return null;
 }
 
-export function toLineItemDto(item: QuoteLineItem): LineItemDto {
+/**
+ * Catalog rows keyed by pricebook code, so a line can carry its product link.
+ * Optional throughout: callers that don't supply it simply get `product: null`, which keeps
+ * every existing call site working unchanged.
+ */
+export type CatalogIndex = Map<string, PricebookItem>;
+
+function productFor(item: QuoteLineItem, catalog?: CatalogIndex): LineItemProduct | null {
+  if (!item.pricebookCode || !catalog) return null;
+  const row = catalog.get(item.pricebookCode);
+  if (!row || row.source !== "HOME_DEPOT") return null;
+  return {
+    productId: row.externalId ?? null,
+    link: row.externalLink ?? null,
+    brand: row.brand ?? null,
+    rating: row.rating == null ? null : Number(row.rating),
+    packageQuantity: row.packageQuantity == null ? null : Number(row.packageQuantity),
+    provisional: row.provisional,
+  };
+}
+
+export function toLineItemDto(item: QuoteLineItem, catalog?: CatalogIndex): LineItemDto {
   return {
     id: item.id,
     description: item.description,
@@ -81,15 +123,19 @@ export function toLineItemDto(item: QuoteLineItem): LineItemDto {
     unitPrice: num(item.unitPrice),
     totalPrice: effectiveTotal(item),
     pricebookCode: item.pricebookCode,
+    product: productFor(item, catalog),
     flags: flagsFor(item),
     ambiguousAction: (item.ambiguousAction as LineItemDto["ambiguousAction"]) ?? null,
     sortOrder: item.sortOrder,
   };
 }
 
-export function toQuoteDto(quote: Quote & { lineItems: QuoteLineItem[] }): QuoteDto {
+export function toQuoteDto(
+  quote: Quote & { lineItems: QuoteLineItem[] },
+  catalog?: CatalogIndex
+): QuoteDto {
   const items = [...quote.lineItems].sort((a, b) => a.sortOrder - b.sortOrder);
-  const dtos = items.map(toLineItemDto);
+  const dtos = items.map((i) => toLineItemDto(i, catalog));
   return {
     id: quote.id,
     conversationId: quote.conversationId,
