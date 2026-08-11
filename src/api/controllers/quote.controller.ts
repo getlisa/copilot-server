@@ -37,6 +37,83 @@ function requireUser(req: RequestWithUser, res: Response) {
   }
 }
 
+/**
+ * One answer to a clarifying question, submitted from the question card's chips.
+ *
+ * Persisted on the answering USER message so the card itself can show what was picked.
+ * Without this the only record of the answer is the message text, which the UI then has to
+ * echo back as a second bubble — the same questions and answers rendered twice.
+ */
+interface SubmittedAnswer {
+  questionId: string;
+  question: string;
+  value: string;
+  /** Typed into the "Other" box rather than picked from the options. */
+  fromOther?: boolean;
+}
+
+const MAX_ANSWERS = 8;
+const MAX_ANSWER_CHARS = 400;
+
+/**
+ * Client-supplied answers, or null when this turn isn't a question-card submission.
+ *
+ * Accepts either a bare list of chosen values (in question order) or objects naming the
+ * question each answer belongs to. Both clients are in use, so both are read here and
+ * normalised once rather than branched on downstream.
+ */
+function parseAnswers(input: unknown): SubmittedAnswer[] | null {
+  if (!Array.isArray(input) || input.length === 0) return null;
+  const str = (v: unknown) =>
+    typeof v === "string" && v.trim() ? v.trim().slice(0, MAX_ANSWER_CHARS) : null;
+  const answers: SubmittedAnswer[] = [];
+  for (const raw of input.slice(0, MAX_ANSWERS)) {
+    if (typeof raw === "string") {
+      const value = str(raw);
+      if (value) answers.push({ questionId: "", question: "", value });
+      continue;
+    }
+    if (!raw || typeof raw !== "object") continue;
+    const a = raw as Record<string, unknown>;
+    const value = str(a.value);
+    if (!value) continue;
+    answers.push({
+      questionId: str(a.questionId) ?? "",
+      question: str(a.question) ?? "",
+      value,
+      fromOther: a.fromOther === true,
+    });
+  }
+  return answers.length > 0 ? answers : null;
+}
+
+/** The clarifying questions an AI turn asked, read back out of its stored blocks. */
+function questionsOf(
+  message: { senderType: string; metadata: unknown } | undefined
+): { id?: string; question?: string }[] {
+  if (!message || message.senderType !== "AI") return [];
+  const blocks = (message.metadata as any)?.blocks;
+  if (!Array.isArray(blocks)) return [];
+  const questions = blocks.find((b: any) => b?.kind === "questions")?.data?.questions;
+  return Array.isArray(questions) ? questions : [];
+}
+
+/**
+ * Tie each answer to the question it answers. When the client sent only the chosen values,
+ * position against the card's questions is the only link there is — which is exactly the
+ * order the card renders them in.
+ */
+function alignAnswers(
+  answers: SubmittedAnswer[],
+  questions: { id?: string; question?: string }[]
+): SubmittedAnswer[] {
+  return answers.map((a, i) => ({
+    ...a,
+    questionId: a.questionId || questions[i]?.id || `q${i + 1}`,
+    question: a.question || questions[i]?.question || "",
+  }));
+}
+
 /** Load the quote with items, enforcing ownership. */
 async function loadOwnedQuote(quoteId: string, userId: bigint) {
   return prisma.quote.findFirst({
@@ -208,12 +285,7 @@ export class QuoteController {
     const imageUrls: string[] = Array.isArray(req.body?.imageUrls)
       ? req.body.imageUrls.filter((u: unknown) => typeof u === "string").slice(0, 4)
       : [];
-    // MCQ answer submissions: content carries the full Q→A pairs for the model,
-    // while `answers` (just the chosen values) is persisted so the UI can render
-    // the user bubble as compact chips instead of that paragraph.
-    const answers: string[] | null = Array.isArray(req.body?.answers)
-      ? req.body.answers.filter((a: unknown) => typeof a === "string").slice(0, 8)
-      : null;
+    const submitted = parseAnswers(req.body?.answers);
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED")
@@ -222,8 +294,19 @@ export class QuoteController {
     const priorMessages = await prisma.message.findMany({
       where: { conversationId: quote.conversationId },
       orderBy: { createdAt: "asc" },
-      select: { senderType: true, content: true, metadata: true },
+      select: { id: true, senderType: true, content: true, metadata: true },
     });
+
+    // Which question card these answers belong to. The client's id is honoured only when it
+    // names an AI turn of THIS conversation; otherwise fall back to the most recent turn that
+    // actually asked something, so a client that sends only the chosen values still lands.
+    const card = submitted
+      ? priorMessages.find(
+          (m) => m.id === req.body?.answeredMessageId && m.senderType === "AI"
+        ) ?? [...priorMessages].reverse().find((m) => questionsOf(m).length > 0)
+      : undefined;
+    const answers = submitted ? alignAnswers(submitted, questionsOf(card)) : null;
+    const answeredMessageId = card?.id ?? null;
 
     // With images, the upload endpoint already persisted this turn's USER message
     // (IMAGE message with attachments) — creating another would duplicate it, and
@@ -238,7 +321,22 @@ export class QuoteController {
           senderType: "USER",
           senderId: user.userId,
           content,
-          ...(answers?.length ? { metadata: { answers } as any } : {}),
+          // `content` still carries the full question → answer text: the model needs it in
+          // history. The metadata is what lets the UI show the answers as answers.
+          //
+          // Two shapes, deliberately: `answers` stays the flat list of chosen values that the
+          // compact-chip bubble renders, and `questionAnswers` adds which question each one
+          // belongs to, which is what lets the original card show its own selection. Widening
+          // `answers` in place would have broken the first renderer.
+          ...(answers
+            ? {
+                metadata: {
+                  answers: answers.map((a) => a.value),
+                  questionAnswers: answers,
+                  answeredMessageId,
+                } as any,
+              }
+            : {}),
         },
       });
     }
