@@ -160,14 +160,56 @@ function unanimous(resultSets: HdSearchProduct[][]): HdSearchProduct[] {
     .map((c) => c.product);
 }
 
-/** Every meaningful token of the request must appear in the title. */
+/**
+ * Words that describe SCOPE rather than the product, so their absence from a retail title
+ * says nothing. Counting them sank real matches: "20A main breaker" scored 1/3 because
+ * "main" is absent from branch-breaker titles, rejecting a correct $7.26 Homeline 20-Amp.
+ */
+const SCOPE_WORDS = new Set([
+  "main", "replacement", "replace", "repair", "install", "installation", "components",
+  "component", "assembly", "materials", "material", "misc", "miscellaneous", "consumables",
+  "labor", "labour", "existing", "damaged", "affected", "branch", "circuit", "wiring",
+  "terminations", "termination", "indoor", "outdoor", "flush", "mount", "surface",
+]);
+
+/**
+ * Retail titles write units differently from how technicians speak: "20A" vs "20 Amp",
+ * "12AWG" vs "12 Gauge", "3/4\"" vs "3/4 in". A literal token test misses all of these, so
+ * each token expands into the alternate spellings before matching.
+ */
+function tokenAliases(t: string): string[] {
+  const out = new Set<string>([t]);
+  const m = t.match(/^(\d+(?:\.\d+)?)(a|amp|awg|v|volt|w|watt|ga|gauge|lb|lbs|in|ft)$/);
+  if (m) {
+    const [, n, unit] = m;
+    const family: Record<string, string[]> = {
+      a: ["amp", "amps", "ampere"], amp: ["a", "amps"],
+      awg: ["gauge", "ga"], ga: ["gauge", "awg"], gauge: ["awg", "ga"],
+      v: ["volt", "volts"], volt: ["v", "volts"],
+      w: ["watt", "watts"], watt: ["w", "watts"],
+      lb: ["lbs", "pound"], lbs: ["lb", "pound"],
+      in: ["inch", "inches"], ft: ["foot", "feet"],
+    };
+    // Both the bare number and every "<n> <unit>" spelling — titles hyphenate or space them,
+    // and tokenize() drops bare digits, so the number alone must be matched as a substring.
+    out.add(n);
+    for (const u of [unit, ...(family[unit] ?? [])]) out.add(`${n} ${u}`).add(`${n}-${u}`);
+  }
+  return [...out];
+}
+
+/**
+ * Keep candidates whose title covers the request's PRODUCT tokens. Scope words are ignored
+ * (see SCOPE_WORDS) and unit spellings are normalised (see tokenAliases), because both were
+ * measured rejecting correct products.
+ */
 function specFilter(description: string, candidates: HdSearchProduct[]): HdSearchProduct[] {
-  const wanted = tokenize(description);
+  const wanted = tokenize(description).filter((t) => !SCOPE_WORDS.has(t));
   if (wanted.length === 0) return candidates;
   return candidates.filter((c) => {
     if (c.brand && BRAND_DENYLIST.has(c.brand.toLowerCase())) return false;
     const title = c.title.toLowerCase();
-    const hits = wanted.filter((t) => title.includes(t)).length;
+    const hits = wanted.filter((t) => tokenAliases(t).some((a) => title.includes(a))).length;
     return hits / wanted.length >= 0.5;
   });
 }

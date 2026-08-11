@@ -46,6 +46,16 @@ const PRICEBOOK: [string, string, string, number, string[]][] = [
   ["EL-003", "Electrical Panel 100A 20-space Load Center", "EA", 185, ["panel", "breaker panel", "electrical panel"]],
   ["EL-004", "Electrical Panel 200A 40-space Load Center", "EA", 320, ["panel", "bigger panel", "large panel"]],
   ["EL-005", "Wago 221 Lever Nut Connector (pack of 10)", "PACK", 8.5, ["wago", "wago connector", "lever nut"]],
+  // Breakers — the panels above had no breakers to go in them, so "20A breaker" (one of the
+  // commonest electrical asks) matched nothing and fell through to the catalog resolver.
+  // Prices are observed Home Depot retail (Homeline/QO/QP 20A single-pole ran $7.26-$17.63).
+  ["EL-006", "Circuit Breaker 15A Single-Pole", "EA", 7.25, ["breaker", "circuit breaker", "15 amp breaker", "15a breaker"]],
+  ["EL-007", "Circuit Breaker 20A Single-Pole", "EA", 8.5, ["breaker", "circuit breaker", "20 amp breaker", "20a breaker", "branch breaker"]],
+  ["EL-008", "Circuit Breaker 30A Double-Pole", "EA", 14.5, ["breaker", "double pole breaker", "30 amp breaker", "30a breaker"]],
+  ["EL-009", "Main Breaker 100A", "EA", 46, ["main breaker", "main breaker 100", "100a main"]],
+  ["EL-010", "Main Breaker 200A", "EA", 78, ["main breaker", "main breaker 200", "200a main"]],
+  ["EL-011", "GFCI Receptacle 20A Self-Test", "EA", 18.98, ["gfci", "gfci receptacle", "gfci outlet", "ground fault outlet"]],
+  ["EL-012", 'EMT Conduit 3/4" (10ft)', "STICK", 10.88, ["emt", "emt conduit", "conduit", "electrical conduit"]],
   // Labor / services
   ["LB-002", "Labor — Tech II Journeyman (per hour)", "HR", 75, ["labor", "journeyman"]],
   ["SV-020", "Main Drain Flow Test", "EA", 145, ["drain test"]],

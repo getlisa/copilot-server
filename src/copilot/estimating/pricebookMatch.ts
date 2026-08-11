@@ -26,8 +26,32 @@ const STOPWORDS = new Set([
   "pack", "roll", "box", "stick", "lb", "lbs", "gal",
 ]);
 
+/**
+ * Collapse a spelled-out measurement onto the compact form the catalog uses, so the NUMBER
+ * survives tokenization: "20 amp" / "20-Amp" / "20 ampere" → "20a", "12 gauge" → "12awg".
+ *
+ * Without this, bare digits are dropped by the `/^\d+$/` filter below and "20 amp breaker"
+ * reduces to [amp, breaker] — which scores 1.0 against EVERY breaker regardless of rating.
+ * Measured consequence: "20 amp breaker" matched a 15A breaker (first row wins a tie), i.e.
+ * a silently wrong price on the exact attribute the technician specified.
+ */
+const UNIT_CANON: Record<string, string> = {
+  a: "a", amp: "a", amps: "a", ampere: "a", amperes: "a",
+  awg: "awg", ga: "awg", gauge: "awg",
+  v: "v", volt: "v", volts: "v",
+  w: "w", watt: "w", watts: "w",
+  p: "p", pole: "p", poles: "p",
+};
+
+function canonicalizeUnits(text: string): string {
+  return text.replace(
+    /(\d+(?:\.\d+)?)\s*-?\s*(amperes|amperes|ampere|amps|amp|awg|gauge|ga|volts|volt|poles|pole|watts|watt|a|v|w|p)\b/gi,
+    (_m, n: string, unit: string) => `${n}${UNIT_CANON[unit.toLowerCase()] ?? unit.toLowerCase()}`
+  );
+}
+
 export function tokenize(text: string): string[] {
-  return text
+  return canonicalizeUnits(text)
     .toLowerCase()
     .replace(/[^a-z0-9./"-]+/g, " ")
     .split(/\s+/)
