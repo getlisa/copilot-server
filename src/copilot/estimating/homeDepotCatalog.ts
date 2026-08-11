@@ -363,13 +363,22 @@ export function enqueueResolve(
 
       // Backfill by the line's own description — the searchTerm is a catalog name and won't
       // equal what is stored on the row.
+      //
+      // Home Depot is the price source for every material line, so this also OVERRIDES a
+      // placeholder taken from the company's own book (any code not prefixed HD-). Without
+      // that, priceFields showing a MANUAL price while the resolve ran would leave
+      // `unitPrice` non-null and this update would skip the row, pinning the book price
+      // forever. A technician's own edit always wins — manuallyEdited rows are never touched.
       const { count } = await prisma.quoteLineItem.updateMany({
         where: {
           description: lineDescription ?? searchTerm,
-          unitPrice: null,
-          totalPrice: null,
           manuallyEdited: false,
           quote: { companyId, status: "DRAFT" },
+          OR: [
+            { unitPrice: null },
+            { pricebookCode: null },
+            { NOT: { pricebookCode: { startsWith: "HD-" } } },
+          ],
         },
         data: {
           unitPrice: resolved.unitPrice,

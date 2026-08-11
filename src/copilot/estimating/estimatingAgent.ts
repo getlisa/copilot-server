@@ -284,18 +284,28 @@ export async function runEstimatingTurn(opts: {
     unit: p.unit,
     unitPrice: Number(p.unitPrice),
     synonyms: p.synonyms,
+    // Distinguishes the Home Depot cache from the company's own curated rows — see priceFields.
+    source: p.source,
   }));
   const byCode = new Map(matchable.map((p) => [p.code, p]));
   const validIds = new Set(items.map((i) => i.id));
   let nextSort =
     items.length > 0 ? Math.max(...items.map((i) => i.sortOrder)) + 1 : 0;
 
+  // Home Depot is the price source for every material line. Rows already resolved from it
+  // (source = HOME_DEPOT) are the cache: a hit there means the item was priced on some earlier
+  // turn, so no API call is spent. MANUAL rows are the company's own curated book and act as
+  // an immediate value while a first-time resolve runs in the background.
+  const hdItems = matchable.filter((p) => p.source === "HOME_DEPOT");
+  const manualItems = matchable.filter((p) => p.source !== "HOME_DEPOT");
+
   /**
    * `searchTerm` is the catalog-shaped part name and is tried FIRST; `description` is prose
    * written for the customer and matches poorly (measured: 11 of 13 lines across three real
    * quotes were unmatchable scope text). A null searchTerm on a labor/diagnostic line is a
-   * deliberate signal that there is nothing to buy — so don't fall back to the description
-   * and don't spend a Home Depot lookup on it.
+   * deliberate signal that there is nothing to buy — no lookup, no price.
+   *
+   * Order: cached Home Depot row → (enqueue live Home Depot) → company book → blank.
    */
   const priceFields = (
     description: string,
@@ -303,23 +313,28 @@ export async function runEstimatingTurn(opts: {
     searchTerm?: string | null
   ) => {
     const term = searchTerm?.trim() || null;
-    const match =
-      (explicitCode ? byCode.get(explicitCode) : undefined) ??
-      (term ? matchPricebook(term, matchable) : null) ??
-      matchPricebook(description, matchable);
-    if (match) {
-      return {
-        pricebookCode: match.code,
-        unitPrice: match.unitPrice,
-        unit: match.unit,
-      };
+    const find = (items: typeof matchable) =>
+      (term ? matchPricebook(term, items) : null) ?? matchPricebook(description, items);
+
+    // 1. Already resolved from Home Depot for this company → reuse it, spend nothing.
+    const cached = find(hdItems);
+    if (cached) {
+      return { pricebookCode: cached.code, unitPrice: cached.unitPrice, unit: cached.unit };
     }
-    // Pricebook miss. Stay unpriced (the `unmatched` flag) rather than guess, and kick off a
-    // background Home Depot resolve: a cold search is ~13s, far too slow to block this turn.
-    // If it resolves, the item is written to this company's pricebook and the line is
-    // backfilled, so matchPricebook() hits it from then on with no API call.
-    // Only worth an API call when we have a part name; prose and pure-labor lines are skipped.
+
+    // 2. Not cached → always consult Home Depot. Backgrounded because a cold search is ~13s,
+    //    far too slow to block the turn; on success it upserts the row and backfills the line.
     if (term) enqueueResolve(term, opts.companyId, description);
+
+    // 3. Meanwhile show the company's own price if the book has it, so a line the book covers
+    //    is never blank while the resolve runs. A KB proposal's explicit code wins here.
+    const own =
+      (explicitCode ? byCode.get(explicitCode) : undefined) ?? find(manualItems);
+    if (own) {
+      return { pricebookCode: own.code, unitPrice: own.unitPrice, unit: own.unit };
+    }
+
+    // 4. Nothing anywhere — stay unpriced (the `unmatched` flag) rather than guess.
     return { pricebookCode: null, unitPrice: null, unit: null };
   };
 
