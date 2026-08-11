@@ -153,6 +153,28 @@ A single resolve hung 112–198s then gave up, discarding three passing gates ov
 
 The backfill only touched rows with a null `unitPrice`. Under Home-Depot-first pricing the placeholder from the company book leaves it non-null, so the update would skip the row and pin the book price forever — silently defeating the change.
 
+### D9 — Gate 4 blocks everything, so nothing gets a price or a link *(MITIGATED)*
+
+Section 3 called `home_depot_product` "the dominant failure". As of 2026-08-12 it is a total one: **every** product lookup in production fails.
+
+```
+Catalog product lookup failed  productId=202304641  timeout (after 3 attempts)
+Catalog: no usable unit price  productId=202304641
+… 14 more, consecutively, zero successes
+```
+
+Confirmed upstream by direct request with a fresh key: **45s, HTTP 000, zero bytes**. The `home_depot` search engine on the same key answers in 12s. So three gates agree on a product and the resolve is then discarded at the last step — no pricebook row, no code on the line, and therefore no product link. That is the whole of "links stopped appearing".
+
+The fallback derives the unit price from the search result, which carries both inputs the product endpoint uses — the price, and the pack size stated in the title:
+
+```
+100144234  "… Set-Screw Coupling (5-Pack)"  price 2.95  →  2.95 / 5 = $0.59
+```
+
+$0.59/EA is exactly what the product endpoint had stored for that row before it broke. A title advertising bulk with no number is refused rather than divided. Guarded by `scripts/check-pack-parsing.ts`, 15/15, in the CI gate.
+
+**Not fixed by this:** quota. Both keys are on SerpApi's Free Plan, 250 searches/month — key 1 is spent, key 2 has 82 left. At ~4 searches per item that is roughly 20 more items for the month, whatever the code does. Dropping the product call also returns ~20% of the spend per item.
+
 ### D8 — One cached row served three different parts *(FIXED — `072b8b0`)*
 
 Found by auditing production, not by a test. On quote `e3657733` three lines shared code `HD-100137321`, a **$0.85 1/2 in EMT set-screw connector**:

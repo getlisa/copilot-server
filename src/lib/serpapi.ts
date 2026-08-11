@@ -247,6 +247,30 @@ export interface HdSearchProduct {
 }
 
 /**
+ * How many items one listing sells, read off the title: Home Depot states it there
+ * ("… Set-Screw Coupling (5-Pack)"), and it is the same number `home_depot_product` reports as
+ * package_quantity. Kept here, beside the payload it parses, so it stays testable without a
+ * database.
+ *
+ * Returns null when the title advertises bulk but names no number — the one case where
+ * dividing would be a guess, and a guessed unit price is the failure this pipeline exists to
+ * prevent. A title with no bulk wording at all is a single item.
+ */
+export function packQuantityFromTitle(title: string): number | null {
+  const patterns = [
+    /\((\d{1,4})\s*-?\s*(?:pack|pk|piece|pieces|pc|pcs|count|ct)\)/i,
+    /\b(\d{1,4})\s*-\s*(?:pack|pk|piece|pieces|count)\b/i,
+    /\b(?:pack|case|box|bag|carton)\s+of\s+(\d{1,4})\b/i,
+    /\b(\d{1,4})\s*(?:pack|pk)\b/i,
+  ];
+  for (const re of patterns) {
+    const n = Number(title.match(re)?.[1]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return /\b(pack|pk|case|bulk|carton)\b/i.test(title) ? null : 1;
+}
+
+/**
  * Home Depot links come back on the `apionline.homedepot.com` host, which is not the
  * customer-facing storefront. Rewrite to `www.` before anything is displayed or stored.
  */

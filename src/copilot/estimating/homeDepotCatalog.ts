@@ -4,6 +4,7 @@ import { callStructured } from "../estimate/estimateService";
 import {
   getHomeDepotProduct,
   keysConfigured,
+  packQuantityFromTitle,
   searchHomeDepot,
   type HdSearchProduct,
 } from "../../lib/serpapi";
@@ -37,7 +38,9 @@ import { tokenize } from "./pricebookMatch";
  *      2/12, choosing a 4 lb extinguisher for a 10 lb line and an EMT connector for EMT
  *      conduit.
  *   4. one product call on the WINNER only, for price_per_unit — search returns pack price
- *      only, so a 12-pack at $95.99 would otherwise be stored as a $95.99 unit price.
+ *      only, so a 12-pack at $95.99 would otherwise be stored as a $95.99 unit price. When
+ *      that endpoint is unreachable (its normal state as of 2026-08-12) the same division is
+ *      done over the search result, whose title states the pack size — see unitPriceFromSearch.
  */
 
 /**
@@ -229,6 +232,29 @@ function specFilter(description: string, candidates: HdSearchProduct[]): HdSearc
 }
 
 /**
+ * Unit price from the SEARCH result, for when `home_depot_product` cannot be reached.
+ *
+ * That endpoint is the dominant failure in this pipeline — measured as a 45s zero-byte hang on
+ * a direct request with a fresh key, so it is upstream and not something retrying fixes — and
+ * it fails AFTER three gates have already agreed on a product, discarding the whole resolve and
+ * leaving the line unpriced with no product link.
+ *
+ * This is not a second opinion on the price: the product endpoint itself returns
+ * `price / package_quantity`, and both inputs are present in the search result. Verified
+ * against a row it had already priced — HD-100144234, "(5-Pack)" at $2.95, stored $0.59.
+ */
+function unitPriceFromSearch(
+  product: HdSearchProduct
+): { unitPrice: number; packageQuantity: number } | null {
+  const price = product.price;
+  if (price == null || !Number.isFinite(price) || price <= 0) return null;
+  const packageQuantity = packQuantityFromTitle(product.title);
+  if (packageQuantity == null) return null;
+  const unitPrice = Math.round((price / packageQuantity) * 100) / 100;
+  return unitPrice > 0 ? { unitPrice, packageQuantity } : null;
+}
+
+/**
  * Resolve one description against Home Depot and persist it to the company's pricebook.
  * Returns the resolved item, or null when HD does not stock it (the honest outcome — the
  * line simply stays unpriced for the technician to fill in).
@@ -299,10 +325,20 @@ export async function resolveFromHomeDepot(
     logger.warn("Catalog product lookup failed", { productId: winner.productId, error: err?.message });
     return null;
   });
-  const unitPrice = detail?.unitPrice ?? undefined;
+  // The product endpoint is authoritative when it answers. When it doesn't, fall back to the
+  // same arithmetic over the search result rather than throwing away three passing gates.
+  const fromSearch = detail?.unitPrice == null ? unitPriceFromSearch(winner) : null;
+  const unitPrice = detail?.unitPrice ?? fromSearch?.unitPrice;
   if (unitPrice == null || !Number.isFinite(unitPrice) || unitPrice <= 0) {
     logger.info("Catalog: no usable unit price", { productId: winner.productId });
     return null;
+  }
+  if (fromSearch) {
+    logger.info("Catalog: priced from search, product endpoint unavailable", {
+      productId: winner.productId,
+      unitPrice,
+      packageQuantity: fromSearch.packageQuantity,
+    });
   }
   if (detail?.availability && /out|unavailable|discontinued/i.test(detail.availability)) {
     logger.info("Catalog: winner unavailable", { productId: winner.productId });
@@ -337,7 +373,7 @@ export async function resolveFromHomeDepot(
         externalLink: detail?.link ?? winner.link,
         brand: detail?.brand ?? winner.brand,
         rating: winner.rating ?? detail?.rating,
-        packageQuantity: detail?.packageQuantity,
+        packageQuantity: detail?.packageQuantity ?? fromSearch?.packageQuantity,
         lastResolvedAt: new Date(),
       },
       update: {
@@ -346,7 +382,7 @@ export async function resolveFromHomeDepot(
         synonyms,
         externalLink: detail?.link ?? winner.link,
         rating: winner.rating ?? detail?.rating,
-        packageQuantity: detail?.packageQuantity,
+        packageQuantity: detail?.packageQuantity ?? fromSearch?.packageQuantity,
         lastResolvedAt: new Date(),
       },
     });
@@ -372,7 +408,7 @@ export async function resolveFromHomeDepot(
     externalLink: detail?.link ?? winner.link,
     brand: detail?.brand ?? winner.brand,
     rating: winner.rating ?? detail?.rating,
-    packageQuantity: detail?.packageQuantity,
+    packageQuantity: detail?.packageQuantity ?? fromSearch?.packageQuantity,
   };
 }
 
