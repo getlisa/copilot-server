@@ -6,6 +6,8 @@ import { conversationRoute } from "./api/routes/conversation.route";
 import { chatRoute } from "./api/routes/chat.route";
 import { voiceRoute } from "./api/routes/voice.route";
 import { estimateRoute } from "./api/routes/estimate.route";
+import { quoteRoute } from "./api/routes/quote.route";
+import { companyRoute } from "./api/routes/company.route";
 import logger from "./lib/logger";
 
 dotenv.config();
@@ -74,6 +76,8 @@ app.use("/api/v1/conversations", conversationRoute);
 app.use("/api/v1/chat", chatRoute);
 app.use("/api/v1/voice", voiceRoute);
 app.use("/api/v1/copilot", estimateRoute); // DEMO-ONLY estimate-cost mode
+app.use("/api/v1/quotes", quoteRoute); // Estimating Agent (chat-as-quote, Draft → Completed)
+app.use("/api/v1/companies", companyRoute); // Hidden company registration (URL-only access)
 
 // Health check
 app.get("/health", (req, res) => {
