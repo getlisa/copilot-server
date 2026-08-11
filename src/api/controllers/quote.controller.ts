@@ -208,6 +208,12 @@ export class QuoteController {
     const imageUrls: string[] = Array.isArray(req.body?.imageUrls)
       ? req.body.imageUrls.filter((u: unknown) => typeof u === "string").slice(0, 4)
       : [];
+    // MCQ answer submissions: content carries the full Q→A pairs for the model,
+    // while `answers` (just the chosen values) is persisted so the UI can render
+    // the user bubble as compact chips instead of that paragraph.
+    const answers: string[] | null = Array.isArray(req.body?.answers)
+      ? req.body.answers.filter((a: unknown) => typeof a === "string").slice(0, 8)
+      : null;
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED")
@@ -232,6 +238,7 @@ export class QuoteController {
           senderType: "USER",
           senderId: user.userId,
           content,
+          ...(answers?.length ? { metadata: { answers } as any } : {}),
         },
       });
     }
@@ -239,10 +246,24 @@ export class QuoteController {
     const history: EstimateTurn[] = priorMessages
       .filter((m) => m.senderType === "USER" || m.senderType === "AI")
       .slice(-20)
-      .map((m) => ({
-        role: m.senderType === "USER" ? ("user" as const) : ("assistant" as const),
-        content: m.content,
-      }));
+      .map((m) => {
+        // The reply no longer restates clarifying questions (they render as a
+        // separate MCQ block), so re-append them here or the model forgets what
+        // it asked when the technician answers in free text.
+        let content = m.content;
+        const qs = (m.metadata as any)?.blocks?.find(
+          (b: any) => b?.kind === "questions"
+        )?.data?.questions;
+        if (m.senderType === "AI" && Array.isArray(qs) && qs.length > 0) {
+          content +=
+            "\n\n[Questions shown as multiple-choice]:\n" +
+            qs.map((q: any) => `- ${q.question}`).join("\n");
+        }
+        return {
+          role: m.senderType === "USER" ? ("user" as const) : ("assistant" as const),
+          content,
+        };
+      });
 
     let turn;
     try {
