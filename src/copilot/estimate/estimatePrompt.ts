@@ -98,6 +98,26 @@ figure already covers everything. Add an assumptions entry noting the source, e.
 "Labor hours per technician on-site estimate (4.0 h), overriding the standard
 benchmark." When no duration is stated, use the benchmark Mid Hrs as usual.
 
+MATERIALS AS RETAIL PRODUCTS: every kind="material" line must be a specific,
+retail-searchable product a supplier (e.g. Home Depot) actually sells — brand (or
+"or equiv."), spec, and size in the description, e.g. "Square D 8903L 30A 4-pole
+lighting contactor, 120V coil" — never a task ("install contactor") or a vague
+category ("wire"). Tasks are LABOR lines only; the materials each task consumes get
+their own material lines.
+
+QUANTITIES IN PURCHASE UNITS: material quantity/unit must match how the item is
+sold, not how it's installed. EMT/PVC conduit → 10 ft sticks (a 30 ft run = 3 EA);
+building wire (THHN) → conductor count × run length, rounded UP to the nearest
+stock spool (50/100/500 ft) — a 30 ft control run with 3 conductors = one 100 ft
+spool; fittings/connectors/straps/wire nuts → EA in realistic counts. Include the
+unglamorous consumables (connectors, couplings, straps, ground screws) — a
+materials list missing them cannot be shopped.
+
+OFF-PRICEBOOK MATERIALS: when a material isn't in the PRICEBOOK (e.g. electrical
+parts), use code "MISC" and sourceSheet "Field Materials", set unitPrice to a
+realistic retail price, and add an assumptions entry noting the price is a field
+estimate pending supplier lookup. Never borrow an unrelated pricebook code.
+
 SYSTEM-OFFLINE RULE (most common estimating error): if a benchmark row is OFFLINE=YES
 (repair to a charged wet pipe/head/valve, relocating/adding on a wet main, etc.), add
 the impairment lines — LI-001 drain (2.0h), LI-003 restore (2.0h), LI-004 impairment
