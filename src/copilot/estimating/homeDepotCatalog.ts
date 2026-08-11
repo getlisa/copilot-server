@@ -40,8 +40,14 @@ import { tokenize } from "./pricebookMatch";
  *      only, so a 12-pack at $95.99 would otherwise be stored as a $95.99 unit price.
  */
 
-/** Query variants per item. 5 separated cleanly in testing; 2 gave no absence signal. */
-const FANOUT = 5;
+/**
+ * Query variants per item. Measured on the 23 searchTerms real electrical cases produced:
+ * average 2.7 unique variants, and only 6 terms were long enough for a cap of 5 to bind at
+ * all — so 5→4 trims the tail without weakening unanimity where it does the work. Dropping to
+ * 3 saved only 16% of searches while making the absence detector noisy (an unstocked item
+ * showed a unanimous match in 7 of 10 three-query subsets, versus 0 at five).
+ */
+const FANOUT = 4;
 
 /** Brands that mean lawn irrigation — "sprinkler" is irrigation-dominant in HD's index. */
 const BRAND_DENYLIST = new Set(["rain bird", "orbit", "melnor", "toro", "hunter"]);
@@ -84,6 +90,11 @@ function queryVariants(description: string): string[] {
     tokens.slice(0, 4).join(" "),
     tokens.slice(0, 3).join(" "),
     [...tokens].reverse().slice(0, 4).reverse().join(" "),
+    // Broadened form: drop the most specific trailing token. Short terms collapse every
+    // slice above to the same string — "wire connectors", "ground bar kit" and "ground wire"
+    // each produced ONE unique variant, tripped the >= 2 floor, and were rejected before any
+    // gate ran. This guarantees a genuinely distinct second query for two-token terms.
+    tokens.length > 1 ? tokens.slice(0, -1).join(" ") : "",
   ]
     .map((v) => v.trim())
     .filter((v) => v.length > 2);
@@ -239,7 +250,14 @@ export async function resolveFromHomeDepot(
     )
   ).filter((s) => s.length > 0);
 
-  if (resultSets.length < 2) return null; // not enough signal to judge absence
+  // With a single result set, unanimity is trivially satisfied and gate 1 becomes a no-op —
+  // gates 2 (spec tokens) and 3 (model selection) still carry the correctness load. Better to
+  // proceed with the absence check skipped than to reject an item outright, which is what the
+  // old `< 2` floor did to every two-token term.
+  if (resultSets.length === 0) return null;
+  if (resultSets.length === 1) {
+    logger.info("Catalog: single query variant, absence check skipped", { description });
+  }
 
   // GATE 1 — absence detector.
   const agreed = unanimous(resultSets);
