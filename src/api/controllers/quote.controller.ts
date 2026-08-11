@@ -10,6 +10,7 @@ import { matchPricebook } from "../../copilot/estimating/pricebookMatch";
 import { toQuoteDto, toLineItemDto, type CatalogIndex } from "../../copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
 import { buildProposalDocx } from "../../copilot/estimating/proposalDocx";
+import { generateProposalNarrative } from "../../copilot/estimating/proposalNarrative";
 import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating/proposalEmail";
 import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
 import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
@@ -78,16 +79,28 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
   const dto = await quoteDtoWithProducts(quote);
   const projectTitle =
     header.customerName !== "Customer" ? `Work for ${header.customerName}` : "Scope of Work";
+  // Scope-of-work prose + job-specific assumptions from the chat context.
+  // Falls back to the raw materials list when generation fails.
+  const narrative = await generateProposalNarrative({
+    conversationId: quote.conversationId,
+    lineItems: dto.lineItems,
+  });
   const buffer = await buildProposalDocx({
     header,
     projectTitle,
     projectAddress: header.serviceAddress,
     date: new Date(),
-    scopeItems: dto.lineItems.map((item) =>
-      item.quantity != null
-        ? `${item.description} — ${item.quantity}${item.unit ? ` ${item.unit}` : ""}`
-        : item.description
-    ),
+    scopeSections: narrative?.scopeSections ?? [
+      {
+        title: "Scope of Work",
+        bullets: dto.lineItems.map((item) =>
+          item.quantity != null
+            ? `${item.description} — ${item.quantity}${item.unit ? ` ${item.unit}` : ""}`
+            : item.description
+        ),
+      },
+    ],
+    assumptions: narrative?.assumptions,
     total: dto.total,
   });
   return { header, dto, projectTitle, buffer };

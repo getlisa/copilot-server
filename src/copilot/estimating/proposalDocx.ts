@@ -19,13 +19,18 @@ import logger from "../../lib/logger";
  * QuoteHeader; anything missing falls back to technician info / the Clara logo.
  */
 
+export interface ProposalScopeSection {
+  title: string;
+  bullets: string[];
+}
+
 export interface ProposalInput {
   header: QuoteHeader;
   projectTitle: string;
   projectAddress: string;
   date: Date;
-  /** Bullets for DETAILED SCOPE OF WORK (from quote line items). */
-  scopeItems: string[];
+  /** Numbered DETAILED SCOPE OF WORK sections describing the work to be performed. */
+  scopeSections: ProposalScopeSection[];
   /** Overrides the static defaults when the caller has real assumptions. */
   assumptions?: string[];
   total: number;
@@ -204,7 +209,15 @@ export async function buildProposalDocx(input: ProposalInput): Promise<Buffer> {
           }),
 
           sectionHeader("DETAILED SCOPE OF WORK"),
-          ...input.scopeItems.map(bullet),
+          ...input.scopeSections.flatMap((section, i) => [
+            new Paragraph({
+              spacing: { before: i === 0 ? 0 : 200, after: 100 },
+              children: [
+                new TextRun({ text: `${i + 1}. ${section.title.toUpperCase()}`, bold: true }),
+              ],
+            }),
+            ...section.bullets.map(bullet),
+          ]),
 
           sectionHeader("EXCLUSIONS"),
           new Paragraph({
@@ -214,11 +227,17 @@ export async function buildProposalDocx(input: ProposalInput): Promise<Buffer> {
 
           sectionHeader("GENERAL CONDITIONS"),
           new Paragraph({ children: [new TextRun({ text: "Coordination:", bold: true })] }),
-          bullet("Contractor will coordinate work schedule with customer to minimize disruption"),
-          bullet("A brief interruption to affected systems should be expected during the work"),
+          bullet("Contractor will coordinate work schedule with homeowner to minimize disruption"),
+          bullet(
+            "Homeowner should expect a brief power interruption during panel troubleshooting and repair"
+          ),
+          bullet(
+            "Contractor will notify homeowner prior to removal of shiplap or cutting of sheetrock"
+          ),
           new Paragraph({ children: [new TextRun({ text: "Code Compliance:", bold: true })] }),
-          bullet("All work shall comply with applicable national code requirements"),
-          bullet("All work shall comply with state and local jurisdiction amendments and requirements"),
+          bullet("All work shall comply with the current National Electrical Code (NEC)"),
+          bullet("All work shall comply with Idaho state electrical code requirements"),
+          bullet("All work shall comply with local jurisdiction amendments and requirements"),
 
           sectionHeader("ASSUMPTIONS"),
           new Paragraph({
