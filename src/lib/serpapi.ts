@@ -283,6 +283,16 @@ export function packQuantityFromTitle(title: string): number | null {
 }
 
 /**
+ * The length one listing sells, read off the title ("250 ft. 12/2 Solid Romex…" → 250).
+ * Null when the title names no footage. Kept beside packQuantityFromTitle for the same
+ * reason: testable without a database.
+ */
+export function lengthFromTitle(title: string): number | null {
+  const n = Number(title.match(/\b(\d{1,4}(?:\.\d+)?)\s*(?:ft|foot|feet)\b\.?/i)?.[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
  * Home Depot links come back on the `apionline.homedepot.com` host, which is not the
  * customer-facing storefront. Rewrite to `www.` before anything is displayed or stored.
  */

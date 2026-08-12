@@ -4,12 +4,13 @@ import { callStructured } from "../estimate/estimateService";
 import {
   getHomeDepotProduct,
   keysConfigured,
+  lengthFromTitle,
   packQuantityFromTitle,
   searchHomeDepot,
   type HdSearchProduct,
 } from "../../lib/serpapi";
 import { tokenize } from "./pricebookMatch";
-import { packAwareQuantity } from "./packMath";
+import { isLengthUnit, packAwareQuantity } from "./packMath";
 
 /**
  * Home Depot catalog resolver for the Estimating Agent.
@@ -234,6 +235,14 @@ function specFilter(description: string, candidates: HdSearchProduct[]): HdSearc
 }
 
 /**
+ * Goods genuinely sold by length, where footage in the title is the amount one purchase
+ * buys. Deliberately narrow: "cord" is absent because a "100 ft. extension cord" is one
+ * item, and tools that merely mention a length ("25 ft. tape measure") must not match.
+ */
+const SOLD_BY_LENGTH_RE =
+  /\b(wire|cable|conduit|romex|nm-b|thhn|uf-b|pex|tubing|tube|hose|rope|chain)\b/i;
+
+/**
  * Unit price from the SEARCH result, for when `home_depot_product` returns nothing usable.
  *
  * Historically that was every call: the synchronous engine hung 40–60s with zero bytes,
@@ -370,7 +379,7 @@ async function resolveThrottled(
   // The product endpoint is authoritative when it answers. When it doesn't, fall back to the
   // same arithmetic over the search result rather than throwing away three passing gates.
   const fromSearch = detail?.unitPrice == null ? unitPriceFromSearch(winner) : null;
-  const unitPrice = detail?.unitPrice ?? fromSearch?.unitPrice;
+  let unitPrice = detail?.unitPrice ?? fromSearch?.unitPrice;
   if (unitPrice == null || !Number.isFinite(unitPrice) || unitPrice <= 0) {
     logger.info("Catalog: no usable unit price", { productId: winner.productId });
     return null;
@@ -390,15 +399,40 @@ async function resolveThrottled(
   // Pack size decides whether a line's count gets rounded up, so take it from whichever
   // source has it: the product record, the search fallback, or the title itself — a response
   // carrying price_per_unit but no package_quantity would otherwise look like a single item.
-  const packQty =
+  let packQty =
     detail?.packageQuantity ??
     fromSearch?.packageQuantity ??
     packQuantityFromTitle(detail?.title || winner.title) ??
     undefined;
 
   const code = `HD-${winner.productId}`;
-  const unit = detail?.unit && detail.unit !== "unit" ? detail.unit : "EA";
+  let unit = detail?.unit && detail.unit !== "unit" ? detail.unit : "EA";
   const title = detail?.title || winner.title;
+
+  // Cable, conduit and the like sell in fixed lengths: "100 ft. 14/2 NM-B" is ONE $47 roll,
+  // not 100 things. Store the per-foot price with the roll length as the pack size, so a
+  // 25 ft line rounds up to the whole 100 ft the technician actually has to buy — the same
+  // arithmetic as four connectors from a 5-pack. Gated on goods genuinely sold by length so
+  // a "25 ft. tape measure" never becomes per-foot pricing.
+  const rollLength = lengthFromTitle(title);
+  if (
+    rollLength != null &&
+    rollLength > 1 &&
+    (packQty == null || packQty <= 1) &&
+    SOLD_BY_LENGTH_RE.test(title)
+  ) {
+    if (!isLengthUnit(unit)) {
+      // Whole-roll listing (unit EA, price = the roll): convert to per-foot.
+      unitPrice = Math.round((unitPrice / rollLength) * 100) / 100;
+      unit = "ft";
+    }
+    packQty = rollLength;
+    logger.info("Catalog: sold by length, priced per ft with whole-roll rounding", {
+      productId: winner.productId,
+      rollLength,
+      unitPrice,
+    });
+  }
 
   // Persist company-scoped so matchPricebook() finds it next turn with no API call. The
   // technician's own phrasing goes into synonyms so different wording still matches.
@@ -535,7 +569,8 @@ export function enqueueResolve(
         const packed = packAwareQuantity(
           row.quantity == null ? null : Number(row.quantity),
           unit,
-          resolved.packageQuantity
+          resolved.packageQuantity,
+          resolved.unit
         );
         await prisma.quoteLineItem.update({
           where: { id: row.id },

@@ -16,11 +16,26 @@
 /** Units that count discrete pieces, so rounding up to a whole pack is meaningful. */
 const COUNT_UNITS = new Set(["ea", "each", "pc", "pcs", "piece", "pieces", "unit", "units"]);
 
+/** Home Depot writes units with a trailing period ("ft.", "ea.") — strip it before matching. */
+const normalizeUnit = (unit: string) => unit.trim().toLowerCase().replace(/\.$/, "");
+
 /** True when a unit counts pieces (or is absent, which the agent uses for plain counts). */
 export function isCountUnit(unit: string | null | undefined): boolean {
   if (unit == null) return true;
-  const u = unit.trim().toLowerCase();
+  const u = normalizeUnit(unit);
   return u === "" || COUNT_UNITS.has(u);
+}
+
+/**
+ * Units measuring length in feet — cable, conduit and the like. A supplier sells these in
+ * fixed rolls/sticks ("100 ft. 14/2 NM-B"), so 25 ft needed means buying the whole 100 ft
+ * roll, exactly like four connectors from a 5-pack.
+ */
+const LENGTH_UNITS = new Set(["ft", "foot", "feet", "lf", "lin ft", "linear ft", "linear feet"]);
+
+export function isLengthUnit(unit: string | null | undefined): boolean {
+  if (unit == null) return false;
+  return LENGTH_UNITS.has(normalizeUnit(unit));
 }
 
 /**
@@ -48,17 +63,27 @@ export function packRoundQty(
  * The quantity to store for a line priced against a pack row, or the original when rounding
  * would be a guess.
  *
- * A measured unit (ft, lb, gal) next to a pack size is not something to convert confidently —
- * "3 ft" of a 5-pack means nothing — so it is left exactly as the technician gave it. A
- * confident wrong conversion is the failure this pipeline exists to prevent.
+ * Rounding is only meaningful when the line's unit and the pack's unit measure the same
+ * thing: pieces against a count pack (4 connectors from a 5-pack → 5), or feet against a
+ * roll measured in feet (25 ft of a 100 ft roll → 100). A measured unit next to a COUNT
+ * pack is not something to convert confidently — "3 ft" of a 5-pack means nothing — so it
+ * is left exactly as the technician gave it. A confident wrong conversion is the failure
+ * this pipeline exists to prevent.
+ *
+ * `packUnit` is the priced row's own unit; omitted (the legacy callers) it means a count
+ * pack, which preserves every behavior that existed before length packs.
  */
 export function packAwareQuantity(
   quantity: number | null | undefined,
   unit: string | null | undefined,
-  packageQuantity: number | null | undefined
+  packageQuantity: number | null | undefined,
+  packUnit?: string | null
 ): { quantity: number | null; rounded: boolean } {
   const original = quantity ?? null;
-  if (!packageQuantity || packageQuantity <= 1 || !isCountUnit(unit)) {
+  const compatible = isLengthUnit(packUnit)
+    ? isLengthUnit(unit)
+    : isCountUnit(unit);
+  if (!packageQuantity || packageQuantity <= 1 || !compatible) {
     return { quantity: original, rounded: false };
   }
   const next = packRoundQty(quantity, packageQuantity);

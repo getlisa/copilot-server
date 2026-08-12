@@ -457,7 +457,7 @@ export class QuoteController {
     const addUnit = unit ?? match?.unit ?? null;
     const addQty = manualPrice
       ? { quantity: quantity ?? null }
-      : packAwareQuantity(quantity ?? null, addUnit, match?.packageQuantity);
+      : packAwareQuantity(quantity ?? null, addUnit, match?.packageQuantity, match?.unit);
     const item = await prisma.quoteLineItem.create({
       data: {
         quoteId: quote.id,
@@ -593,7 +593,8 @@ export class QuoteController {
     const packed = packAwareQuantity(
       item.quantity == null ? null : Number(item.quantity),
       unit,
-      resolved.packageQuantity ?? null
+      resolved.packageQuantity ?? null,
+      resolved.unit
     );
     await prisma.quoteLineItem.update({
       where: { id: item.id },

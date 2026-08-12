@@ -13,7 +13,7 @@
  * Pure — no network, no database.
  *   npx tsx scripts/check-pack-parsing.ts
  */
-import { packQuantityFromTitle } from "../src/lib/serpapi";
+import { lengthFromTitle, packQuantityFromTitle } from "../src/lib/serpapi";
 import { packAwareQuantity, packRoundQty } from "../src/copilot/estimating/packMath";
 
 /** [title, expected pack quantity | null = refuse to divide] */
@@ -84,6 +84,46 @@ for (const [qty, unit, pack, expected] of QTY_CASES) {
   );
 }
 
+/**
+ * Cable/conduit sold by the roll: the line's footage rounds up to whole rolls, but ONLY when
+ * the priced row itself is a length row (packUnit ft). A count pack never converts a measured
+ * unit, and a length roll never converts a piece count.
+ * [quantity, unit, packageQuantity, packUnit, expected quantity]
+ */
+const LENGTH_CASES: [number | null, string | null, number | null, string | null, number | null][] = [
+  [25, "FT", 100, "ft", 100], // the reported bug: 25 ft needed, 100 ft roll bought
+  [25, "ft", 15, "ft.", 30], // HD writes "ft." with a period — live-measured on HD-202210510
+  [100, "ft", 100, "ft", 100], // already whole — unchanged
+  [130, "ft", 100, "ft", 200],
+  [25, "EA", 100, "ft", 25], // piece count against a length roll: refuse to guess
+  [30, "ft", 5, "EA", 30], // measured unit against a count pack: refuse (as before)
+  [null, "ft", 100, "ft", null], // no quantity stays missing and stays flagged
+];
+
+for (const [qty, unit, pack, packUnit, expected] of LENGTH_CASES) {
+  const got = packAwareQuantity(qty, unit, pack, packUnit).quantity;
+  const ok = got === expected;
+  if (ok) pass++;
+  console.log(
+    `${ok ? "PASS" : "FAIL"}  qty=${String(qty).padEnd(4)} unit=${String(unit).padEnd(5)} pack=${String(pack).padEnd(4)} packUnit=${String(packUnit).padEnd(4)} -> ${String(got).padEnd(4)} expected=${expected}`
+  );
+}
+
+/** [title, expected roll length | null = no footage named] */
+const TITLE_LENGTH_CASES: [string, number | null][] = [
+  ["100 ft. 14/2 Solid Romex SIMpull CU NM-B W/G Wire", 100],
+  ["250 ft. 12/2 Solid Romex SIMpull CU NM-B W/G Wire", 250],
+  ["1/2 in. x 10 ft. Electrical Metallic Tubing (EMT) Conduit", 10],
+  ["1/2 in. Electrical Metallic Tube (EMT) Set-Screw Connector", null],
+];
+
+for (const [title, expected] of TITLE_LENGTH_CASES) {
+  const got = lengthFromTitle(title);
+  const ok = got === expected;
+  if (ok) pass++;
+  console.log(`${ok ? "PASS" : "FAIL"}  length=${String(got).padEnd(4)} expected=${String(expected).padEnd(4)} ${title}`);
+}
+
 // Idempotence is the property that lets a re-price, a backfill and a repair all run over the
 // same line without compounding, so assert it directly rather than trusting the cases above.
 const twice = packRoundQty(packRoundQty(4, 5), 5);
@@ -91,6 +131,6 @@ const idempotent = twice === 5;
 if (idempotent) pass++;
 console.log(`${idempotent ? "PASS" : "FAIL"}  rounding 4 to packs of 5 twice = ${twice} (idempotent)`);
 
-const TOTAL = CASES.length + 1 + QTY_CASES.length + 1;
+const TOTAL = CASES.length + 1 + QTY_CASES.length + LENGTH_CASES.length + TITLE_LENGTH_CASES.length + 1;
 console.log(`\n──── ${pass}/${TOTAL} passed`);
 process.exit(pass === TOTAL ? 0 : 1);

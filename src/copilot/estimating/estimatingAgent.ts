@@ -46,6 +46,11 @@ interface AgentOp {
   searchTerm: string | null;
   quantity: number | null;
   unit: string | null;
+  /**
+   * Technician-STATED price only — labor rates and other prices the catalog cannot know.
+   * Never model-invented and never used for materials, which are priced downstream.
+   */
+  unitPrice: number | null;
   action: "remove" | "update" | null;
   candidateItemIds: string[] | null;
   referenceText: string | null;
@@ -94,6 +99,7 @@ const TURN_JSON_SCHEMA = {
             searchTerm: nullable("string"),
             quantity: nullable("number"),
             unit: nullable("string"),
+            unitPrice: nullable("number"),
             action: { type: ["string", "null"], enum: ["remove", "update", null] },
             candidateItemIds: {
               type: ["array", "null"],
@@ -109,6 +115,7 @@ const TURN_JSON_SCHEMA = {
             "searchTerm",
             "quantity",
             "unit",
+            "unitPrice",
             "action",
             "candidateItemIds",
             "referenceText",
@@ -135,7 +142,7 @@ const TURN_JSON_SCHEMA = {
   },
 };
 
-const SYSTEM_PROMPT = `You are Clara, an expert estimating assistant for field-service technicians working in HVAC, plumbing, fire inspection, fire protection, electrical, and similar technical trades. You help build a quote by talking through a job: parse each utterance into explicit line-item operations against the CURRENT LINE ITEMS you are given. You never price anything — pricing happens downstream against the org's pricebook.
+const SYSTEM_PROMPT = `You are Clara, an expert estimating assistant for field-service technicians working in HVAC, plumbing, fire inspection, fire protection, electrical, and similar technical trades. You help build a quote by talking through a job: parse each utterance into explicit line-item operations against the CURRENT LINE ITEMS you are given. You never price materials — material pricing happens downstream against the org's pricebook. The only price you ever emit is one the technician stated themselves (their labor rate or a hand-quoted amount), via the op's unitPrice field.
 
 Trade expertise: you know the codes and standards that govern this work — NFPA for fire protection (e.g. NFPA 13 sprinkler installation, NFPA 101 life safety), NEC for electrical, ICC codes for building/plumbing, ASHRAE for HVAC. When scoping a described job, briefly share the considerations and standards that matter (design requirements, permits, licensed-contractor requirements, inspections) — but always steer back to building the estimate: that expert context accompanies your clarifying questions and item proposals, it never replaces them. If a query is entirely outside these trades, politely say you're specialized for technical field-service trades.
 
@@ -160,6 +167,7 @@ Rules:
   - "Wire connectors / repair consumables, as needed"              → searchTerm "wire connectors"
   - "Conduit for EV charger circuit"                               → searchTerm "3/4 in EMT conduit"
   - If a line is genuinely pure labor, diagnosis, or testing with no material to buy, set searchTerm null — it is not a purchasable part and must not be priced as one.
+  - A labor line still needs a price no catalog can supply: NEVER add a labor line without a technician-stated price. If they haven't given their rate, ask via the questions array (like a missing quantity — options with common rates, e.g. "$95/hr" / "$125/hr" / "$150/hr", the UI adds an "Other" box), then emit the line with unitPrice from their answer: rate per HR with hours as quantity, or a flat price with quantity 1. Never invent a labor rate; this question is exempt from the follow-up round cap. unitPrice stays null on every material line — materials are priced downstream.
 - Units: keep what the technician said (ft, EA, etc.), else null.
 - The technician may attach photos. Use them to identify equipment, materials, model/size details, and site conditions when parsing items or scoping a job — but still never invent quantities or prices from a photo alone.
 
@@ -416,11 +424,27 @@ export async function runEstimatingTurn(opts: {
       switch (op.type) {
         case "add_item": {
           if (!op.description) break;
+          // Technician-stated price (labor rate, hand-quoted amount): used as-is, flagged
+          // like a manual edit so no catalog resolve or backfill ever overwrites it.
+          if (op.unitPrice != null) {
+            await prisma.quoteLineItem.create({
+              data: {
+                quoteId: opts.quoteId,
+                description: op.description,
+                quantity: op.quantity,
+                unit: op.unit,
+                unitPrice: op.unitPrice,
+                manuallyEdited: true,
+                sortOrder: nextSort++,
+              },
+            });
+            break;
+          }
           const priced = priceFields(op.description, null, op.searchTerm);
           const addUnit = op.unit ?? priced.unit;
           // Suppliers sell many small parts only in multiples, so a count is rounded up to a
           // whole pack: four connectors from a 5-pack means buying five. See packMath.
-          const addQty = packAwareQuantity(op.quantity, addUnit, priced.packageQuantity);
+          const addQty = packAwareQuantity(op.quantity, addUnit, priced.packageQuantity, priced.unit);
           if (addQty.rounded)
             logger.info("Rounded quantity up to a whole pack", {
               description: op.description,
@@ -450,7 +474,7 @@ export async function runEstimatingTurn(opts: {
           const kbUnit = op.unit ?? kb.unit ?? priced.unit;
           const kbRawQty =
             op.quantity ?? (kb.defaultQuantity == null ? null : Number(kb.defaultQuantity));
-          const kbQty = packAwareQuantity(kbRawQty, kbUnit, priced.packageQuantity);
+          const kbQty = packAwareQuantity(kbRawQty, kbUnit, priced.packageQuantity, priced.unit);
           const createdKb = await prisma.quoteLineItem.create({
             data: {
               quoteId: opts.quoteId,
@@ -472,6 +496,10 @@ export async function runEstimatingTurn(opts: {
           const data: Record<string, unknown> = {};
           if (op.quantity != null) data.quantity = op.quantity;
           if (op.unit != null) data.unit = op.unit;
+          if (op.unitPrice != null) {
+            data.unitPrice = op.unitPrice;
+            data.manuallyEdited = true;
+          }
           let repriced: ReturnType<typeof priceFields> | null = null;
           if (op.description != null && op.description !== existing.description) {
             data.description = op.description;
@@ -498,7 +526,7 @@ export async function runEstimatingTurn(opts: {
                 : existing.quantity == null
                 ? null
                 : Number(existing.quantity);
-            const packed = packAwareQuantity(effQty, effUnit, repriced.packageQuantity);
+            const packed = packAwareQuantity(effQty, effUnit, repriced.packageQuantity, repriced.unit);
             if (packed.rounded) data.quantity = packed.quantity;
           }
           if (Object.keys(data).length > 0)
