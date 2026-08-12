@@ -332,8 +332,13 @@ export interface HdProductDetail extends HdSearchProduct {
   storeSku?: string;
 }
 
-/** How many times to read the archive before giving up, and the wait between reads. */
-const ASYNC_POLLS = 6;
+/**
+ * How many times to read the archive before giving up, and the wait between reads.
+ * 20 × 1.5s = 30s ceiling: under concurrent load SerpApi takes 15–30s to fill the archive
+ * (measured 2026-08-12), and the old 9s ceiling walked away from searches that were about
+ * to succeed — the dominant cause of unpriced lines.
+ */
+const ASYNC_POLLS = 20;
 const ASYNC_POLL_MS = 1_500;
 
 /** Read a completed async search back from SerpApi's archive. Archive reads are not billed. */

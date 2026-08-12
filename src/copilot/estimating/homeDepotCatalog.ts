@@ -259,6 +259,30 @@ function unitPriceFromSearch(
 }
 
 /**
+ * FIFO semaphore capping concurrent resolves. A confirmed 8-item proposal used to fire
+ * 8 resolves × 4 search variants = ~32 simultaneous SerpApi searches; the free tier queues
+ * past ~5 parallel, everything slowed to 15–30s, and most lines went unpriced. Two resolves
+ * (≤8 searches in flight) stay inside what SerpApi serves promptly.
+ */
+const MAX_CONCURRENT_RESOLVES = 2;
+let activeResolves = 0;
+const resolveWaiters: Array<() => void> = [];
+
+async function acquireResolveSlot(): Promise<void> {
+  if (activeResolves < MAX_CONCURRENT_RESOLVES) {
+    activeResolves++;
+    return;
+  }
+  await new Promise<void>((wake) => resolveWaiters.push(wake));
+}
+
+function releaseResolveSlot(): void {
+  const next = resolveWaiters.shift();
+  if (next) next(); // slot handed to the waiter; activeResolves unchanged
+  else activeResolves--;
+}
+
+/**
  * Resolve one description against Home Depot and persist it to the company's pricebook.
  * Returns the resolved item, or null when HD does not stock it (the honest outcome — the
  * line simply stays unpriced for the technician to fill in).
@@ -268,20 +292,34 @@ export async function resolveFromHomeDepot(
   companyId: number
 ): Promise<ResolvedCatalogItem | null> {
   if (!isCatalogEnabled()) return null;
+  await acquireResolveSlot();
+  try {
+    return await resolveThrottled(description, companyId);
+  } finally {
+    releaseResolveSlot();
+  }
+}
 
+async function resolveThrottled(
+  description: string,
+  companyId: number
+): Promise<ResolvedCatalogItem | null> {
   const variants = queryVariants(description);
   if (variants.length === 0) return null;
 
-  const resultSets = (
-    await Promise.all(
-      variants.map((q) =>
-        searchHomeDepot(q).catch((err) => {
-          logger.warn("Catalog search failed", { q, error: err?.message });
-          return [] as HdSearchProduct[];
-        })
-      )
-    )
-  ).filter((s) => s.length > 0);
+  const resultSets = (await Promise.allSettled(variants.map((q) => searchHomeDepot(q))))
+    .map((settled, i) => {
+      if (settled.status === "rejected") {
+        const err = settled.reason;
+        logger.warn("Catalog search failed", {
+          q: variants[i],
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return [] as HdSearchProduct[];
+      }
+      return settled.value;
+    })
+    .filter((s) => s.length > 0);
 
   // With a single result set, unanimity is trivially satisfied and gate 1 becomes a no-op —
   // gates 2 (spec tokens) and 3 (model selection) still carry the correctness load. Better to
