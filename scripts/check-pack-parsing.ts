@@ -14,6 +14,7 @@
  *   npx tsx scripts/check-pack-parsing.ts
  */
 import { packQuantityFromTitle } from "../src/lib/serpapi";
+import { packAwareQuantity, packRoundQty } from "../src/copilot/estimating/packMath";
 
 /** [title, expected pack quantity | null = refuse to divide] */
 const CASES: [string, number | null][] = [
@@ -57,5 +58,39 @@ console.log(
   `${priceOk ? "PASS" : "FAIL"}  $2.95 / 5-Pack = $${derived} — HD-100144234 was stored at $0.59/EA`
 );
 
-console.log(`\n──── ${pass}/${CASES.length + 1} passed`);
-process.exit(pass === CASES.length + 1 ? 0 : 1);
+/**
+ * Rounding a piece count up to whole packs. HD-100137321 is a 5-pack: needing four connectors
+ * means buying five, and quoting four is a purchase the supplier will not sell.
+ * [quantity, unit, packageQuantity, expected quantity]
+ */
+const QTY_CASES: [number | null, string | null, number | null, number | null][] = [
+  [4, "EA", 5, 5], // the reported bug
+  [5, "EA", 5, 5], // already whole — unchanged, so re-pricing can't compound
+  [12, "EA", 5, 15],
+  [1, null, 5, 5], // absent unit means a plain count
+  [3, "ea", null, 3], // not a pack item
+  [3, "EA", 1, 3], // pack of one is not a pack
+  [null, "EA", 5, null], // no quantity stays missing and stays flagged
+  [30, "ft", 5, 30], // a measured unit is never converted
+  [2, "ROLL", 5, 2],
+];
+
+for (const [qty, unit, pack, expected] of QTY_CASES) {
+  const got = packAwareQuantity(qty, unit, pack).quantity;
+  const ok = got === expected;
+  if (ok) pass++;
+  console.log(
+    `${ok ? "PASS" : "FAIL"}  qty=${String(qty).padEnd(4)} unit=${String(unit).padEnd(5)} pack=${String(pack).padEnd(4)} -> ${String(got).padEnd(4)} expected=${expected}`
+  );
+}
+
+// Idempotence is the property that lets a re-price, a backfill and a repair all run over the
+// same line without compounding, so assert it directly rather than trusting the cases above.
+const twice = packRoundQty(packRoundQty(4, 5), 5);
+const idempotent = twice === 5;
+if (idempotent) pass++;
+console.log(`${idempotent ? "PASS" : "FAIL"}  rounding 4 to packs of 5 twice = ${twice} (idempotent)`);
+
+const TOTAL = CASES.length + 1 + QTY_CASES.length + 1;
+console.log(`\n──── ${pass}/${TOTAL} passed`);
+process.exit(pass === TOTAL ? 0 : 1);

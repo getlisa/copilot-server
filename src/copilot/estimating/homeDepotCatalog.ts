@@ -9,6 +9,7 @@ import {
   type HdSearchProduct,
 } from "../../lib/serpapi";
 import { tokenize } from "./pricebookMatch";
+import { packAwareQuantity } from "./packMath";
 
 /**
  * Home Depot catalog resolver for the Estimating Agent.
@@ -348,6 +349,15 @@ export async function resolveFromHomeDepot(
     return null;
   }
 
+  // Pack size decides whether a line's count gets rounded up, so take it from whichever
+  // source has it: the product record, the search fallback, or the title itself — a response
+  // carrying price_per_unit but no package_quantity would otherwise look like a single item.
+  const packQty =
+    detail?.packageQuantity ??
+    fromSearch?.packageQuantity ??
+    packQuantityFromTitle(detail?.title || winner.title) ??
+    undefined;
+
   const code = `HD-${winner.productId}`;
   const unit = detail?.unit && detail.unit !== "unit" ? detail.unit : "EA";
   const title = detail?.title || winner.title;
@@ -376,7 +386,7 @@ export async function resolveFromHomeDepot(
         externalLink: detail?.link ?? winner.link,
         brand: detail?.brand ?? winner.brand,
         rating: winner.rating ?? detail?.rating,
-        packageQuantity: detail?.packageQuantity ?? fromSearch?.packageQuantity,
+        packageQuantity: packQty,
         lastResolvedAt: new Date(),
       },
       update: {
@@ -385,7 +395,7 @@ export async function resolveFromHomeDepot(
         synonyms,
         externalLink: detail?.link ?? winner.link,
         rating: winner.rating ?? detail?.rating,
-        packageQuantity: detail?.packageQuantity ?? fromSearch?.packageQuantity,
+        packageQuantity: packQty,
         lastResolvedAt: new Date(),
       },
     });
@@ -411,7 +421,7 @@ export async function resolveFromHomeDepot(
     externalLink: detail?.link ?? winner.link,
     brand: detail?.brand ?? winner.brand,
     rating: winner.rating ?? detail?.rating,
-    packageQuantity: detail?.packageQuantity ?? fromSearch?.packageQuantity,
+    packageQuantity: packQty,
   };
 }
 
@@ -464,7 +474,7 @@ export function enqueueResolve(
       // that, priceFields showing a MANUAL price while the resolve ran would leave
       // `unitPrice` non-null and this update would skip the row, pinning the book price
       // forever. A technician's own edit always wins — manuallyEdited rows are never touched.
-      const { count } = await prisma.quoteLineItem.updateMany({
+      const targets = await prisma.quoteLineItem.findMany({
         where: {
           id: { in: lineItemIds },
           manuallyEdited: false,
@@ -475,12 +485,38 @@ export function enqueueResolve(
             { NOT: { pricebookCode: { startsWith: "HD-" } } },
           ],
         },
-        data: {
-          unitPrice: resolved.unitPrice,
-          unit: resolved.unit,
-          pricebookCode: resolved.code,
-        },
+        select: { id: true, quantity: true, unit: true },
       });
+
+      // Per row rather than updateMany: rounding a count up to a whole pack is arithmetic on
+      // each line's own quantity, which a single bulk statement cannot express. The target
+      // list is one or two ids, so the extra queries are immaterial.
+      let count = 0;
+      for (const row of targets) {
+        const unit = resolved.unit ?? row.unit;
+        const packed = packAwareQuantity(
+          row.quantity == null ? null : Number(row.quantity),
+          unit,
+          resolved.packageQuantity
+        );
+        await prisma.quoteLineItem.update({
+          where: { id: row.id },
+          data: {
+            unitPrice: resolved.unitPrice,
+            unit: resolved.unit,
+            pricebookCode: resolved.code,
+            ...(packed.rounded ? { quantity: packed.quantity } : {}),
+          },
+        });
+        count++;
+        if (packed.rounded)
+          logger.info("Backfill rounded quantity up to a whole pack", {
+            lineItemId: row.id,
+            from: Number(row.quantity),
+            to: packed.quantity,
+            packageQuantity: resolved.packageQuantity,
+          });
+      }
       if (count > 0) logger.info("Catalog backfilled unpriced lines", { searchTerm, count });
     } catch (err) {
       logger.warn("Catalog resolve job failed", {

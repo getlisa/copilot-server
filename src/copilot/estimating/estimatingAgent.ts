@@ -2,6 +2,7 @@ import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { callStructured, EstimateTurn } from "../estimate/estimateService";
 import { matchPricebook } from "./pricebookMatch";
+import { packAwareQuantity } from "./packMath";
 import { enqueueResolve } from "./homeDepotCatalog";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
 
@@ -202,6 +203,9 @@ function buildTurnContext(
             const product = cat
               ? ` | product: ${cat.brand ? cat.brand + " " : ""}${cat.description}` +
                 ` | price: $${Number(cat.unitPrice)}/${cat.unit}` +
+                (cat.packageQuantity != null && Number(cat.packageQuantity) > 1
+                  ? ` | sold in packs of ${Number(cat.packageQuantity)} (quantity is rounded up to whole packs)`
+                  : "") +
                 (cat.rating != null ? ` | rating: ${Number(cat.rating)}` : "") +
                 (cat.externalLink ? ` | link: ${cat.externalLink}` : "")
               : "";
@@ -305,6 +309,9 @@ export async function runEstimatingTurn(opts: {
     synonyms: p.synonyms,
     // Distinguishes the Home Depot cache from the company's own curated rows — see priceFields.
     source: p.source,
+    // How many pieces the supplier sells at once. Carried through so a line's quantity can be
+    // rounded up to whole packs — see packMath.
+    packageQuantity: p.packageQuantity == null ? null : Number(p.packageQuantity),
   }));
   const byCode = new Map(matchable.map((p) => [p.code, p]));
   const validIds = new Set(items.map((i) => i.id));
@@ -332,7 +339,13 @@ export async function runEstimatingTurn(opts: {
     searchTerm?: string | null
   ) => {
     const term = searchTerm?.trim() || null;
-    const blank = { pricebookCode: null, unitPrice: null, unit: null, resolveTerm: null };
+    const blank = {
+      pricebookCode: null,
+      unitPrice: null,
+      unit: null,
+      packageQuantity: null,
+      resolveTerm: null,
+    };
 
     // 0. An explicit KB code is a curated, exact identity mapping. It outranks any fuzzy
     //    match, and its line must not be re-resolved — the backfill would otherwise overwrite
@@ -343,6 +356,7 @@ export async function runEstimatingTurn(opts: {
         pricebookCode: curated.code,
         unitPrice: curated.unitPrice,
         unit: curated.unit,
+        packageQuantity: curated.packageQuantity,
         resolveTerm: null,
       };
     }
@@ -362,6 +376,7 @@ export async function runEstimatingTurn(opts: {
         pricebookCode: cached.code,
         unitPrice: cached.unitPrice,
         unit: cached.unit,
+        packageQuantity: cached.packageQuantity,
         resolveTerm: null,
       };
     }
@@ -377,6 +392,7 @@ export async function runEstimatingTurn(opts: {
         pricebookCode: own.code,
         unitPrice: own.unitPrice,
         unit: own.unit,
+        packageQuantity: own.packageQuantity,
         resolveTerm: term,
       };
     }
@@ -401,12 +417,23 @@ export async function runEstimatingTurn(opts: {
         case "add_item": {
           if (!op.description) break;
           const priced = priceFields(op.description, null, op.searchTerm);
+          const addUnit = op.unit ?? priced.unit;
+          // Suppliers sell many small parts only in multiples, so a count is rounded up to a
+          // whole pack: four connectors from a 5-pack means buying five. See packMath.
+          const addQty = packAwareQuantity(op.quantity, addUnit, priced.packageQuantity);
+          if (addQty.rounded)
+            logger.info("Rounded quantity up to a whole pack", {
+              description: op.description,
+              from: op.quantity,
+              to: addQty.quantity,
+              packageQuantity: priced.packageQuantity,
+            });
           const created = await prisma.quoteLineItem.create({
             data: {
               quoteId: opts.quoteId,
               description: op.description,
-              quantity: op.quantity,
-              unit: op.unit ?? priced.unit,
+              quantity: addQty.quantity,
+              unit: addUnit,
               unitPrice: priced.unitPrice,
               pricebookCode: priced.pricebookCode,
               sortOrder: nextSort++,
@@ -420,12 +447,16 @@ export async function runEstimatingTurn(opts: {
           if (!kb) break;
           const description = op.description ?? kb.materialDescription;
           const priced = priceFields(description, kb.pricebookCode, op.searchTerm);
+          const kbUnit = op.unit ?? kb.unit ?? priced.unit;
+          const kbRawQty =
+            op.quantity ?? (kb.defaultQuantity == null ? null : Number(kb.defaultQuantity));
+          const kbQty = packAwareQuantity(kbRawQty, kbUnit, priced.packageQuantity);
           const createdKb = await prisma.quoteLineItem.create({
             data: {
               quoteId: opts.quoteId,
               description,
-              quantity: op.quantity ?? kb.defaultQuantity,
-              unit: op.unit ?? kb.unit ?? priced.unit,
+              quantity: kbQty.quantity,
+              unit: kbUnit,
               unitPrice: priced.unitPrice,
               pricebookCode: priced.pricebookCode,
               agentSuggested: true,
@@ -441,7 +472,7 @@ export async function runEstimatingTurn(opts: {
           const data: Record<string, unknown> = {};
           if (op.quantity != null) data.quantity = op.quantity;
           if (op.unit != null) data.unit = op.unit;
-          let repriced: { resolveTerm: string | null } | null = null;
+          let repriced: ReturnType<typeof priceFields> | null = null;
           if (op.description != null && op.description !== existing.description) {
             data.description = op.description;
             if (!existing.manuallyEdited) {
@@ -456,6 +487,19 @@ export async function runEstimatingTurn(opts: {
                 if (priced.unit && op.unit == null) data.unit = priced.unit;
               }
             }
+          }
+          // Re-pricing onto a pack row rounds the line's count up too, whether the quantity
+          // came from this op or was already on the row.
+          if (repriced?.packageQuantity) {
+            const effUnit = (data.unit as string | null | undefined) ?? existing.unit;
+            const effQty =
+              data.quantity != null
+                ? Number(data.quantity)
+                : existing.quantity == null
+                ? null
+                : Number(existing.quantity);
+            const packed = packAwareQuantity(effQty, effUnit, repriced.packageQuantity);
+            if (packed.rounded) data.quantity = packed.quantity;
           }
           if (Object.keys(data).length > 0)
             await prisma.quoteLineItem.update({

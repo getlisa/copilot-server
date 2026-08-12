@@ -153,6 +153,16 @@ A single resolve hung 112–198s then gave up, discarding three passing gates ov
 
 The backfill only touched rows with a null `unitPrice`. Under Home-Depot-first pricing the placeholder from the company book leaves it non-null, so the update would skip the row and pin the book price forever — silently defeating the change.
 
+### D10 — Pack-only parts quoted as loose pieces *(FIXED)*
+
+Reported from a live estimate. `HD-100137321` is a **5-pack** of 1/2 in EMT set-screw connectors at $4.25; $0.85 is what one costs, not what one can be bought for. A line needing four was quoted 4 × $0.85 = **$3.40** — a purchase the supplier will not sell. The technician leaves with five and the job is short.
+
+The fix rounds the **quantity** up to a whole number of packs and leaves the price per unit: 4 → **5 EA @ $0.85 = $4.25**. Chosen over storing the pack price against a pack unit because it keeps the line's arithmetic visibly consistent, it is idempotent (re-pricing an already-rounded count is a no-op, so a turn, a backfill and a repair can all run over one line without compounding), and it avoids the trap in `unit: op.unit ?? priced.unit` — a model-supplied "EA" against a pack-priced row would have quoted four connectors at $17.00.
+
+Applied everywhere a quantity meets a pack row: `add_item`, `kb_proposal`, an `update_item` re-price, the REST `addItem` (a hand-added part bypasses the agent entirely), and the resolver backfill — which now updates row by row, since rounding is arithmetic on each line's own quantity and `updateMany` cannot express it.
+
+A measured unit is never converted: "30 ft" beside a pack size of 5 stays 30 ft, because there is no honest reading of it. Pack size now also falls back to the product title, so a response carrying `price_per_unit` without `package_quantity` no longer looks like a single item. Guarded by 10 further assertions in `scripts/check-pack-parsing.ts` (25 total), including idempotence directly.
+
 ### D9 — Gate 4 blocks everything, so nothing gets a price or a link *(FIXED)*
 
 Section 3 called `home_depot_product` "the dominant failure". As of 2026-08-12 it is a total one: **every** product lookup in production fails.

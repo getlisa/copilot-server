@@ -7,6 +7,7 @@ import {
   countRecentFollowUps,
 } from "../../copilot/estimating/estimatingAgent";
 import { matchPricebook } from "../../copilot/estimating/pricebookMatch";
+import { packAwareQuantity } from "../../copilot/estimating/packMath";
 import { toQuoteDto, toLineItemDto, type CatalogIndex } from "../../copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
 import { buildProposalDocx } from "../../copilot/estimating/proposalDocx";
@@ -194,6 +195,8 @@ async function matcherFor(companyId: number) {
     unit: p.unit,
     unitPrice: Number(p.unitPrice),
     synonyms: p.synonyms,
+    // Needed so a hand-added count is rounded to whole packs like a spoken one — see packMath.
+    packageQuantity: p.packageQuantity == null ? null : Number(p.packageQuantity),
   }));
   return (description: string) => matchPricebook(description, matchable);
 }
@@ -447,12 +450,19 @@ export class QuoteController {
       quote.lineItems.length > 0
         ? Math.max(...quote.lineItems.map((i) => i.sortOrder)) + 1
         : 0;
+    // A hand-added part is bought the same way a spoken one is: if the matched row is a pack,
+    // round the count up to a whole pack. A caller-supplied price means they priced it
+    // themselves, so leave their numbers alone.
+    const addUnit = unit ?? match?.unit ?? null;
+    const addQty = manualPrice
+      ? { quantity: quantity ?? null }
+      : packAwareQuantity(quantity ?? null, addUnit, match?.packageQuantity);
     const item = await prisma.quoteLineItem.create({
       data: {
         quoteId: quote.id,
         description,
-        quantity: quantity ?? null,
-        unit: unit ?? match?.unit ?? null,
+        quantity: addQty.quantity,
+        unit: addUnit,
         unitPrice: unitPrice ?? match?.unitPrice ?? null,
         totalPrice: totalPrice ?? null,
         pricebookCode: match?.code ?? null,
