@@ -17,6 +17,7 @@ quoteRoute.post("/:quoteId/messages", QuoteController.sendMessage);
 quoteRoute.post("/:quoteId/items", QuoteController.addItem);
 quoteRoute.patch("/:quoteId/items/:itemId", QuoteController.updateItem);
 quoteRoute.delete("/:quoteId/items/:itemId", QuoteController.removeItem);
+quoteRoute.post("/:quoteId/items/:itemId/price", QuoteController.priceItem);
 quoteRoute.post("/:quoteId/complete", QuoteController.complete);
 quoteRoute.post("/:quoteId/reopen", QuoteController.reopen);
 quoteRoute.get("/:quoteId/docx", QuoteController.downloadDocx);

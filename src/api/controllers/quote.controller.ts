@@ -7,6 +7,7 @@ import {
   countRecentFollowUps,
 } from "../../copilot/estimating/estimatingAgent";
 import { matchPricebook } from "../../copilot/estimating/pricebookMatch";
+import { resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
 import { packAwareQuantity } from "../../copilot/estimating/packMath";
 import { toQuoteDto, toLineItemDto, type CatalogIndex } from "../../copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
@@ -554,6 +555,56 @@ export class QuoteController {
     const item = quote.lineItems.find((i) => i.id === req.params.itemId);
     if (!item) return fail(res, 404, "Line item not found");
     await prisma.quoteLineItem.delete({ where: { id: item.id } });
+    const updated = await loadOwnedQuote(quote.id, user.userId);
+    res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
+  }
+
+  /**
+   * POST /api/v1/quotes/:quoteId/items/:itemId/price — on-demand price search for one line.
+   * Company pricebook first (instant, free), then the awaited Home Depot resolver — a cold
+   * search runs 15–30s, so the client shows a spinner for this request. An explicit search
+   * replaces a manually typed price: the technician asked for the catalog number.
+   */
+  static async priceItem(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
+    const item = quote.lineItems.find((i) => i.id === req.params.itemId);
+    if (!item) return fail(res, 404, "Line item not found");
+
+    const body = req.body ?? {};
+    const term =
+      typeof body.searchTerm === "string" && body.searchTerm.trim()
+        ? body.searchTerm.trim()
+        : item.description;
+
+    const match = (await matcherFor(user.companyId))(term);
+    const resolved = match ?? (await resolveFromHomeDepot(term, user.companyId));
+    if (!resolved)
+      return fail(
+        res,
+        404,
+        `No catalog match for "${term}" — reword the description to a product name (size + part), or type a price.`
+      );
+
+    const unit = resolved.unit ?? item.unit;
+    const packed = packAwareQuantity(
+      item.quantity == null ? null : Number(item.quantity),
+      unit,
+      resolved.packageQuantity ?? null
+    );
+    await prisma.quoteLineItem.update({
+      where: { id: item.id },
+      data: {
+        unitPrice: resolved.unitPrice,
+        pricebookCode: resolved.code,
+        manuallyEdited: false,
+        ...(resolved.unit ? { unit: resolved.unit } : {}),
+        ...(packed.rounded ? { quantity: packed.quantity } : {}),
+      },
+    });
     const updated = await loadOwnedQuote(quote.id, user.userId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
