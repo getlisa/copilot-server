@@ -124,6 +124,17 @@ function variants(t: string): string[] {
 
 const MATCH_THRESHOLD = 0.6;
 
+/**
+ * Head nouns that name an ACCESSORY to a device rather than the device itself. A row whose
+ * own head noun is one of these must not price a query that never asked for it: "Ground Rod
+ * Clamp" contains "rod", so the query "ground rod" sails through the product-noun gate and
+ * a $4.35 clamp prices a $21 rod — measured on a real quote. The reverse is safe (a query
+ * naming the accessory still matches it), so this only ever rejects.
+ */
+const ACCESSORY_NOUNS = new Set([
+  "clamp", "connector", "strap", "cover", "bracket", "cap", "bushing", "coupling", "plate",
+]);
+
 /** Best pricebook match for a free-text description, or null if nothing is close enough. */
 export function matchPricebook<T extends MatchablePricebookItem>(
   query: string,
@@ -150,6 +161,15 @@ export function matchPricebook<T extends MatchablePricebookItem>(
     // HARD CONSTRAINT: the row must name the same kind of thing. Fittings, straps, conduit
     // and connectors of one size are otherwise indistinguishable by score.
     if (noun && !variants(noun).some((v) => haySet.has(v))) continue;
+    // HARD CONSTRAINT, reversed: a row whose OWN head noun is an accessory word must not
+    // price a query that never asked for that accessory — see ACCESSORY_NOUNS.
+    const hayNoun = productNoun(tokenize(item.description));
+    if (
+      hayNoun &&
+      ACCESSORY_NOUNS.has(hayNoun) &&
+      !qTokens.some((t) => variants(t).includes(hayNoun) || variants(hayNoun).includes(t))
+    )
+      continue;
     let hit = 0;
     for (const t of qTokens) {
       if (variants(t).some((v) => haySet.has(v))) hit += 1;
