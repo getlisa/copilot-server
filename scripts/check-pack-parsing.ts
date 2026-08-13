@@ -14,7 +14,7 @@
  *   npx tsx scripts/check-pack-parsing.ts
  */
 import { lengthFromTitle, packQuantityFromTitle } from "../src/lib/serpapi";
-import { packAwareQuantity, packRoundQty } from "../src/copilot/estimating/packMath";
+import { packAwareQuantity, packRoundQty, unitsCompatible } from "../src/copilot/estimating/packMath";
 
 /** [title, expected pack quantity | null = refuse to divide] */
 const CASES: [string, number | null][] = [
@@ -124,6 +124,34 @@ for (const [title, expected] of TITLE_LENGTH_CASES) {
   console.log(`${ok ? "PASS" : "FAIL"}  length=${String(got).padEnd(4)} expected=${String(expected).padEnd(4)} ${title}`);
 }
 
+/**
+ * A price only applies to a line whose unit measures the same thing. The reported bug:
+ * a 2,000 ft wire line priced against a $144/spool row quoted $288,000 — footage multiplied
+ * by an each-price. Incompatible units mean the line stays unpriced/flagged instead.
+ * The resolver's price-basis rule (derive listingPrice / unitsPerPurchase, never trust the
+ * label — see homeDepotCatalog) has the same premise: arithmetic over labels.
+ * [line unit, priced row unit, expected compatible]
+ */
+const COMPAT_CASES: [string | null, string | null, boolean][] = [
+  ["ft", "EA", false], // the reported bug: footage × each-price
+  ["EA", "ft", false], // piece count × per-foot price
+  ["ROLL", "ft", false], // roll count × per-foot price
+  ["ft", "ft.", true], // HD writes "ft." with a period
+  ["FT", "ft", true],
+  ["EA", "EA", true],
+  [null, "EA", true], // absent unit means a plain count
+  [null, "ft", false], // a bare count is not footage
+];
+
+for (const [lineUnit, rowUnit, expected] of COMPAT_CASES) {
+  const got = unitsCompatible(lineUnit, rowUnit);
+  const ok = got === expected;
+  if (ok) pass++;
+  console.log(
+    `${ok ? "PASS" : "FAIL"}  line=${String(lineUnit).padEnd(5)} row=${String(rowUnit).padEnd(4)} -> compatible=${got} expected=${expected}`
+  );
+}
+
 // Idempotence is the property that lets a re-price, a backfill and a repair all run over the
 // same line without compounding, so assert it directly rather than trusting the cases above.
 const twice = packRoundQty(packRoundQty(4, 5), 5);
@@ -131,6 +159,6 @@ const idempotent = twice === 5;
 if (idempotent) pass++;
 console.log(`${idempotent ? "PASS" : "FAIL"}  rounding 4 to packs of 5 twice = ${twice} (idempotent)`);
 
-const TOTAL = CASES.length + 1 + QTY_CASES.length + LENGTH_CASES.length + TITLE_LENGTH_CASES.length + 1;
+const TOTAL = CASES.length + 1 + QTY_CASES.length + LENGTH_CASES.length + TITLE_LENGTH_CASES.length + COMPAT_CASES.length + 1;
 console.log(`\n──── ${pass}/${TOTAL} passed`);
 process.exit(pass === TOTAL ? 0 : 1);

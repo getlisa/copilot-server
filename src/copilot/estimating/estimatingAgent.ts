@@ -2,7 +2,7 @@ import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { callStructured, EstimateTurn } from "../estimate/estimateService";
 import { matchPricebook } from "./pricebookMatch";
-import { packAwareQuantity } from "./packMath";
+import { packAwareQuantity, unitsCompatible } from "./packMath";
 import { enqueueResolve } from "./homeDepotCatalog";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
 
@@ -440,8 +440,24 @@ export async function runEstimatingTurn(opts: {
             });
             break;
           }
-          const priced = priceFields(op.description, null, op.searchTerm);
+          let priced = priceFields(op.description, null, op.searchTerm);
           const addUnit = op.unit ?? priced.unit;
+          // A price only applies to a line whose unit measures the same thing: 2,000 ft ×
+          // an each-price is a $288k quote. Incompatible → stay unpriced/flagged instead.
+          if (priced.unitPrice != null && !unitsCompatible(addUnit, priced.unit)) {
+            logger.info("Price refused: line unit incompatible with priced unit", {
+              description: op.description,
+              lineUnit: addUnit,
+              pricedUnit: priced.unit,
+            });
+            priced = {
+              pricebookCode: null,
+              unitPrice: null,
+              unit: null,
+              packageQuantity: null,
+              resolveTerm: priced.resolveTerm,
+            };
+          }
           // Suppliers sell many small parts only in multiples, so a count is rounded up to a
           // whole pack: four connectors from a 5-pack means buying five. See packMath.
           const addQty = packAwareQuantity(op.quantity, addUnit, priced.packageQuantity, priced.unit);
@@ -470,8 +486,22 @@ export async function runEstimatingTurn(opts: {
           const kb = kbEntries.find((k) => k.id === op.kbEntryId);
           if (!kb) break;
           const description = op.description ?? kb.materialDescription;
-          const priced = priceFields(description, kb.pricebookCode, op.searchTerm);
+          let priced = priceFields(description, kb.pricebookCode, op.searchTerm);
           const kbUnit = op.unit ?? kb.unit ?? priced.unit;
+          if (priced.unitPrice != null && !unitsCompatible(kbUnit, priced.unit)) {
+            logger.info("Price refused: line unit incompatible with priced unit", {
+              description,
+              lineUnit: kbUnit,
+              pricedUnit: priced.unit,
+            });
+            priced = {
+              pricebookCode: null,
+              unitPrice: null,
+              unit: null,
+              packageQuantity: null,
+              resolveTerm: priced.resolveTerm,
+            };
+          }
           const kbRawQty =
             op.quantity ?? (kb.defaultQuantity == null ? null : Number(kb.defaultQuantity));
           const kbQty = packAwareQuantity(kbRawQty, kbUnit, priced.packageQuantity, priced.unit);
@@ -509,7 +539,12 @@ export async function runEstimatingTurn(opts: {
               // Only overwrite an existing price when a replacement was actually found.
               // Clearing it unconditionally meant that editing a line's wording during an
               // upstream outage silently unpriced it, with nothing scheduled to restore it.
-              if (priced.unitPrice != null) {
+              // And a found price must measure what the line measures (see unitsCompatible)
+              // — a per-EA spool price never applies to a line stated in feet.
+              if (
+                priced.unitPrice != null &&
+                unitsCompatible(op.unit ?? existing.unit ?? priced.unit, priced.unit)
+              ) {
                 data.pricebookCode = priced.pricebookCode;
                 data.unitPrice = priced.unitPrice;
                 if (priced.unit && op.unit == null) data.unit = priced.unit;

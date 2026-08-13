@@ -39,6 +39,21 @@ export function isLengthUnit(unit: string | null | undefined): boolean {
 }
 
 /**
+ * Whether a priced row's unit can legitimately price a line stated in `lineUnit`: both
+ * measure length, or neither does. Multiplying a footage by an each-price — or a piece
+ * count by a per-foot price — produces a confidently wrong total (a 2,000 ft wire line
+ * priced against a $144 spool row quoted $288,000), so a mismatch means the price does not
+ * apply and the line must stay unpriced/flagged for the technician instead. Refusing is the
+ * same premise as the rest of this file: never a confident wrong conversion.
+ */
+export function unitsCompatible(
+  lineUnit: string | null | undefined,
+  rowUnit: string | null | undefined
+): boolean {
+  return isLengthUnit(lineUnit) === isLengthUnit(rowUnit);
+}
+
+/**
  * Round a piece count up to a whole number of packs.
  *
  * Idempotent by construction — rounding an already-whole multiple returns it unchanged — so a

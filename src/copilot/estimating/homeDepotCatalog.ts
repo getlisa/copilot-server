@@ -10,7 +10,7 @@ import {
   type HdSearchProduct,
 } from "../../lib/serpapi";
 import { tokenize } from "./pricebookMatch";
-import { isLengthUnit, packAwareQuantity } from "./packMath";
+import { isLengthUnit, packAwareQuantity, unitsCompatible } from "./packMath";
 
 /**
  * Home Depot catalog resolver for the Estimating Agent.
@@ -409,29 +409,51 @@ async function resolveThrottled(
   let unit = detail?.unit && detail.unit !== "unit" ? detail.unit : "EA";
   const title = detail?.title || winner.title;
 
+  // ── Price-basis normalization ─────────────────────────────────────────────────────────
+  // ROOT RULE: when the listing price and the units one purchase buys (pack count or roll
+  // length) are both known, the stored per-unit price is listingPrice / unitsPerPurchase —
+  // DERIVED, never read off a label. SerpApi's labels lie in both directions: unit "ft."
+  // next to the whole-spool price (price_per_unit absent) stored $144/ft for a 500 ft THHN
+  // spool and quoted a 2,000 ft line at $288,000; a price_per_unit equal to the pack price
+  // does the same for count packs. The division cannot lie — both inputs describe the same
+  // purchase.
+  //
   // Cable, conduit and the like sell in fixed lengths: "100 ft. 14/2 NM-B" is ONE $47 roll,
-  // not 100 things. Store the per-foot price with the roll length as the pack size, so a
-  // 25 ft line rounds up to the whole 100 ft the technician actually has to buy — the same
+  // not 100 things. Those store the per-foot price with the roll length as the pack size, so
+  // a 25 ft line rounds up to the whole 100 ft the technician actually has to buy — the same
   // arithmetic as four connectors from a 5-pack. Gated on goods genuinely sold by length so
   // a "25 ft. tape measure" never becomes per-foot pricing.
   const rollLength = lengthFromTitle(title);
-  if (
+  const soldByLength =
     rollLength != null &&
     rollLength > 1 &&
     (packQty == null || packQty <= 1) &&
-    SOLD_BY_LENGTH_RE.test(title)
-  ) {
-    if (!isLengthUnit(unit)) {
-      // Whole-roll listing (unit EA, price = the roll): convert to per-foot.
+    SOLD_BY_LENGTH_RE.test(title);
+  const unitsPerPurchase = soldByLength ? rollLength : packQty ?? 1;
+  const listingPrice = detail?.price ?? winner.price;
+  if (unitsPerPurchase > 1) {
+    if (listingPrice != null && listingPrice > 0) {
+      unitPrice = Math.round((listingPrice / unitsPerPurchase) * 100) / 100;
+    } else if (soldByLength && !isLengthUnit(unit)) {
+      // No listing price to derive from, so the unit label is all there is: a count label
+      // on a sold-by-length listing means the reported price is the whole roll — convert.
       unitPrice = Math.round((unitPrice / rollLength) * 100) / 100;
-      unit = "ft";
     }
-    packQty = rollLength;
-    logger.info("Catalog: sold by length, priced per ft with whole-roll rounding", {
+    if (soldByLength) {
+      unit = "ft";
+      packQty = rollLength;
+      logger.info("Catalog: sold by length, priced per ft with whole-roll rounding", {
+        productId: winner.productId,
+        rollLength,
+        unitPrice,
+      });
+    }
+  }
+  if (unitPrice <= 0) {
+    logger.info("Catalog: no usable unit price after normalization", {
       productId: winner.productId,
-      rollLength,
-      unitPrice,
     });
+    return null;
   }
 
   // Persist company-scoped so matchPricebook() finds it next turn with no API call. The
@@ -565,6 +587,18 @@ export function enqueueResolve(
       // list is one or two ids, so the extra queries are immaterial.
       let count = 0;
       for (const row of targets) {
+        // A price only applies to a line whose unit measures the same thing. Backfilling a
+        // per-EA spool price onto a line stated in feet would also overwrite the
+        // technician's "ft" with "EA" while keeping the footage as the quantity — a $288k
+        // line. Incompatible → leave the line unpriced and flagged.
+        if (row.unit && !unitsCompatible(row.unit, resolved.unit)) {
+          logger.info("Backfill refused: line unit incompatible with priced unit", {
+            lineItemId: row.id,
+            lineUnit: row.unit,
+            pricedUnit: resolved.unit,
+          });
+          continue;
+        }
         const unit = resolved.unit ?? row.unit;
         const packed = packAwareQuantity(
           row.quantity == null ? null : Number(row.quantity),
