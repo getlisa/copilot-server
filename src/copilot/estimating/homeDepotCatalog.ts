@@ -61,6 +61,18 @@ const BRAND_DENYLIST = new Set(["rain bird", "orbit", "melnor", "toro", "hunter"
 /** In-process de-dupe so a repeated description doesn't queue twice concurrently. */
 const inFlight = new Set<string>();
 
+/**
+ * Total resolve attempts per term (the first try + up to 2 retries) before giving up for
+ * good, and the per-term attempt ledger backing it. A resolve fails for transient reasons —
+ * SerpApi queueing, timeouts, an unlucky async poll — as readily as for "HD doesn't stock
+ * it", and a single silent failure used to leave the line unpriced forever. Each item
+ * retries individually through the same one-at-a-time resolve queue. The ledger is
+ * in-memory: a restart grants a fresh set of attempts, which is the desired behavior for
+ * transient outages.
+ */
+const MAX_RESOLVE_ATTEMPTS = 3;
+const resolveAttempts = new Map<string, number>();
+
 export interface ResolvedCatalogItem {
   code: string;
   unitPrice: number;
@@ -551,7 +563,26 @@ export function enqueueResolve(
 
   void (async () => {
     try {
-      const resolved = await resolveFromHomeDepot(searchTerm, companyId);
+      // Retry failed resolves — one item at a time, at most MAX_RESOLVE_ATTEMPTS total tries
+      // per term. The ledger persists across turns, so the self-heal sweep in the agent can
+      // re-enqueue an unpriced line every turn without an unstocked item burning searches
+      // forever.
+      const attemptKey = `${companyId}::${searchTerm.trim().toLowerCase()}`;
+      let resolved: ResolvedCatalogItem | null = null;
+      while (!resolved && (resolveAttempts.get(attemptKey) ?? 0) < MAX_RESOLVE_ATTEMPTS) {
+        const attempt = (resolveAttempts.get(attemptKey) ?? 0) + 1;
+        resolveAttempts.set(attemptKey, attempt);
+        if (attempt > 1) logger.info("Catalog resolve retry", { searchTerm, attempt });
+        try {
+          resolved = await resolveFromHomeDepot(searchTerm, companyId);
+        } catch (err) {
+          logger.warn("Catalog resolve attempt failed", {
+            searchTerm,
+            attempt,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       if (!resolved) return;
 
       // Update ONLY the line(s) this resolve was started for. With no ids there is nothing

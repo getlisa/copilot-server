@@ -8,7 +8,7 @@ import {
 } from "../../copilot/estimating/estimatingAgent";
 import { matchPricebook } from "../../copilot/estimating/pricebookMatch";
 import { resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
-import { packAwareQuantity } from "../../copilot/estimating/packMath";
+import { packAwareQuantity, unitsCompatible } from "../../copilot/estimating/packMath";
 import { toQuoteDto, toLineItemDto, type CatalogIndex } from "../../copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
 import { buildProposalDocx } from "../../copilot/estimating/proposalDocx";
@@ -587,6 +587,15 @@ export class QuoteController {
         res,
         404,
         `No catalog match for "${term}" — reword the description to a product name (size + part), or type a price.`
+      );
+
+    // A price only applies to a line whose unit measures the same thing — a per-EA spool
+    // price must never multiply a line stated in feet (see packMath.unitsCompatible).
+    if (item.unit && !unitsCompatible(item.unit, resolved.unit))
+      return fail(
+        res,
+        404,
+        `The catalog price for "${term}" is per ${resolved.unit ?? "each"}, which can't price a line measured in ${item.unit} — reword the description or type a price.`
       );
 
     const unit = resolved.unit ?? item.unit;

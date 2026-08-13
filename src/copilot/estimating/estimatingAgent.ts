@@ -284,6 +284,20 @@ export async function runEstimatingTurn(opts: {
     prisma.pricebookItem.findMany({ where: { companyId: opts.companyId } }),
   ]);
 
+  // Self-heal: lines whose pricing failed on an earlier turn retry here — one search per
+  // item, individually, capped at MAX_RESOLVE_ATTEMPTS total tries per term by the attempt
+  // ledger in enqueueResolve, so a genuinely unstocked item stops consuming searches after
+  // its retries are spent. Manually priced lines and pending ambiguous references are not
+  // pricing failures, so they are skipped. Fire-and-forget: the turn never waits on it.
+  // The line's searchTerm is not persisted, so the description stands in — safe because the
+  // prompt requires product-shaped descriptions ("12 AWG THHN wire", never install scope),
+  // and the resolver's own gates reject what a description can't confirm.
+  for (const line of items) {
+    if (line.unitPrice == null && !line.manuallyEdited && !line.ambiguousAction) {
+      enqueueResolve(line.description, opts.companyId, line.description, [line.id]);
+    }
+  }
+
   const catalog = new Map(pricebook.map((p) => [p.code, p]));
   const turnContext = buildTurnContext(items, kbEntries, opts.followUpsAsked, opts.utterance, catalog);
   const { raw } = await callStructured({
