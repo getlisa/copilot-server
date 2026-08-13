@@ -365,6 +365,10 @@ model QuoteLineItem {
   unitPrice       Decimal? @map("unit_price") @db.Decimal(12, 2)
   totalPrice      Decimal? @map("total_price") @db.Decimal(12, 2)
   pricebookCode   String?  @map("pricebook_code")
+  /// Catalog-shaped part name the agent emitted for pricing ("12 AWG THHN wire"). The
+  /// description is customer-facing prose and often unmatchable; this is what every retry,
+  /// sweep, and on-demand search should query with. Null on labor/diagnostic lines.
+  searchTerm      String?  @map("search_term")
   agentSuggested  Boolean  @default(false) @map("agent_suggested")
   manuallyEdited  Boolean  @default(false) @map("manually_edited")
   /// Pending ambiguous reference: { action: "remove"|"update", candidateItemIds: string[], referenceText: string, fields?: object }

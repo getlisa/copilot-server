@@ -46,6 +46,11 @@ const UNIT_CANON: Record<string, string> = {
 function canonicalizeUnits(text: string): string {
   return (
     text
+      // Aught gauge sizes FIRST: "4/0 AWG" must reduce to the bare "4/0" Home Depot titles
+      // use. Left to the number-unit rule below, the "0 AWG" tail alone matched and produced
+      // the token "4/0awg", which no retail title contains — every aught-size conductor
+      // (1/0-4/0, i.e. all service-entrance wire) failed the spec-token gate unmatchable.
+      .replace(/\b([1-4])\s*\/\s*0\s*-?\s*(?:awg|gauge|ga)\b/gi, "$1/0")
       // Pole count spoken as a word: "double pole" must match "2-Pole" and vice versa, or a
       // 2-pole request scores against a single-pole row on the remaining tokens alone.
       .replace(/\b(single|double|triple)\s*-?\s*(?:pole|poles|p)\b/gi, (_m, w: string) =>

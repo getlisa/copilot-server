@@ -73,6 +73,16 @@ const inFlight = new Set<string>();
 const MAX_RESOLVE_ATTEMPTS = 3;
 const resolveAttempts = new Map<string, number>();
 
+/**
+ * Wait before each RETRY (not the first attempt): 30s, then 60s. A full quote fires a dozen
+ * resolves at once and SerpApi's free tier queues past ~5 parallel searches (measured
+ * 14-32s stalls), so an immediate retry lands inside the same congestion that failed the
+ * first attempt and the whole ledger burns in seconds — measured on a 13-line quote where
+ * only the first 3 items priced. Spacing the retries lets the burst drain first.
+ */
+const RETRY_BACKOFF_MS = 30_000;
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 export interface ResolvedCatalogItem {
   code: string;
   unitPrice: number;
@@ -206,8 +216,19 @@ const SCOPE_WORDS = new Set([
  * "12AWG" vs "12 Gauge", "3/4\"" vs "3/4 in". A literal token test misses all of these, so
  * each token expands into the alternate spellings before matching.
  */
+/**
+ * Vocabulary HD titles abbreviate that technicians spell out. Measured on "4/0 AWG aluminum
+ * XHHW wire": the right product is titled "4/0-4/0-4/0-2/0 Gray Stranded AL SER Cable" —
+ * "aluminum" and "wire" both scored 0 and the spec filter rejected every candidate for a
+ * stocked item. Short aliases ("al", "cu") are matched as whole words, see wordRe.
+ */
+const WORD_ALIASES: Record<string, string[]> = {
+  aluminum: ["al"], copper: ["cu"], wire: ["cable"], cable: ["wire"],
+};
+
 function tokenAliases(t: string): string[] {
   const out = new Set<string>([t]);
+  for (const a of WORD_ALIASES[t] ?? []) out.add(a);
   const m = t.match(/^(\d+(?:\.\d+)?)(a|amp|awg|v|volt|w|watt|ga|gauge|lb|lbs|in|ft|p)$/);
   if (m) {
     const [, n, unit] = m;
@@ -240,10 +261,22 @@ function specFilter(description: string, candidates: HdSearchProduct[]): HdSearc
   if (wanted.length === 0) return [];
   return candidates.filter((c) => {
     if (c.brand && BRAND_DENYLIST.has(c.brand.toLowerCase())) return false;
-    const title = c.title.toLowerCase();
-    const hits = wanted.filter((t) => tokenAliases(t).some((a) => title.includes(a))).length;
+    // HD writes aught gauges with a stray space — "4 /0-4 /0-2/0" — which no request ever
+    // contains; collapse it so the "4/0" spec token can hit.
+    const title = c.title.toLowerCase().replace(/(\d)\s+\/\s*0/g, "$1/0");
+    const hits = wanted.filter((t) =>
+      tokenAliases(t).some((a) => (a.length <= 3 ? wordRe(a).test(title) : title.includes(a)))
+    ).length;
     return hits / wanted.length >= 0.5;
   });
+}
+
+/**
+ * Whole-word test for short aliases. "al" as a substring matches "metallic" and
+ * "galvanized"; as a word it matches only HD's abbreviation ("Stranded AL SER Cable").
+ */
+function wordRe(alias: string): RegExp {
+  return new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\\b`, "i");
 }
 
 /**
@@ -321,10 +354,74 @@ export async function resolveFromHomeDepot(
   }
 }
 
-async function resolveThrottled(
-  description: string,
-  companyId: number
-): Promise<ResolvedCatalogItem | null> {
+const CANONICAL_TERM_SCHEMA = {
+  name: "catalog_term",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      term: {
+        type: ["string", "null"],
+        description:
+          "The retail product name a supplier would list, or null if nothing purchasable is named.",
+      },
+    },
+    required: ["term"],
+  },
+} as const;
+
+/**
+ * Rewrite a failed search term into the name Home Depot actually lists the product under.
+ *
+ * The terms that reach the resolver are often the technician's (or the agent's) scope
+ * language — "EV charger mounting hardware / connection materials", "conduit and fittings
+ * for EV charger circuit" — which HD's index cannot match, so every gate correctly rejects
+ * and the line stays unpriced forever. Measured on three real quotes: 11 of 13 lines were
+ * unmatchable scope text. One cheap structured call turns that into a listable product name
+ * ("3/4 in EMT conduit"), which is retried once. Null means the model judged there is
+ * nothing purchasable behind the words — the honest outcome, same as an unstocked item.
+ */
+async function canonicalSearchTerm(description: string): Promise<string | null> {
+  try {
+    const { raw } = await callStructured({
+      // Example-driven on purpose: a rules-only prompt returned null for every bundle-ish
+      // line ("conduit and fittings for EV charger circuit") instead of naming the primary
+      // product — measured 0 of 4 usable terms; with the examples, 6 of 6.
+      system:
+        "You turn a field-service line item into the retail search term that finds the product at a supplier like Home Depot.\n" +
+        "Rules:\n" +
+        "- Name ONE purchasable product: the product noun plus the spec that identifies it (size, amperage, gauge, voltage, capacity). Infer a sensible spec from trade context when unstated.\n" +
+        "- A description covering several parts names its PRIMARY product (the most expensive one), never a bundle phrase.\n" +
+        "- No scope words: install, replacement, repair, run, circuit, materials, as needed.\n" +
+        "- Name the FORM the retailer stocks, not the spec-sheet name: residential feeder conductors sell as SER/URD cable assemblies, not single XHHW conductors.\n" +
+        "- Return null ONLY when the line is purely labor, diagnosis, or testing with nothing to buy.\n" +
+        "Examples:\n" +
+        '- "4/0 AWG aluminum XHHW wire" -> "4/0-4/0-4/0-2/0 aluminum SER cable"\n' +
+        '- "Conduit and fittings for EV charger circuit" -> "3/4 in EMT conduit"\n' +
+        '- "EV charger dedicated branch circuit wiring, 50-100 ft run" -> "6 AWG THHN wire"\n' +
+        '- "Accessible junction box(es) and cover(s), as needed" -> "4 in square junction box"\n' +
+        '- "Troubleshoot short and re-terminate conductors" -> null',
+      userContent: `Line item: ${description}`,
+      jsonSchema: CANONICAL_TERM_SCHEMA,
+      model: process.env.ORCHESTRATOR_ROUTER_MODEL || "gpt-5.4-mini",
+    });
+    const term = (raw as { term?: unknown } | null)?.term;
+    if (typeof term !== "string") return null;
+    const trimmed = term.trim();
+    // Models sometimes emit the WORD null instead of the JSON value — never search for it.
+    return trimmed && !/^(null|none|n\/a)$/i.test(trimmed) ? trimmed : null;
+  } catch (err) {
+    logger.warn("Catalog term canonicalization failed", {
+      description,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/** Gates 1-3 for one term: search variants → unanimity → spec filter → model pick. */
+async function searchAndPick(description: string): Promise<HdSearchProduct | null> {
   const variants = queryVariants(description);
   if (variants.length === 0) return null;
 
@@ -382,6 +479,24 @@ async function resolveThrottled(
     logger.info("Catalog: selection declined", { description, candidates: filtered.length });
     return null;
   }
+  return winner;
+}
+
+async function resolveThrottled(
+  description: string,
+  companyId: number
+): Promise<ResolvedCatalogItem | null> {
+  let winner = await searchAndPick(description);
+  if (!winner) {
+    // Natural-language terms fail HD's index even when the product is stocked. Rewrite once
+    // into a listable product name and retry — see canonicalSearchTerm.
+    const canonical = await canonicalSearchTerm(description);
+    if (canonical && canonical.toLowerCase() !== description.trim().toLowerCase()) {
+      logger.info("Catalog: retrying with canonicalized term", { description, canonical });
+      winner = await searchAndPick(canonical);
+    }
+  }
+  if (!winner) return null;
 
   // GATE 4 — per-unit economics. Search gives pack price only.
   const detail = await getHomeDepotProduct(winner.productId).catch((err) => {
@@ -572,7 +687,10 @@ export function enqueueResolve(
       while (!resolved && (resolveAttempts.get(attemptKey) ?? 0) < MAX_RESOLVE_ATTEMPTS) {
         const attempt = (resolveAttempts.get(attemptKey) ?? 0) + 1;
         resolveAttempts.set(attemptKey, attempt);
-        if (attempt > 1) logger.info("Catalog resolve retry", { searchTerm, attempt });
+        if (attempt > 1) {
+          await sleep(RETRY_BACKOFF_MS * (attempt - 1));
+          logger.info("Catalog resolve retry", { searchTerm, attempt });
+        }
         try {
           resolved = await resolveFromHomeDepot(searchTerm, companyId);
         } catch (err) {

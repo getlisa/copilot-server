@@ -575,10 +575,12 @@ export class QuoteController {
     if (!item) return fail(res, 404, "Line item not found");
 
     const body = req.body ?? {};
+    // Caller-supplied term wins, then the line's stored catalog-shaped searchTerm, then the
+    // prose description as a last resort (lines created before searchTerm was persisted).
     const term =
       typeof body.searchTerm === "string" && body.searchTerm.trim()
         ? body.searchTerm.trim()
-        : item.description;
+        : item.searchTerm?.trim() || item.description;
 
     const match = (await matcherFor(user.companyId))(term);
     const resolved = match ?? (await resolveFromHomeDepot(term, user.companyId));

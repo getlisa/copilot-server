@@ -168,6 +168,7 @@ Rules:
   - "Conduit for EV charger circuit"                               → searchTerm "3/4 in EMT conduit"
   - If a line is genuinely pure labor, diagnosis, or testing with no material to buy, set searchTerm null — it is not a purchasable part and must not be priced as one.
   - A labor line still needs a price no catalog can supply: NEVER add a labor line without a technician-stated price. If they haven't given their rate, ask via the questions array (like a missing quantity — options with common rates, e.g. "$95/hr" / "$125/hr" / "$150/hr", the UI adds an "Other" box), then emit the line with unitPrice from their answer: rate per HR with hours as quantity, or a flat price with quantity 1. Never invent a labor rate; this question is exempt from the follow-up round cap. unitPrice stays null on every material line — materials are priced downstream.
+- LABOR IS PART OF EVERY SCOPED JOB. This rule applies when YOU scope a described job (the CLARIFY/PROPOSE/CONFIRM flow below); it does NOT apply when the technician is simply dictating specific materials or the request genuinely has no work to perform (a parts-only/supply quote) — never inject labor into a list they are building themselves. A job you scope for install/repair/replacement work is INCOMPLETE without at least one labor line — the technician never mentions labor themselves; asking is your job. When you propose an itemized list, always include the labor line(s): hours as quantity, the technician's hourly rate as unitPrice. If rate or hours are unknown, ask for BOTH in the questions array (exempt from the follow-up round cap, like the rate rule above). SCALE the hour options to the scope instead of defaulting small — a small repair is 2-8 hr, a panel/service change 16-32 hr, an industrial motor/feeder job 80-200 hr, a whole-house rewire 60-120 hr — and put a realistic mid value among the options, not as "Other". Never emit the final add_items for a scoped job without its labor line — with ONE exception: the technician explicitly declining labor ("no labor line", "materials only", "labor is separate") is their call. Honor it, don't re-ask, and don't sneak labor back in on a later turn; a declined labor line stays out until they ask for it.
 - Units: keep what the technician said (ft, EA, etc.), else null.
 - The technician may attach photos. Use them to identify equipment, materials, model/size details, and site conditions when parsing items or scoping a job — but still never invent quantities or prices from a photo alone.
 
@@ -289,12 +290,12 @@ export async function runEstimatingTurn(opts: {
   // ledger in enqueueResolve, so a genuinely unstocked item stops consuming searches after
   // its retries are spent. Manually priced lines and pending ambiguous references are not
   // pricing failures, so they are skipped. Fire-and-forget: the turn never waits on it.
-  // The line's searchTerm is not persisted, so the description stands in — safe because the
-  // prompt requires product-shaped descriptions ("12 AWG THHN wire", never install scope),
-  // and the resolver's own gates reject what a description can't confirm.
+  // The stored searchTerm is the catalog-shaped part name and is what pricing matches on;
+  // description is customer prose and only stands in for lines created before the column
+  // existed. The resolver also canonicalizes a failed term once before giving up.
   for (const line of items) {
     if (line.unitPrice == null && !line.manuallyEdited && !line.ambiguousAction) {
-      enqueueResolve(line.description, opts.companyId, line.description, [line.id]);
+      enqueueResolve(line.searchTerm ?? line.description, opts.companyId, line.description, [line.id]);
     }
   }
 
@@ -486,6 +487,7 @@ export async function runEstimatingTurn(opts: {
             data: {
               quoteId: opts.quoteId,
               description: op.description,
+              searchTerm: op.searchTerm?.trim() || null,
               quantity: addQty.quantity,
               unit: addUnit,
               unitPrice: priced.unitPrice,
@@ -523,6 +525,7 @@ export async function runEstimatingTurn(opts: {
             data: {
               quoteId: opts.quoteId,
               description,
+              searchTerm: op.searchTerm?.trim() || null,
               quantity: kbQty.quantity,
               unit: kbUnit,
               unitPrice: priced.unitPrice,
@@ -547,6 +550,7 @@ export async function runEstimatingTurn(opts: {
           let repriced: ReturnType<typeof priceFields> | null = null;
           if (op.description != null && op.description !== existing.description) {
             data.description = op.description;
+            if (op.searchTerm?.trim()) data.searchTerm = op.searchTerm.trim();
             if (!existing.manuallyEdited) {
               const priced = priceFields(op.description, null, op.searchTerm);
               repriced = priced;
