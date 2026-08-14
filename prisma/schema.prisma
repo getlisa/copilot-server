@@ -375,6 +375,17 @@ model QuoteLineItem {
   optionGroup     String?  @map("option_group")
   agentSuggested  Boolean  @default(false) @map("agent_suggested")
   manuallyEdited  Boolean  @default(false) @map("manually_edited")
+  /// This line's unitPrice came from the model's own knowledge, NOT from the catalog — the
+  /// fallback used when Home Depot cannot be reached. It is an educated guess with no SKU
+  /// behind it, so it must stay visually distinct, must block completion until a technician
+  /// accepts it, and must be replaced by a real catalog price as soon as one is available.
+  /// Every other price in this system is traceable to a product; this one is not.
+  priceEstimated  Boolean  @default(false) @map("price_estimated")
+  /// Where the estimated price came from: a Home Depot product URL when the search returned one
+  /// shaped like a real product page, otherwise a Home Depot SEARCH url we build ourselves. Never
+  /// a URL we could not vouch for — a reported link with a wrong SKU opens a different product
+  /// under the price the customer is being quoted.
+  estimateLink    String?  @map("estimate_link")
   /// Pending ambiguous reference: { action: "remove"|"update", candidateItemIds: string[], referenceText: string, fields?: object }
   ambiguousAction Json?    @map("ambiguous_action")
   sortOrder       Int      @map("sort_order")

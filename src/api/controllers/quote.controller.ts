@@ -547,10 +547,15 @@ export class QuoteController {
     if (body.unitPrice !== undefined) {
       data.unitPrice = body.unitPrice;
       data.manuallyEdited = true;
+      // The technician's own number retires any web-search estimate and its link.
+      data.priceEstimated = false;
+      data.estimateLink = null;
     }
     if (body.totalPrice !== undefined) {
       data.totalPrice = body.totalPrice; // not required to equal qty × unit price
       data.manuallyEdited = true;
+      data.priceEstimated = false;
+      data.estimateLink = null;
     }
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
     await prisma.quoteLineItem.update({ where: { id: item.id }, data });

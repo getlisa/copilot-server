@@ -15,6 +15,10 @@ export const BLOCKING_FLAGS = [
   "agent_suggested",
   "missing_quantity",
   "unmatched",
+  // A web-search price has no product id behind it, so it cannot be verified the way a catalog
+  // price can. It blocks completion for the same reason an agent-suggested line does: a human
+  // has to look at it before it reaches a customer.
+  "estimated_price",
 ] as const;
 
 export type LineItemFlag = (typeof BLOCKING_FLAGS)[number] | "manually_edited";
@@ -48,6 +52,14 @@ export interface LineItemDto {
   pricebookCode: string | null;
   /** Null when the line is unpriced or priced from the company's own book. */
   product: LineItemProduct | null;
+  /**
+   * This price came from a live web search of homedepot.com rather than the catalog API, so no
+   * product id stands behind it. Render it visibly differently from a `product` price: it is an
+   * educated figure for the technician to confirm, and it blocks completion until they do.
+   */
+  priceEstimated: boolean;
+  /** Product URL when the search returned a real-looking one, else a Home Depot search URL. */
+  estimateLink: string | null;
   flags: LineItemFlag[];
   ambiguousAction: {
     action: "remove" | "update";
@@ -96,6 +108,7 @@ export function flagsFor(item: QuoteLineItem): LineItemFlag[] {
   if (item.quantity == null) flags.push("missing_quantity");
   if (item.unitPrice == null && item.totalPrice == null && !item.manuallyEdited)
     flags.push("unmatched");
+  if (item.priceEstimated && !item.manuallyEdited) flags.push("estimated_price");
   if (item.manuallyEdited) flags.push("manually_edited");
   return flags;
 }
@@ -141,6 +154,10 @@ export function toLineItemDto(item: QuoteLineItem, catalog?: CatalogIndex): Line
     totalPrice: effectiveTotal(item),
     pricebookCode: item.pricebookCode,
     product: productFor(item, catalog),
+    // Kept separate from `product`, which means "verified catalog row". An estimate is neither
+    // verified nor a row, and a client that renders them identically would erase the difference.
+    priceEstimated: item.priceEstimated,
+    estimateLink: item.estimateLink ?? null,
     flags: flagsFor(item),
     ambiguousAction: (item.ambiguousAction as LineItemDto["ambiguousAction"]) ?? null,
     optionGroup: item.optionGroup ?? null,

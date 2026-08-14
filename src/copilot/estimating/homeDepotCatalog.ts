@@ -11,6 +11,7 @@ import {
 } from "../../lib/serpapi";
 import { tokenize } from "./pricebookMatch";
 import { isLengthUnit, packAwareQuantity, unitsCompatible } from "./packMath";
+import { lookupHomeDepotViaWebSearch } from "./modelPriceEstimate";
 
 /**
  * Home Depot catalog resolver for the Estimating Agent.
@@ -678,6 +679,68 @@ async function resolveThrottled(
  * company's open quotes that carries this description, so the `unmatched` flag clears on
  * its own (flags are derived, so nothing else has to be updated).
  */
+/**
+ * Last resort when the catalog API cannot answer: look the part up on homedepot.com by web
+ * search and write that price onto the line, marked as an estimate.
+ *
+ * Deliberately narrow. It only runs after every catalog attempt is spent, it only touches lines
+ * that are still unpriced and untouched by a technician, and what it writes stays flagged
+ * (`priceEstimated`) so the DTO can show it differently, completion can block on it, and the
+ * next turn's sweep can replace it with a real catalog price. No pricebook row is created: these
+ * prices must never become the company's remembered price for a part, and must never be matched
+ * against by a later line.
+ */
+async function webSearchFallback(
+  searchTerm: string,
+  companyId: number,
+  lineItemIds?: string[]
+): Promise<void> {
+  if (!lineItemIds || lineItemIds.length === 0) return;
+
+  const targets = await prisma.quoteLineItem.findMany({
+    where: {
+      id: { in: lineItemIds },
+      manuallyEdited: false,
+      unitPrice: null,
+      quote: { companyId, status: "DRAFT" },
+    },
+    select: { id: true, quantity: true, unit: true },
+  });
+  if (targets.length === 0) return;
+
+  const found = await lookupHomeDepotViaWebSearch(searchTerm);
+  if (!found) return;
+
+  for (const row of targets) {
+    // Same pack rule as a catalog price: the supplier still only sells whole packs, so a count
+    // rounds up. A length keeps the technician's own figure — see packMath.
+    const packed = packAwareQuantity(
+      row.quantity == null ? null : Number(row.quantity),
+      found.unit ?? row.unit,
+      found.packQuantity
+    );
+    await prisma.quoteLineItem.update({
+      where: { id: row.id },
+      data: {
+        unitPrice: found.unitPrice,
+        unit: found.unit ?? row.unit,
+        priceEstimated: true,
+        estimateLink: found.productLink ?? found.searchLink,
+        ...(packed.rounded ? { quantity: packed.quantity } : {}),
+      },
+    });
+  }
+
+  logger.info("Priced from web search as an estimate", {
+    searchTerm,
+    lines: targets.length,
+    unitPrice: found.unitPrice,
+    packQuantity: found.packQuantity,
+    linkKind: found.productLink ? "product" : "search",
+    title: found.itemName.slice(0, 70),
+  });
+}
+
 export function enqueueResolve(
   searchTerm: string,
   companyId: number,
@@ -727,7 +790,10 @@ export function enqueueResolve(
           });
         }
       }
-      if (!resolved) return;
+      if (!resolved) {
+        await webSearchFallback(searchTerm, companyId, lineItemIds);
+        return;
+      }
 
       // Update ONLY the line(s) this resolve was started for. With no ids there is nothing
       // safe to target — matching on description text sprayed one product's price across
@@ -787,6 +853,9 @@ export function enqueueResolve(
             unitPrice: resolved.unitPrice,
             unit: resolved.unit,
             pricebookCode: resolved.code,
+            // A verified catalog price supersedes any web-search estimate on this line.
+            priceEstimated: false,
+            estimateLink: null,
             ...(packed.rounded ? { quantity: packed.quantity } : {}),
           },
         });

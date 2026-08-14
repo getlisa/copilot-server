@@ -305,7 +305,13 @@ export async function runEstimatingTurn(opts: {
   // description is customer prose and only stands in for lines created before the column
   // existed. The resolver also canonicalizes a failed term once before giving up.
   for (const line of items) {
-    if (line.unitPrice == null && !line.manuallyEdited && !line.ambiguousAction) {
+    // An estimated price counts as unpriced for this purpose: it came from a web search, not
+    // the catalog, so it must keep trying for a real product price rather than settling.
+    if (
+      (line.unitPrice == null || line.priceEstimated) &&
+      !line.manuallyEdited &&
+      !line.ambiguousAction
+    ) {
       enqueueResolve(line.searchTerm ?? line.description, opts.companyId, line.description, [line.id]);
     }
   }
