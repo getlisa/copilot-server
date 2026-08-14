@@ -11,14 +11,15 @@
     "check:pricebook": "tsx scripts/check-pricebook-amperage.ts",
     "check:electrical": "tsx scripts/check-electrical-cases.ts",
     "check:catalog": "tsx scripts/check-home-depot-catalog.ts",
-    "test": "npm run typecheck && npm run check:pricebook && npm run check:pack",
+    "test": "npm run typecheck && npm run check:pricebook && npm run check:pack && npm run check:options",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "db:seed": "prisma db seed",
     "postinstall": "prisma generate",
-    "check:pack": "tsx scripts/check-pack-parsing.ts"
+    "check:pack": "tsx scripts/check-pack-parsing.ts",
+    "check:options": "tsx scripts/check-option-totals.ts"
   },
   "keywords": [],
   "author": "",

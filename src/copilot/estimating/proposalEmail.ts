@@ -1,5 +1,5 @@
 import type { QuoteHeader } from "../estimate/pdf/quoteHeader";
-import type { LineItemDto } from "./quoteDto";
+import type { LineItemDto, QuoteOptionTotal } from "./quoteDto";
 
 /**
  * Proposal email as a REVIEWABLE DRAFT: draftProposalEmail() produces the plain-text
@@ -12,7 +12,10 @@ export interface ProposalEmailInput {
   header: QuoteHeader;
   projectTitle: string;
   lineItems: LineItemDto[];
+  /** Base scope only when optionTotals is non-empty — see QuoteDto.total. */
   total: number;
+  /** Alternative options priced per choice; never summed with each other. */
+  optionTotals?: QuoteOptionTotal[];
 }
 
 const BRAND = "#d6314a";
@@ -35,21 +38,39 @@ function esc(s: string): string {
 
 /** The editable draft: subject + plain-text letter body. */
 export function draftProposalEmail(input: ProposalEmailInput): { subject: string; body: string } {
-  const { header, projectTitle, lineItems, total } = input;
+  const { header, projectTitle, lineItems, total, optionTotals } = input;
   const company = header.companyName || "Clara AI";
   const customer = header.customerName !== "Customer" ? header.customerName : "there";
+
+  const itemLine = (li: LineItemDto) =>
+    `- ${li.description}${li.quantity != null ? ` (${li.quantity}${li.unit ? " " + li.unit : ""})` : ""}: ${money(li.totalPrice)}`;
+  const base = lineItems.filter((li) => !li.optionGroup);
+  const totalsBlock = optionTotals?.length
+    ? [
+        "Summary of work (base scope):",
+        ...base.map(itemLine),
+        `Base scope total: ${money(total)}`,
+        ...optionTotals.flatMap((opt) => [
+          "",
+          `${opt.name}:`,
+          ...lineItems.filter((li) => li.optionGroup === opt.name).map(itemLine),
+          `${opt.name} total: ${money(opt.total)} — base scope + this option: ${money(opt.combinedTotal)}`,
+        ]),
+        "",
+        "The options above are alternatives — choose the one that fits, and the combined total shown is your full price.",
+      ]
+    : [
+        "Summary of work:",
+        ...lineItems.map(itemLine),
+        `Total: ${money(total)}`,
+      ];
 
   const body = [
     `Dear ${customer},`,
     "",
     `Thank you for the opportunity to bid on ${projectTitle}. Please find our full bid proposal attached as a Word document — it includes the detailed scope of work, exclusions, assumptions, and terms.`,
     "",
-    "Summary of work:",
-    ...lineItems.map(
-      (li) =>
-        `- ${li.description}${li.quantity != null ? ` (${li.quantity}${li.unit ? " " + li.unit : ""})` : ""}: ${money(li.totalPrice)}`
-    ),
-    `Total: ${money(total)}`,
+    ...totalsBlock,
     "",
     "We would be glad to walk you through the proposal or adjust the scope to fit your needs — just reply to this email or give us a call.",
     "",

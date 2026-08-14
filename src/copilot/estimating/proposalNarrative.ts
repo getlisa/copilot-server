@@ -18,6 +18,16 @@ export interface ScopeSection {
 export interface ProposalNarrative {
   scopeSections: ScopeSection[];
   assumptions: string[];
+  /** Job-specific EXCLUSIONS; always includes the standard boilerplate set. */
+  exclusions: string[];
+  /** Coordination bullets appropriate to THIS job and customer type. */
+  coordination: string[];
+  /** Header fields recovered from the conversation; null when never mentioned. */
+  project: {
+    title: string | null;
+    customerName: string | null;
+    siteAddress: string | null;
+  };
 }
 
 const NARRATIVE_JSON_SCHEMA = {
@@ -40,8 +50,20 @@ const NARRATIVE_JSON_SCHEMA = {
         },
       },
       assumptions: { type: "array", items: { type: "string" } },
+      exclusions: { type: "array", items: { type: "string" } },
+      coordination: { type: "array", items: { type: "string" } },
+      project: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: ["string", "null"] },
+          customerName: { type: ["string", "null"] },
+          siteAddress: { type: ["string", "null"] },
+        },
+        required: ["title", "customerName", "siteAddress"],
+      },
     },
-    required: ["scopeSections", "assumptions"],
+    required: ["scopeSections", "assumptions", "exclusions", "coordination", "project"],
   },
 };
 
@@ -57,6 +79,16 @@ You are given the technician's estimate conversation and the final material/line
    - "Site conditions are as represented during initial assessment"
    - "Work will be performed during normal business hours (Monday–Friday, 7:00 AM – 5:00 PM)"
    - "This proposal assumes no bonding requirements. If bonds are required, the cost will be added to the contract price."
+
+3. exclusions: what is specifically NOT included. Start with any trade-specific carve-outs stated or implied in the conversation (e.g. "VFD programming beyond basic setup and startup testing", "Security system repair, removal, or reinstallation", "Any work requiring lifts or special equipment", "Hazardous material abatement (asbestos, lead paint, etc.)"), then always include these standard ones:
+   - "Patching or repair of walls, ceilings, or finishes of any kind"
+   - "Painting or finishing of any kind"
+   - "Any additional work not included in this bid — such work will be quoted separately upon discovery"
+   - "Moving of materials or obstructions impeding the work — work area must be clear and accessible prior to Contractor commencing work"
+
+4. coordination: 2-4 coordination bullets that are TRUE FOR THIS JOB. Call the customer "homeowner" only on residential work; commercial/industrial customers are "customer" and coordination is about minimizing disruption to site operations. State power-outage expectations at the duration actually discussed (a full service changeout is a multi-hour outage — never call it "brief" unless it is), and mention access work (wall/ceiling penetrations, shiplap or sheetrock removal, area shutdowns) only when the scope actually involves it.
+
+5. project: the header fields, recovered from the conversation. title is a short project name like "Residential Rewire & Panel Replacement" or "Lighting Contactor Replacement". customerName and siteAddress exactly as the technician stated them. Use null for anything never mentioned — never invent a name or address.
 
 Ground everything in what was actually discussed — do not invent work that was never mentioned. The materials list tells you what is being installed; the conversation tells you why and where.`;
 
@@ -78,7 +110,7 @@ export async function generateProposalNarrative(opts: {
     const items = opts.lineItems
       .map(
         (li) =>
-          `- ${li.description}${li.quantity != null ? ` — ${li.quantity}${li.unit ? " " + li.unit : ""}` : ""}`
+          `- ${li.optionGroup ? `[${li.optionGroup}] ` : ""}${li.description}${li.quantity != null ? ` — ${li.quantity}${li.unit ? " " + li.unit : ""}` : ""}`
       )
       .join("\n");
 
@@ -89,12 +121,25 @@ export async function generateProposalNarrative(opts: {
     });
 
     const out = raw as ProposalNarrative | null;
+    const strings = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && !!s.trim()) : [];
     const sections = (out?.scopeSections ?? []).filter(
       (s) => s?.title?.trim() && Array.isArray(s.bullets) && s.bullets.length > 0
     );
-    const assumptions = (out?.assumptions ?? []).filter((a) => typeof a === "string" && a.trim());
     if (sections.length === 0) return null;
-    return { scopeSections: sections, assumptions };
+    const field = (v: unknown): string | null =>
+      typeof v === "string" && v.trim() ? v.trim() : null;
+    return {
+      scopeSections: sections,
+      assumptions: strings(out?.assumptions),
+      exclusions: strings(out?.exclusions),
+      coordination: strings(out?.coordination),
+      project: {
+        title: field(out?.project?.title),
+        customerName: field(out?.project?.customerName),
+        siteAddress: field(out?.project?.siteAddress),
+      },
+    };
   } catch (err) {
     logger.warn("Proposal narrative generation failed; falling back to materials list", {
       conversationId: opts.conversationId,

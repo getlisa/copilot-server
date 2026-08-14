@@ -156,18 +156,27 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     companyId: quote.companyId,
   });
   const dto = await quoteDtoWithProducts(quote);
-  const projectTitle =
-    header.customerName !== "Customer" ? `Work for ${header.customerName}` : "Scope of Work";
-  // Scope-of-work prose + job-specific assumptions from the chat context.
-  // Falls back to the raw materials list when generation fails.
+  // Scope-of-work prose + job-specific assumptions/exclusions/coordination from the chat
+  // context. Falls back to the raw materials list when generation fails.
   const narrative = await generateProposalNarrative({
     conversationId: quote.conversationId,
     lineItems: dto.lineItems,
   });
+  // The CRM header wins when it has real data; the narrative's conversation-recovered fields
+  // fill the placeholders ("Customer", empty address) that shipped on real proposals.
+  const customerName =
+    header.customerName !== "Customer"
+      ? header.customerName
+      : narrative?.project.customerName ?? header.customerName;
+  const projectTitle =
+    narrative?.project.title ??
+    (customerName !== "Customer" ? `Work for ${customerName}` : "Scope of Work");
+  const projectAddress = header.serviceAddress || narrative?.project.siteAddress || "";
+  const unpricedCount = dto.lineItems.filter((i) => i.flags.includes("unmatched")).length;
   const buffer = await buildProposalDocx({
-    header,
+    header: { ...header, customerName },
     projectTitle,
-    projectAddress: header.serviceAddress,
+    projectAddress,
     date: new Date(),
     scopeSections: narrative?.scopeSections ?? [
       {
@@ -180,9 +189,13 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
       },
     ],
     assumptions: narrative?.assumptions,
+    exclusions: narrative?.exclusions,
+    coordination: narrative?.coordination,
     total: dto.total,
+    optionTotals: dto.optionTotals,
+    unpricedCount,
   });
-  return { header, dto, projectTitle, buffer };
+  return { header, dto, projectTitle, buffer, unpricedCount };
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -706,6 +719,7 @@ export class QuoteController {
       projectTitle,
       lineItems: dto.lineItems,
       total: dto.total,
+      optionTotals: dto.optionTotals,
     });
     res.json({
       success: true,
@@ -730,7 +744,17 @@ export class QuoteController {
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
 
-    const { header, buffer } = await buildProposalParts(quote);
+    const { header, buffer, unpricedCount } = await buildProposalParts(quote);
+    // Sending is the customer-facing point of no return. A proposal with unpriced lines
+    // prints a total that silently omits them — a real quote went out at labor + $37 of
+    // materials for a contactor-replacement job. Download/draft still work (the document
+    // carries a visible warning); sending is blocked until every line is priced or removed.
+    if (unpricedCount > 0)
+      return fail(
+        res,
+        409,
+        `${unpricedCount} line item(s) have no price yet — the proposal total would be wrong. Price or remove them before sending.`
+      );
     await sendEmail({
       to,
       from: SENDGRID_FROM_EMAIL,

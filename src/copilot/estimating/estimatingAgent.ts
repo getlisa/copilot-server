@@ -44,6 +44,12 @@ interface AgentOp {
    * never asked.
    */
   searchTerm: string | null;
+  /**
+   * Alternative-option group this line belongs to ("Option A – Trench Only"). Null = base
+   * scope. Options are mutually exclusive alternatives the customer picks between; totals
+   * are computed per group and never summed across groups.
+   */
+  optionGroup: string | null;
   quantity: number | null;
   unit: string | null;
   /**
@@ -97,6 +103,7 @@ const TURN_JSON_SCHEMA = {
             itemId: nullable("string"),
             description: nullable("string"),
             searchTerm: nullable("string"),
+            optionGroup: nullable("string"),
             quantity: nullable("number"),
             unit: nullable("string"),
             unitPrice: nullable("number"),
@@ -113,6 +120,7 @@ const TURN_JSON_SCHEMA = {
             "itemId",
             "description",
             "searchTerm",
+            "optionGroup",
             "quantity",
             "unit",
             "unitPrice",
@@ -167,9 +175,11 @@ Rules:
   - "Wire connectors / repair consumables, as needed"              → searchTerm "wire connectors"
   - "Conduit for EV charger circuit"                               → searchTerm "3/4 in EMT conduit"
   - If a line is genuinely pure labor, diagnosis, or testing with no material to buy, set searchTerm null — it is not a purchasable part and must not be priced as one.
+  - Same for workmanship/consumables allowances that name no product: "Terminations and feeder makeup" → searchTerm null. No supplier lists "makeup"; price it as a technician-stated allowance or fold it into labor instead.
   - A labor line still needs a price no catalog can supply: NEVER add a labor line without a technician-stated price. If they haven't given their rate, ask via the questions array (like a missing quantity — options with common rates, e.g. "$95/hr" / "$125/hr" / "$150/hr", the UI adds an "Other" box), then emit the line with unitPrice from their answer: rate per HR with hours as quantity, or a flat price with quantity 1. Never invent a labor rate; this question is exempt from the follow-up round cap. unitPrice stays null on every material line — materials are priced downstream.
 - LABOR IS PART OF EVERY SCOPED JOB. This rule applies when YOU scope a described job (the CLARIFY/PROPOSE/CONFIRM flow below); it does NOT apply when the technician is simply dictating specific materials or the request genuinely has no work to perform (a parts-only/supply quote) — never inject labor into a list they are building themselves. A job you scope for install/repair/replacement work is INCOMPLETE without at least one labor line — the technician never mentions labor themselves; asking is your job. When you propose an itemized list, always include the labor line(s): hours as quantity, the technician's hourly rate as unitPrice. If rate or hours are unknown, ask for BOTH in the questions array (exempt from the follow-up round cap, like the rate rule above). SCALE the hour options to the scope instead of defaulting small — a small repair is 2-8 hr, a panel/service change 16-32 hr, an industrial motor/feeder job 80-200 hr, a whole-house rewire 60-120 hr — and put a realistic mid value among the options, not as "Other". Never emit the final add_items for a scoped job without its labor line — with ONE exception: the technician explicitly declining labor ("no labor line", "materials only", "labor is separate") is their call. Honor it, don't re-ask, and don't sneak labor back in on a later turn; a declined labor line stays out until they ask for it.
 - Units: keep what the technician said (ft, EA, etc.), else null.
+- ALTERNATIVE OPTIONS: when the technician quotes a job as alternatives the customer picks between ("price it both ways", "Option A conduit only / Option B full feed", "give them three options"), set optionGroup on EVERY line that belongs to an option — a short customer-facing name like "Option A – Trench and Raceway Only" — and keep it null on base-scope lines common to all choices. Lines in different option groups are mutually exclusive: they are totaled per group and NEVER added together, so a line that belongs in both options must be added to each group separately. Never fold alternative scopes into ungrouped lines — that silently bills the customer for both.
 - Wire, cable, and conduit quantities are LENGTHS in feet — runs × run length — never a count of conductors or runs. "4 conductors over an 85 ft run" → quantity 340, unit ft. A count can't be priced against per-foot goods and leaves the line unpriced.
 - The technician may attach photos. Use them to identify equipment, materials, model/size details, and site conditions when parsing items or scoping a job — but still never invent quantities or prices from a photo alone.
 
@@ -450,6 +460,7 @@ export async function runEstimatingTurn(opts: {
                 quantity: op.quantity,
                 unit: op.unit,
                 unitPrice: op.unitPrice,
+                optionGroup: op.optionGroup?.trim() || null,
                 manuallyEdited: true,
                 sortOrder: nextSort++,
               },
@@ -493,6 +504,7 @@ export async function runEstimatingTurn(opts: {
               unit: addUnit,
               unitPrice: priced.unitPrice,
               pricebookCode: priced.pricebookCode,
+              optionGroup: op.optionGroup?.trim() || null,
               sortOrder: nextSort++,
             },
           });
@@ -531,6 +543,7 @@ export async function runEstimatingTurn(opts: {
               unit: kbUnit,
               unitPrice: priced.unitPrice,
               pricebookCode: priced.pricebookCode,
+              optionGroup: op.optionGroup?.trim() || null,
               agentSuggested: true,
               sortOrder: nextSort++,
             },

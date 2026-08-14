@@ -55,7 +55,17 @@ export interface LineItemDto {
     referenceText: string;
     fields?: { description?: string; quantity?: number; unit?: string };
   } | null;
+  /** Alternative-option group ("Option A – …"); null = base scope. */
+  optionGroup: string | null;
   sortOrder: number;
+}
+
+export interface QuoteOptionTotal {
+  name: string;
+  /** This option's lines alone. */
+  total: number;
+  /** Base scope + this option — the price if the customer picks it. */
+  combinedTotal: number;
 }
 
 export interface QuoteDto {
@@ -66,7 +76,14 @@ export interface QuoteDto {
   updatedAt: string;
   completedAt: string | null;
   lineItems: LineItemDto[];
+  /**
+   * Base-scope lines only. Option-group lines are alternatives the customer picks between,
+   * so they are NEVER part of this sum — see optionTotals. With no option groups this is
+   * simply the sum of every line, as before.
+   */
   total: number;
+  /** Present (non-empty) only when the quote carries alternative option groups. */
+  optionTotals: QuoteOptionTotal[];
   blockingFlagCount: number;
 }
 
@@ -126,9 +143,12 @@ export function toLineItemDto(item: QuoteLineItem, catalog?: CatalogIndex): Line
     product: productFor(item, catalog),
     flags: flagsFor(item),
     ambiguousAction: (item.ambiguousAction as LineItemDto["ambiguousAction"]) ?? null,
+    optionGroup: item.optionGroup ?? null,
     sortOrder: item.sortOrder,
   };
 }
+
+const round2 = (v: number) => Math.round(v * 100) / 100;
 
 export function toQuoteDto(
   quote: Quote & { lineItems: QuoteLineItem[] },
@@ -136,6 +156,19 @@ export function toQuoteDto(
 ): QuoteDto {
   const items = [...quote.lineItems].sort((a, b) => a.sortOrder - b.sortOrder);
   const dtos = items.map((i) => toLineItemDto(i, catalog));
+  // Option groups are mutually exclusive alternatives: `total` covers base-scope lines only
+  // and each group gets its own total. Summing alternatives billed customers for both —
+  // observed on two real option-based quotes ($6,591 printed for a $3,430-or-$4,430 choice).
+  const baseTotal = round2(
+    dtos.filter((d) => !d.optionGroup).reduce((sum, d) => sum + (d.totalPrice ?? 0), 0)
+  );
+  const groups = [...new Set(dtos.map((d) => d.optionGroup).filter((g): g is string => !!g))];
+  const optionTotals = groups.map((name) => {
+    const total = round2(
+      dtos.filter((d) => d.optionGroup === name).reduce((sum, d) => sum + (d.totalPrice ?? 0), 0)
+    );
+    return { name, total, combinedTotal: round2(baseTotal + total) };
+  });
   return {
     id: quote.id,
     conversationId: quote.conversationId,
@@ -144,10 +177,8 @@ export function toQuoteDto(
     updatedAt: quote.updatedAt.toISOString(),
     completedAt: quote.completedAt?.toISOString() ?? null,
     lineItems: dtos,
-    total:
-      Math.round(
-        dtos.reduce((sum, d) => sum + (d.totalPrice ?? 0), 0) * 100
-      ) / 100,
+    total: baseTotal,
+    optionTotals,
     blockingFlagCount: dtos.filter((d) =>
       d.flags.some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
     ).length,

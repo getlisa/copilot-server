@@ -71,7 +71,26 @@ const inFlight = new Set<string>();
  * transient outages.
  */
 const MAX_RESOLVE_ATTEMPTS = 3;
-const resolveAttempts = new Map<string, number>();
+const resolveAttempts = new Map<string, { n: number; at: number }>();
+
+/**
+ * An exhausted ledger entry goes stale after this long and the term earns a fresh set of
+ * attempts. Exhaustion used to be permanent until restart, which turned a burst of SerpApi
+ * congestion into "this item can never be priced" — a technician re-asking an hour later got
+ * silence for a stocked $9 light bulb. Unstocked items still cost at most 3 searches per
+ * window instead of 3 ever, which is the right trade.
+ */
+const RESOLVE_LEDGER_TTL_MS = 15 * 60_000;
+
+function takeResolveAttempt(key: string): number | null {
+  const entry = resolveAttempts.get(key);
+  const now = Date.now();
+  const fresh = entry && now - entry.at <= RESOLVE_LEDGER_TTL_MS ? entry : undefined;
+  if (fresh && fresh.n >= MAX_RESOLVE_ATTEMPTS) return null;
+  const n = (fresh?.n ?? 0) + 1;
+  resolveAttempts.set(key, { n, at: now });
+  return n;
+}
 
 /**
  * Wait before each RETRY (not the first attempt): 30s, then 60s. A full quote fires a dozen
@@ -425,38 +444,45 @@ async function searchAndPick(description: string): Promise<HdSearchProduct | nul
   const variants = queryVariants(description);
   if (variants.length === 0) return null;
 
-  const resultSets = (await Promise.allSettled(variants.map((q) => searchHomeDepot(q))))
-    .map((settled, i) => {
-      if (settled.status === "rejected") {
-        const err = settled.reason;
-        logger.warn("Catalog search failed", {
-          q: variants[i],
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return [] as HdSearchProduct[];
-      }
-      return settled.value;
-    })
-    .filter((s) => s.length > 0);
-
-  // With a single result set, unanimity is trivially satisfied and gate 1 becomes a no-op —
-  // gates 2 (spec tokens) and 3 (model selection) still carry the correctness load. Better to
-  // proceed with the absence check skipped than to reject an item outright, which is what the
-  // old `< 2` floor did to every two-token term.
-  if (resultSets.length === 0) return null;
-  if (resultSets.length === 1) {
-    // Distinguish "only one variant existed" (the intended relaxation for short two-token
-    // terms) from "the other searches failed". Conflating them made gate 1 strictly MORE
-    // permissive the worse the upstream was behaving — the opposite of what a guard should do.
-    if (variants.length > 1) {
-      logger.warn("Catalog: searches failed, declining to price without the absence check", {
-        description,
-        variants: variants.length,
-        succeeded: resultSets.length,
+  const firstPass = await Promise.allSettled(variants.map((q) => searchHomeDepot(q)));
+  const sets: (HdSearchProduct[] | null)[] = firstPass.map((settled, i) => {
+    if (settled.status === "rejected") {
+      logger.warn("Catalog search failed", {
+        q: variants[i],
+        error: settled.reason instanceof Error ? settled.reason.message : String(settled.reason),
       });
       return null;
     }
-    logger.info("Catalog: single query variant, absence check skipped", { description });
+    return settled.value;
+  });
+
+  // Failed variants get ONE more sequential try after the burst. SerpApi's free tier queues
+  // past ~5 parallel searches, so a variant that timed out inside the fan-out routinely
+  // succeeds alone moments later — measured live on "A19 standard light bulb", where 1 of 3
+  // variants timed out on an otherwise idle run. Sequential on purpose: re-firing the
+  // failures in parallel lands them back in the congestion that failed them.
+  for (let i = 0; i < variants.length; i++) {
+    if (sets[i] !== null) continue;
+    try {
+      sets[i] = await searchHomeDepot(variants[i]);
+    } catch {
+      // already logged above; leave null
+    }
+  }
+  const resultSets = sets.filter((s): s is HdSearchProduct[] => s !== null && s.length > 0);
+
+  // With a single result set, unanimity is trivially satisfied and gate 1 becomes a no-op —
+  // gates 2 (spec tokens) and 3 (model selection) still carry the correctness load. Better to
+  // proceed with the absence check skipped than to reject the item outright: declining on
+  // partial search failure meant a transient timeout guaranteed an unpriced line ("A19
+  // standard light bulb" burned its whole retry ledger this way), which is a worse failure
+  // than one resolve running without the absence signal.
+  if (resultSets.length === 0) return null;
+  if (resultSets.length === 1) {
+    logger.info("Catalog: single result set, absence check skipped", {
+      description,
+      variants: variants.length,
+    });
   }
 
   // GATE 1 — absence detector.
@@ -684,9 +710,9 @@ export function enqueueResolve(
       // forever.
       const attemptKey = `${companyId}::${searchTerm.trim().toLowerCase()}`;
       let resolved: ResolvedCatalogItem | null = null;
-      while (!resolved && (resolveAttempts.get(attemptKey) ?? 0) < MAX_RESOLVE_ATTEMPTS) {
-        const attempt = (resolveAttempts.get(attemptKey) ?? 0) + 1;
-        resolveAttempts.set(attemptKey, attempt);
+      while (!resolved) {
+        const attempt = takeResolveAttempt(attemptKey);
+        if (attempt == null) break;
         if (attempt > 1) {
           await sleep(RETRY_BACKOFF_MS * (attempt - 1));
           logger.info("Catalog resolve retry", { searchTerm, attempt });

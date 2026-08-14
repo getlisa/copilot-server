@@ -100,11 +100,26 @@ function specTokens(tokens: string[]): string[] {
  * The rule only ever rejects: a line the catalog can't confirm stays blank for the
  * technician, which is the whole premise of never inventing a price.
  */
+/**
+ * Trailing words that GROUP products rather than name one — "strut channel support system",
+ * "junction box kit". No retail title calls itself a "system", so taking one as the head noun
+ * makes the gate unsatisfiable by every row; the word before it is the real product. Falls
+ * back to the last token when everything is generic, preserving the old behavior for pure
+ * scope text ("feeder makeup"), which must stay unmatchable.
+ */
+const GENERIC_NOUNS = new Set([
+  "system", "kit", "assembly", "package", "hardware", "materials", "material",
+  "components", "component", "supplies",
+]);
+
 function productNoun(tokens: string[]): string | null {
+  let fallback: string | null = null;
   for (let i = tokens.length - 1; i >= 0; i--) {
-    if (!/\d/.test(tokens[i])) return tokens[i];
+    if (/\d/.test(tokens[i])) continue;
+    fallback ??= tokens[i];
+    if (!GENERIC_NOUNS.has(tokens[i])) return tokens[i];
   }
-  return null;
+  return fallback;
 }
 
 export function tokenize(text: string): string[] {

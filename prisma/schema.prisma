@@ -369,6 +369,10 @@ model QuoteLineItem {
   /// description is customer-facing prose and often unmatchable; this is what every retry,
   /// sweep, and on-demand search should query with. Null on labor/diagnostic lines.
   searchTerm      String?  @map("search_term")
+  /// Alternative-option grouping ("Option A", "Option B"). Null = base scope. Lines in
+  /// different option groups are mutually exclusive alternatives: totals are computed per
+  /// group and NEVER summed across groups — a customer picks one.
+  optionGroup     String?  @map("option_group")
   agentSuggested  Boolean  @default(false) @map("agent_suggested")
   manuallyEdited  Boolean  @default(false) @map("manually_edited")
   /// Pending ambiguous reference: { action: "remove"|"update", candidateItemIds: string[], referenceText: string, fields?: object }

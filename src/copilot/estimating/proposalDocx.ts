@@ -24,6 +24,14 @@ export interface ProposalScopeSection {
   bullets: string[];
 }
 
+export interface ProposalOptionTotal {
+  /** As shown to the customer, e.g. "OPTION A – Shed Trench and Empty Raceway". */
+  name: string;
+  total: number;
+  /** Base scope + this option — what the customer pays if they choose it. */
+  combinedTotal: number;
+}
+
 export interface ProposalInput {
   header: QuoteHeader;
   projectTitle: string;
@@ -33,15 +41,35 @@ export interface ProposalInput {
   scopeSections: ProposalScopeSection[];
   /** Overrides the static defaults when the caller has real assumptions. */
   assumptions?: string[];
+  /** Job-specific EXCLUSIONS; falls back to the standard set. */
+  exclusions?: string[];
+  /** Job-specific Coordination bullets; falls back to job-neutral defaults. */
+  coordination?: string[];
+  /** Base-scope total. With optionTotals present this is the base alone, never a grand sum. */
   total: number;
+  /**
+   * Alternative option groups priced independently. Mutually exclusive by definition —
+   * the document never adds them together; each renders its own combined total.
+   */
+  optionTotals?: ProposalOptionTotal[];
+  /** Lines with no price yet. Anything > 0 renders an explicit warning by the COST line. */
+  unpricedCount?: number;
 }
 
-// ponytail: boilerplate constants; make data-driven when quotes carry them
 const STATIC_EXCLUSIONS = [
   "Patching or repair of walls, ceilings, or finishes of any kind",
   "Painting or finishing of any kind",
   "Any additional work not included in this bid — such work will be quoted separately upon discovery",
   "Moving of materials or obstructions impeding the work — work area must be clear and accessible prior to Contractor commencing work",
+];
+
+// Job-neutral fallbacks only — anything customer-type- or scope-specific (homeowner vs
+// customer, outage duration, access work) must come from the narrative, not a constant:
+// these bullets go on EVERY proposal, and one job's conditions stamped on another job's
+// document misstates what that customer agreed to.
+const STATIC_COORDINATION = [
+  "Contractor will coordinate work schedule with the customer to minimize disruption",
+  "Contractor will provide advance notice before any work requiring power outages",
 ];
 
 const STATIC_ASSUMPTIONS = [
@@ -223,20 +251,16 @@ export async function buildProposalDocx(input: ProposalInput): Promise<Buffer> {
           new Paragraph({
             children: [new TextRun({ text: "The following items are specifically EXCLUDED from this scope of work:" })],
           }),
-          ...STATIC_EXCLUSIONS.map((t) => numbered(t, 0)),
+          ...(input.exclusions?.length ? input.exclusions : STATIC_EXCLUSIONS).map((t) =>
+            numbered(t, 0)
+          ),
 
           sectionHeader("GENERAL CONDITIONS"),
           new Paragraph({ children: [new TextRun({ text: "Coordination:", bold: true })] }),
-          bullet("Contractor will coordinate work schedule with homeowner to minimize disruption"),
-          bullet(
-            "Homeowner should expect a brief power interruption during panel troubleshooting and repair"
-          ),
-          bullet(
-            "Contractor will notify homeowner prior to removal of shiplap or cutting of sheetrock"
-          ),
+          ...(input.coordination?.length ? input.coordination : STATIC_COORDINATION).map(bullet),
           new Paragraph({ children: [new TextRun({ text: "Code Compliance:", bold: true })] }),
           bullet("All work shall comply with the current National Electrical Code (NEC)"),
-          bullet("All work shall comply with Idaho state electrical code requirements"),
+          bullet("All work shall comply with applicable state electrical code requirements"),
           bullet("All work shall comply with local jurisdiction amendments and requirements"),
 
           sectionHeader("ASSUMPTIONS"),
@@ -246,22 +270,87 @@ export async function buildProposalDocx(input: ProposalInput): Promise<Buffer> {
           ...assumptions.map((t) => numbered(t, 1)),
 
           // --- Cost / payment ---
-          new Paragraph({
-            spacing: { before: 300 },
-            children: [
-              new TextRun({ text: "COST: ", bold: true }),
-              new TextRun({
-                text:
-                  "All the above work to be completed in a substantial and workmanlike manner in " +
-                  "accordance with the scope of work for the sum of: ",
-              }),
-              new TextRun({
-                text: `${amountInWords(input.total)} (${money(input.total)}).`,
-                bold: true,
-              }),
-              new TextRun({ text: " A 3% service fee required on all Credit Card payments." }),
-            ],
-          }),
+          ...(input.unpricedCount
+            ? [
+                new Paragraph({
+                  spacing: { before: 300 },
+                  children: [
+                    new TextRun({
+                      text:
+                        `NOTE: ${input.unpricedCount} line item(s) are not yet priced and are ` +
+                        `NOT included in the totals below. This proposal is incomplete until ` +
+                        `they are priced or removed.`,
+                      bold: true,
+                      color: "C00000",
+                    }),
+                  ],
+                }),
+              ]
+            : []),
+          ...(input.optionTotals?.length
+            ? [
+                // Alternative options: each priced on its own, never added together.
+                new Paragraph({
+                  spacing: { before: 300 },
+                  children: [
+                    new TextRun({ text: "BASE SCOPE TOTAL: ", bold: true }),
+                    new TextRun({
+                      text: `${amountInWords(input.total)} (${money(input.total)})`,
+                      bold: true,
+                    }),
+                  ],
+                }),
+                ...input.optionTotals.flatMap((opt) => [
+                  new Paragraph({
+                    spacing: { before: 150 },
+                    children: [
+                      new TextRun({ text: `${opt.name.toUpperCase()} TOTAL: `, bold: true }),
+                      new TextRun({
+                        text: `${amountInWords(opt.total)} (${money(opt.total)})`,
+                        bold: true,
+                      }),
+                    ],
+                  }),
+                  new Paragraph({
+                    children: [
+                      new TextRun({
+                        text: `Base Scope + ${opt.name} Combined Total: ${money(opt.combinedTotal)}`,
+                        bold: true,
+                      }),
+                    ],
+                  }),
+                ]),
+                new Paragraph({
+                  spacing: { before: 150 },
+                  children: [
+                    new TextRun({
+                      text:
+                        "Only one option will be selected and performed; option totals are " +
+                        "alternatives and are never combined with each other. All work to be " +
+                        "completed in a substantial and workmanlike manner in accordance with the " +
+                        "scope of work. A 3% service fee required on all Credit Card payments.",
+                    }),
+                  ],
+                }),
+              ]
+            : [
+                new Paragraph({
+                  spacing: { before: 300 },
+                  children: [
+                    new TextRun({ text: "COST: ", bold: true }),
+                    new TextRun({
+                      text:
+                        "All the above work to be completed in a substantial and workmanlike manner in " +
+                        "accordance with the scope of work for the sum of: ",
+                    }),
+                    new TextRun({
+                      text: `${amountInWords(input.total)} (${money(input.total)}).`,
+                      bold: true,
+                    }),
+                    new TextRun({ text: " A 3% service fee required on all Credit Card payments." }),
+                  ],
+                }),
+              ]),
           new Paragraph({
             spacing: { before: 200 },
             children: [
