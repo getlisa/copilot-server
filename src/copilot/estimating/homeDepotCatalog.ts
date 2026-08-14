@@ -229,7 +229,7 @@ const WORD_ALIASES: Record<string, string[]> = {
 function tokenAliases(t: string): string[] {
   const out = new Set<string>([t]);
   for (const a of WORD_ALIASES[t] ?? []) out.add(a);
-  const m = t.match(/^(\d+(?:\.\d+)?)(a|amp|awg|v|volt|w|watt|ga|gauge|lb|lbs|in|ft|p)$/);
+  const m = t.match(/^(\d+(?:\.\d+)?)(a|amp|awg|hp|v|volt|w|watt|ga|gauge|lb|lbs|in|ft|p)$/);
   if (m) {
     const [, n, unit] = m;
     const family: Record<string, string[]> = {
@@ -239,7 +239,7 @@ function tokenAliases(t: string): string[] {
       w: ["watt", "watts"], watt: ["w", "watts"],
       lb: ["lbs", "pound"], lbs: ["lb", "pound"],
       in: ["inch", "inches"], ft: ["foot", "feet"],
-      p: ["pole", "poles"],
+      p: ["pole", "poles"], hp: ["horsepower"],
     };
     // Only "<n> <unit>" spellings — NEVER the bare number. `title.includes("20")` was
     // satisfied by "120/240-Volt", so a 15 Amp breaker scored 4/4 against a 20A request and

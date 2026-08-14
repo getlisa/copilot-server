@@ -41,6 +41,7 @@ const UNIT_CANON: Record<string, string> = {
   v: "v", volt: "v", volts: "v",
   w: "w", watt: "w", watts: "w",
   p: "p", pole: "p", poles: "p",
+  hp: "hp", horsepower: "hp",
 };
 
 function canonicalizeUnits(text: string): string {
@@ -62,7 +63,7 @@ function canonicalizeUnits(text: string): string {
       .replace(/(\d(?:[\d./]*\d)?)\s*(?:"|''|”)/g, "$1in")
       .replace(/(\d(?:[\d./]*\d)?)\s*-?\s*(?:inches|inch|in)\b/gi, "$1in")
       .replace(
-        /(\d+(?:\.\d+)?)\s*-?\s*(amperes|ampere|amps|amp|awg|gauge|ga|volts|volt|poles|pole|watts|watt|a|v|w|p)\b/gi,
+        /(\d+(?:\.\d+)?)\s*-?\s*(horsepower|hp|amperes|ampere|amps|amp|awg|gauge|ga|volts|volt|poles|pole|watts|watt|a|v|w|p)\b/gi,
         (_m, n: string, unit: string) => `${n}${UNIT_CANON[unit.toLowerCase()] ?? unit.toLowerCase()}`
       )
   );
@@ -107,11 +108,19 @@ function productNoun(tokens: string[]): string | null {
 }
 
 export function tokenize(text: string): string[] {
-  return canonicalizeUnits(text)
-    .toLowerCase()
-    .replace(/[^a-z0-9./"-]+/g, " ")
-    .split(/\s+/)
-    .filter((t) => t.length > 0 && !STOPWORDS.has(t) && !/^\d+$/.test(t));
+  return (
+    canonicalizeUnits(text)
+      .toLowerCase()
+      .replace(/[^a-z0-9./"-]+/g, " ")
+      // "-", "/" and "." survive only BETWEEN digits, where they are part of a size ("4/0",
+      // "1-1/4in", "2.5", "12-2"). Anywhere else they are word joiners or punctuation and
+      // must split/strip: retail "1-1/4 in." otherwise tokenized as "1-1/4in." and failed the
+      // spec constraint against the query's "1-1/4in", and compounds like "3-Phase" and
+      // "breaker/disconnect" made the product-noun constraint unsatisfiable by any row.
+      .replace(/(?<![0-9])[-/.]|[-/.](?![0-9])/g, " ")
+      .split(/\s+/)
+      .filter((t) => t.length > 0 && !STOPWORDS.has(t) && !/^\d+$/.test(t))
+  );
 }
 
 /** Singular/plural variants so "switches" matches "switch" without a stemmer. */

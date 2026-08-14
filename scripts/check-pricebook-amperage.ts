@@ -32,6 +32,12 @@ const BOOK: [string, string, string, number, string[]][] = [
   // technician-facing description of whichever line resolved the row first.
   ["HD-100137321", "1/2 in. Electrical Metallic Tube (EMT) Set-Screw Connector", "EA", 0.85, ["1/2 in EMT set screw connector"]],
   ["HD-100144234", "1/2 in. Standard Fitting Electric Metallic Tube (EMT) Set Screw Coupling", "EA", 0.59, ["1/2 in EMT coupling"]],
+
+  // HD-style rows with NO synonym echoing the query, so matching must survive the title's own
+  // spelling: the trailing dot in "in.", hyphen/slash compounds, and horsepower as a unit.
+  ["HD-125EMT", "1-1/4 in. Electrical Metallic Tube (EMT) Set-Screw Coupling", "EA", 3.12, []],
+  ["HD-VFD10", "10 HP 480-Volt 3-Phase Variable Frequency Drive", "EA", 890, ["vfd"]],
+  ["HD-MCPD", "Motor Circuit Breaker Disconnect 480V", "EA", 152, []],
 ];
 
 const items = BOOK.map(([code, description, unit, unitPrice, synonyms], i) => ({
@@ -81,6 +87,16 @@ const CASES: [string, string | null][] = [
   ["1/2 in EMT coupling", "HD-100144234"],
   // A plural request must still reach a singular row (and vice versa) through the noun test.
   ["1/2 in EMT couplings", "HD-100144234"],
+
+  // --- Tokenizer punctuation, from the Golden K industrial quote (2026-08-14). Retail "in."
+  // tokenized with its trailing dot ("1-1/4in.") and failed the spec constraint against the
+  // query's "1-1/4in"; "3 phase"/"3-Phase" and "breaker/disconnect" compounds made the
+  // product-noun constraint unsatisfiable; "10 HP" lost its 10 to the bare-digit filter.
+  ["1-1/4 in EMT coupling", "HD-125EMT"],
+  ["1/2 in EMT coupling", "HD-100144234"], // size still separates the two coupling rows
+  ["10 HP VFD, 480V, 3 phase", "HD-VFD10"],
+  ["5 HP VFD, 480V, 3 phase", null], // horsepower is now a spec token — near-miss stays blank
+  ["motor circuit breaker/disconnect", "HD-MCPD"],
 ];
 
 const t = tokenize("20 amp breaker");
