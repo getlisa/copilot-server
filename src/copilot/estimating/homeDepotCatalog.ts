@@ -12,6 +12,7 @@ import {
 import { tokenize } from "./pricebookMatch";
 import { isLengthUnit, packAwareQuantity, unitsCompatible } from "./packMath";
 import { lookupHomeDepotViaWebSearch } from "./modelPriceEstimate";
+import { ESTIMATED_PRICE_CODE } from "./quoteDto";
 
 /**
  * Home Depot catalog resolver for the Estimating Agent.
@@ -724,8 +725,11 @@ async function webSearchFallback(
       data: {
         unitPrice: found.unitPrice,
         unit: found.unit ?? row.unit,
-        priceEstimated: true,
-        estimateLink: found.productLink ?? found.searchLink,
+        // The sentinel IS the marker; there is no column to store a link in, so the DTO derives
+        // a Home Depot search URL from the line's searchTerm. A reported product URL is dropped
+        // rather than kept — most fail the product-page shape test anyway, and a search link
+        // always resolves.
+        pricebookCode: ESTIMATED_PRICE_CODE,
         ...(packed.rounded ? { quantity: packed.quantity } : {}),
       },
     });
@@ -852,10 +856,9 @@ export function enqueueResolve(
           data: {
             unitPrice: resolved.unitPrice,
             unit: resolved.unit,
+            // A verified catalog price supersedes any web-search estimate: writing the real
+            // code over the EST sentinel is what retires it.
             pricebookCode: resolved.code,
-            // A verified catalog price supersedes any web-search estimate on this line.
-            priceEstimated: false,
-            estimateLink: null,
             ...(packed.rounded ? { quantity: packed.quantity } : {}),
           },
         });

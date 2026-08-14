@@ -9,7 +9,7 @@ import {
 import { matchPricebook } from "../../copilot/estimating/pricebookMatch";
 import { resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
 import { packAwareQuantity, unitsCompatible } from "../../copilot/estimating/packMath";
-import { toQuoteDto, toLineItemDto, type CatalogIndex } from "../../copilot/estimating/quoteDto";
+import { toQuoteDto, toLineItemDto, ESTIMATED_PRICE_CODE, type CatalogIndex } from "../../copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
 import { buildProposalDocx } from "../../copilot/estimating/proposalDocx";
 import { generateProposalNarrative } from "../../copilot/estimating/proposalNarrative";
@@ -547,15 +547,13 @@ export class QuoteController {
     if (body.unitPrice !== undefined) {
       data.unitPrice = body.unitPrice;
       data.manuallyEdited = true;
-      // The technician's own number retires any web-search estimate and its link.
-      data.priceEstimated = false;
-      data.estimateLink = null;
+      // The technician's own number retires any web-search estimate.
+      if (item.pricebookCode === ESTIMATED_PRICE_CODE) data.pricebookCode = null;
     }
     if (body.totalPrice !== undefined) {
       data.totalPrice = body.totalPrice; // not required to equal qty × unit price
       data.manuallyEdited = true;
-      data.priceEstimated = false;
-      data.estimateLink = null;
+      if (item.pricebookCode === ESTIMATED_PRICE_CODE) data.pricebookCode = null;
     }
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
     await prisma.quoteLineItem.update({ where: { id: item.id }, data });

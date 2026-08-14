@@ -2,6 +2,7 @@ import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { callStructured, EstimateTurn } from "../estimate/estimateService";
 import { matchPricebook } from "./pricebookMatch";
+import { ESTIMATED_PRICE_CODE } from "./quoteDto";
 import { packAwareQuantity, unitsCompatible } from "./packMath";
 import { enqueueResolve } from "./homeDepotCatalog";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
@@ -308,7 +309,7 @@ export async function runEstimatingTurn(opts: {
     // An estimated price counts as unpriced for this purpose: it came from a web search, not
     // the catalog, so it must keep trying for a real product price rather than settling.
     if (
-      (line.unitPrice == null || line.priceEstimated) &&
+      (line.unitPrice == null || line.pricebookCode === ESTIMATED_PRICE_CODE) &&
       !line.manuallyEdited &&
       !line.ambiguousAction
     ) {

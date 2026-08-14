@@ -1,3 +1,4 @@
+import { homeDepotSearchLink } from "./modelPriceEstimate";
 import { PricebookItem, Quote, QuoteLineItem } from "@prisma/client";
 
 /**
@@ -101,6 +102,23 @@ export interface QuoteDto {
 
 const num = (v: unknown): number | null => (v == null ? null : Number(v));
 
+/**
+ * Sentinel pricebook code for a line priced by web search instead of the catalog.
+ *
+ * It lives in `pricebookCode` rather than its own column because adding one requires ownership
+ * of the table and the application connects as `app_user`, which Postgres will not let alter a
+ * table owned by `postgres`. The sentinel is safe in that field: no pricebook row has this code,
+ * so `catalogFor` finds nothing and `product` stays null — an estimate can never be dressed up
+ * as catalog provenance. It is also what the resolver's backfill already overwrites, since that
+ * update targets any code not prefixed `HD-`.
+ */
+export const ESTIMATED_PRICE_CODE = "EST";
+
+/** True when this line's price came from a web search rather than the catalog. */
+export function isEstimatedPrice(item: { pricebookCode: string | null }): boolean {
+  return item.pricebookCode === ESTIMATED_PRICE_CODE;
+}
+
 export function flagsFor(item: QuoteLineItem): LineItemFlag[] {
   if (item.ambiguousAction) return ["ambiguous"];
   const flags: LineItemFlag[] = [];
@@ -108,7 +126,7 @@ export function flagsFor(item: QuoteLineItem): LineItemFlag[] {
   if (item.quantity == null) flags.push("missing_quantity");
   if (item.unitPrice == null && item.totalPrice == null && !item.manuallyEdited)
     flags.push("unmatched");
-  if (item.priceEstimated && !item.manuallyEdited) flags.push("estimated_price");
+  if (isEstimatedPrice(item) && !item.manuallyEdited) flags.push("estimated_price");
   if (item.manuallyEdited) flags.push("manually_edited");
   return flags;
 }
@@ -156,8 +174,8 @@ export function toLineItemDto(item: QuoteLineItem, catalog?: CatalogIndex): Line
     product: productFor(item, catalog),
     // Kept separate from `product`, which means "verified catalog row". An estimate is neither
     // verified nor a row, and a client that renders them identically would erase the difference.
-    priceEstimated: item.priceEstimated,
-    estimateLink: item.estimateLink ?? null,
+    priceEstimated: isEstimatedPrice(item),
+    estimateLink: isEstimatedPrice(item) ? homeDepotSearchLink(item.searchTerm ?? item.description) : null,
     flags: flagsFor(item),
     ambiguousAction: (item.ambiguousAction as LineItemDto["ambiguousAction"]) ?? null,
     optionGroup: item.optionGroup ?? null,
