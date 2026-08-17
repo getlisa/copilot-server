@@ -336,10 +336,13 @@ function unitPriceFromSearch(
 /**
  * FIFO semaphore capping concurrent resolves. A confirmed 8-item proposal used to fire
  * 8 resolves × 4 search variants = ~32 simultaneous SerpApi searches; the free tier queues
- * past ~5 parallel, everything slowed to 15–30s, and most lines went unpriced. Two resolves
- * (≤8 searches in flight) stay inside what SerpApi serves promptly.
+ * past ~5 parallel, everything slowed to 15–30s, and most lines went unpriced. The cap of 2
+ * (≤8 searches in flight) was tuned to that free tier; on the paid Starter plan 4 resolves
+ * (≤16 searches) is the default. Env-tunable so a plan change doesn't need a deploy.
  */
-const MAX_CONCURRENT_RESOLVES = 2;
+const MAX_CONCURRENT_RESOLVES = Number(process.env.MAX_CONCURRENT_RESOLVES) > 0
+  ? Number(process.env.MAX_CONCURRENT_RESOLVES)
+  : 4;
 let activeResolves = 0;
 const resolveWaiters: Array<() => void> = [];
 
