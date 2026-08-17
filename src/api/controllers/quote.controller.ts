@@ -6,8 +6,8 @@ import {
   runEstimatingTurn,
   countRecentFollowUps,
 } from "../../copilot/estimating/estimatingAgent";
-import { matchPricebook } from "../../copilot/estimating/pricebookMatch";
-import { resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
+import { dedupeSharedRows, matchPricebook } from "../../copilot/estimating/pricebookMatch";
+import { pricebookRowsFor, resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
 import { packAwareQuantity, unitsCompatible } from "../../copilot/estimating/packMath";
 import { toQuoteDto, toLineItemDto, ESTIMATED_PRICE_CODE, type CatalogIndex } from "../../copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
@@ -134,10 +134,15 @@ async function catalogFor(
 ): Promise<CatalogIndex> {
   const codes = [...new Set(quote.lineItems.map((i) => i.pricebookCode).filter((c): c is string => !!c))];
   if (codes.length === 0) return new Map();
+  // Same visibility rule as matching: a code priced from another company's accepted
+  // HOME_DEPOT cache row must still resolve its link/brand here, or the line loses them.
   const rows = await prisma.pricebookItem.findMany({
-    where: { companyId: quote.companyId, code: { in: codes } },
+    where: {
+      code: { in: codes },
+      OR: [{ companyId: quote.companyId }, { source: "HOME_DEPOT", provisional: false }],
+    },
   });
-  return new Map(rows.map((r) => [r.code, r]));
+  return new Map(dedupeSharedRows(rows, quote.companyId).map((r) => [r.code, r]));
 }
 
 /** toQuoteDto with product provenance attached. */
@@ -201,7 +206,7 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 async function matcherFor(companyId: number) {
-  const pricebook = await prisma.pricebookItem.findMany({ where: { companyId } });
+  const pricebook = await pricebookRowsFor(companyId);
   const matchable = pricebook.map((p) => ({
     id: p.id,
     code: p.code,

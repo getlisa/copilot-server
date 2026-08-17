@@ -9,7 +9,7 @@ import {
   searchHomeDepot,
   type HdSearchProduct,
 } from "../../lib/serpapi";
-import { tokenize } from "./pricebookMatch";
+import { dedupeSharedRows, tokenize } from "./pricebookMatch";
 import { isLengthUnit, packAwareQuantity, unitsCompatible } from "./packMath";
 import { lookupHomeDepotViaWebSearch } from "./modelPriceEstimate";
 import { ESTIMATED_PRICE_CODE } from "./quoteDto";
@@ -373,6 +373,21 @@ export async function resolveFromHomeDepot(
   } finally {
     releaseResolveSlot();
   }
+}
+
+/**
+ * Every pricebook row a company may match against: its own book in full, plus other
+ * companies' accepted HOME_DEPOT rows — a cached retail price is the same number for
+ * everyone, so one company's resolve warms the cache for all and spends no search.
+ * MANUAL rows never cross companies (they are each company's own negotiated prices),
+ * and foreign provisional rows stay out so an unaccepted resolve can't become another
+ * company's price. Duplicate codes: own row wins, then the freshest resolve.
+ */
+export async function pricebookRowsFor(companyId: number) {
+  const rows = await prisma.pricebookItem.findMany({
+    where: { OR: [{ companyId }, { source: "HOME_DEPOT", provisional: false }] },
+  });
+  return dedupeSharedRows(rows, companyId);
 }
 
 const CANONICAL_TERM_SCHEMA = {

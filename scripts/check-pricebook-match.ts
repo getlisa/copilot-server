@@ -3,7 +3,7 @@
  *   npx tsx scripts/check-pricebook-match.ts
  */
 import assert from "assert";
-import { matchPricebook } from "../src/copilot/estimating/pricebookMatch";
+import { dedupeSharedRows, matchPricebook } from "../src/copilot/estimating/pricebookMatch";
 
 const items = [
   { id: 1, code: "EL-005", description: "Wago 221 Lever Nut Connector (pack of 10)", unit: "PACK", unitPrice: 8.5, synonyms: ["wago", "wago connector"] },
@@ -17,5 +17,22 @@ assert.strictEqual(matchPricebook("a couple of switches", items)?.code, "EL-002"
 assert.strictEqual(matchPricebook("5 ft of tubing", items)?.code, "PP-030", "synonym match");
 assert.strictEqual(matchPricebook("sprinkler head", items)?.code, "SP-010", "direct match");
 assert.strictEqual(matchPricebook("hyperbolic flux capacitor", items), null, "no match → null, never guessed");
+
+// Cross-company HD cache sharing: own row beats foreign, freshest foreign wins, no dupes.
+const shared = dedupeSharedRows(
+  [
+    { code: "HD-1", companyId: 2, lastResolvedAt: new Date("2026-01-01") },
+    { code: "HD-1", companyId: 3, lastResolvedAt: new Date("2026-06-01") },
+    { code: "HD-2", companyId: 2, lastResolvedAt: new Date("2026-01-01") },
+    { code: "HD-2", companyId: 1, lastResolvedAt: new Date("2025-01-01") },
+    { code: "EL-005", companyId: 1 },
+  ],
+  1
+);
+const byCode = new Map(shared.map((r) => [r.code, r]));
+assert.strictEqual(shared.length, 3, "one row per code");
+assert.strictEqual(byCode.get("HD-1")?.companyId, 3, "freshest foreign resolve wins");
+assert.strictEqual(byCode.get("HD-2")?.companyId, 1, "own row beats a fresher foreign one");
+assert.strictEqual(byCode.get("EL-005")?.companyId, 1, "manual row untouched");
 
 console.log("pricebook matcher: all checks passed");

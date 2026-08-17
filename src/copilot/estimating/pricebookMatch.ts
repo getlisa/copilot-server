@@ -7,6 +7,33 @@
  * is flagged unmatched/unpriced instead of getting an invented price.
  */
 
+/**
+ * Collapse duplicate codes when a company's matchable rows include other companies'
+ * HOME_DEPOT cache rows. The company's own row always wins (its book is authoritative
+ * for itself); between foreign copies of the same code, the freshest resolve wins
+ * (retail prices drift, and every HD row of a code names the same product).
+ */
+export function dedupeSharedRows<
+  T extends { code: string; companyId: number; lastResolvedAt?: Date | null }
+>(rows: T[], companyId: number): T[] {
+  const byCode = new Map<string, T>();
+  for (const row of rows) {
+    const kept = byCode.get(row.code);
+    if (!kept || rowWins(row, kept, companyId)) byCode.set(row.code, row);
+  }
+  return [...byCode.values()];
+}
+
+function rowWins(
+  a: { companyId: number; lastResolvedAt?: Date | null },
+  b: { companyId: number; lastResolvedAt?: Date | null },
+  companyId: number
+): boolean {
+  const aOwn = a.companyId === companyId;
+  if (aOwn !== (b.companyId === companyId)) return aOwn;
+  return (a.lastResolvedAt?.getTime() ?? 0) > (b.lastResolvedAt?.getTime() ?? 0);
+}
+
 export interface MatchablePricebookItem {
   id: number;
   code: string;

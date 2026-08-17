@@ -4,7 +4,7 @@ import { callStructured, EstimateTurn } from "../estimate/estimateService";
 import { matchPricebook } from "./pricebookMatch";
 import { ESTIMATED_PRICE_CODE } from "./quoteDto";
 import { packAwareQuantity, unitsCompatible } from "./packMath";
-import { enqueueResolve } from "./homeDepotCatalog";
+import { enqueueResolve, pricebookRowsFor } from "./homeDepotCatalog";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
 
 /**
@@ -294,7 +294,7 @@ export async function runEstimatingTurn(opts: {
       orderBy: { sortOrder: "asc" },
     }),
     prisma.kbEntry.findMany({ where: { companyId: opts.companyId } }),
-    prisma.pricebookItem.findMany({ where: { companyId: opts.companyId } }),
+    pricebookRowsFor(opts.companyId),
   ]);
 
   // Self-heal: lines whose pricing failed on an earlier turn retry here — one search per
