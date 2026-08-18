@@ -45,6 +45,8 @@ model companies {
   phone            String?            @db.VarChar(20)
   email            String?            @db.VarChar(200)
   license_number   String?            @db.VarChar(100)
+  /// Per-company proposal email body with {{placeholders}}; null = built-in default.
+  proposal_email_template String?
   company_configs  company_configs?
   crm_connections  crm_connections?
   crm_entity_links crm_entity_links[]

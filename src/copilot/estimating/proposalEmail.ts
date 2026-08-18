@@ -5,7 +5,7 @@ import type { LineItemDto, QuoteOptionTotal } from "./quoteDto";
  * Proposal email as a REVIEWABLE DRAFT: draftProposalEmail() produces the plain-text
  * letter the technician sees and can edit in the app; renderProposalHtml() wraps that
  * exact text in the branded HTML shell at send time (WYSIWYG — what was reviewed is
- * what is sent). The bid-proposal DOCX is attached separately by the caller.
+ * what is sent). The bid-proposal PDF is attached separately by the caller.
  */
 
 export interface ProposalEmailInput {
@@ -16,6 +16,13 @@ export interface ProposalEmailInput {
   total: number;
   /** Alternative options priced per choice; never summed with each other. */
   optionTotals?: QuoteOptionTotal[];
+  /**
+   * Company-authored body template (companies.proposal_email_template). Supports
+   * {{customerName}}, {{projectTitle}}, {{companyName}}, {{technicianName}},
+   * {{total}} and {{summary}} (the generated work/totals block).
+   * Null/empty falls back to the built-in letter.
+   */
+  template?: string | null;
 }
 
 const BRAND = "#d6314a";
@@ -40,7 +47,7 @@ function esc(s: string): string {
 export function draftProposalEmail(input: ProposalEmailInput): { subject: string; body: string } {
   const { header, projectTitle, lineItems, total, optionTotals } = input;
   const company = header.companyName || "Clara AI";
-  const customer = header.customerName !== "Customer" ? header.customerName : "there";
+  const customer = header.customerName || "Customer"; // header default is already "Customer"
 
   const itemLine = (li: LineItemDto) =>
     `- ${li.description}${li.quantity != null ? ` (${li.quantity}${li.unit ? " " + li.unit : ""})` : ""}: ${money(li.totalPrice)}`;
@@ -65,22 +72,41 @@ export function draftProposalEmail(input: ProposalEmailInput): { subject: string
         `Total: ${money(total)}`,
       ];
 
-  const body = [
-    `Dear ${customer},`,
-    "",
-    `Thank you for the opportunity to bid on ${projectTitle}. Please find our full bid proposal attached as a Word document — it includes the detailed scope of work, exclusions, assumptions, and terms.`,
-    "",
-    ...totalsBlock,
-    "",
-    "We would be glad to walk you through the proposal or adjust the scope to fit your needs — just reply to this email or give us a call.",
-    "",
-    "Best regards,",
-    company,
-    ...(header.technicianName ? [header.technicianName] : []),
-  ].join("\n");
+  const summary = totalsBlock.join("\n");
+  const subject = `Bid Proposal from ${company} — ${projectTitle}`;
 
-  return { subject: `Bid Proposal from ${company} — ${projectTitle}`, body };
+  const vars: Record<string, string> = {
+    customerName: customer,
+    projectTitle,
+    companyName: company,
+    technicianName: header.technicianName ?? "",
+    total: money(total),
+    summary,
+  };
+  // Company template wins; the built-in letter is just the default template. Unknown
+  // placeholders are left as-is so a typo is visible in the reviewable draft instead
+  // of silently vanishing.
+  const template = input.template?.trim() ? input.template : DEFAULT_PROPOSAL_EMAIL_TEMPLATE;
+  const body = template
+    .replace(/\{\{\s*(\w+)\s*\}\}/g, (raw, key: string) => (key in vars ? vars[key] : raw))
+    .trimEnd(); // an empty {{technicianName}} must not leave a dangling blank line
+  return { subject, body };
 }
+
+/** The built-in letter — also served to the template editor as its starting text. */
+export const DEFAULT_PROPOSAL_EMAIL_TEMPLATE = [
+  "Dear {{customerName}},",
+  "",
+  "Thank you for the opportunity to bid on {{projectTitle}}. Please find our full bid proposal attached as a PDF — it includes the detailed scope of work, exclusions, assumptions, and terms.",
+  "",
+  "{{summary}}",
+  "",
+  "We would be glad to walk you through the proposal or adjust the scope to fit your needs — just reply to this email or give us a call.",
+  "",
+  "Best regards,",
+  "{{companyName}}",
+  "{{technicianName}}",
+].join("\n");
 
 /** Wrap the (possibly edited) plain-text body in the branded HTML shell. */
 export function renderProposalHtml(header: QuoteHeader, body: string): string {

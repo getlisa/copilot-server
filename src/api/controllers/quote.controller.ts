@@ -11,7 +11,8 @@ import { pricebookRowsFor, resolveFromHomeDepot } from "../../copilot/estimating
 import { packAwareQuantity, unitsCompatible } from "../../copilot/estimating/packMath";
 import { toQuoteDto, toLineItemDto, ESTIMATED_PRICE_CODE, type CatalogIndex } from "../../copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
-import { buildProposalDocx } from "../../copilot/estimating/proposalDocx";
+import { buildProposalDocx, type ProposalInput } from "../../copilot/estimating/proposalDocx";
+import { buildProposalPdf } from "../../copilot/estimating/proposalPdf";
 import { generateProposalNarrative } from "../../copilot/estimating/proposalNarrative";
 import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating/proposalEmail";
 import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
@@ -150,7 +151,10 @@ async function quoteDtoWithProducts(quote: Parameters<typeof toQuoteDto>[0] & { 
   return toQuoteDto(quote, await catalogFor(quote));
 }
 
-/** Shared proposal assembly: header from DB branding, DOCX buffer, and the DTO. */
+/**
+ * Shared proposal assembly: header from DB branding, the DTO, and the ProposalInput
+ * that both document builders (docx download, PDF email attachment) render from.
+ */
 async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
   const conversation = await prisma.conversation.findUnique({
     where: { id: quote.conversationId },
@@ -178,8 +182,17 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     (customerName !== "Customer" ? `Work for ${customerName}` : "Scope of Work");
   const projectAddress = header.serviceAddress || narrative?.project.siteAddress || "";
   const unpricedCount = dto.lineItems.filter((i) => i.flags.includes("unmatched")).length;
-  const buffer = await buildProposalDocx({
-    header: { ...header, customerName },
+  // Photos attached in the estimator chat render at the bottom of the proposal.
+  const photos = await prisma.imageFile.findMany({
+    where: { conversationId: quote.conversationId },
+    orderBy: { createdAt: "asc" },
+    select: { s3Key: true, mimeType: true },
+  });
+  // Every consumer (docx, PDF, email draft/send) must see the recovered customer name —
+  // handing out the raw header made the email greet "there" while the document said the name.
+  const mergedHeader = { ...header, customerName };
+  const input: ProposalInput = {
+    header: mergedHeader,
     projectTitle,
     projectAddress,
     date: new Date(),
@@ -199,8 +212,9 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     total: dto.total,
     optionTotals: dto.optionTotals,
     unpricedCount,
-  });
-  return { header, dto, projectTitle, buffer, unpricedCount };
+    photos,
+  };
+  return { header: mergedHeader, dto, projectTitle, input, unpricedCount };
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -704,7 +718,8 @@ export class QuoteController {
     if (!user) return;
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
-    const { buffer } = await buildProposalParts(quote);
+    const { input } = await buildProposalParts(quote);
+    const buffer = await buildProposalDocx(input);
     const stamp = new Date().toISOString().slice(0, 10);
     res
       .setHeader(
@@ -715,19 +730,41 @@ export class QuoteController {
       .send(buffer);
   }
 
+  /** GET /api/v1/quotes/:quoteId/proposal-pdf — the same proposal rendered as a PDF. */
+  static async downloadProposalPdf(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    const { input } = await buildProposalParts(quote);
+    const buffer = await buildProposalPdf(input);
+    const stamp = new Date().toISOString().slice(0, 10);
+    res
+      .setHeader("Content-Type", "application/pdf")
+      .setHeader("Content-Disposition", `attachment; filename="proposal-${stamp}.pdf"`)
+      .send(buffer);
+  }
+
   /** GET /api/v1/quotes/:quoteId/email-draft — drafted proposal email for in-app review. */
   static async emailDraft(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
-    const { header, dto, projectTitle } = await buildProposalParts(quote);
+    const [{ header, dto, projectTitle }, company] = await Promise.all([
+      buildProposalParts(quote),
+      prisma.companies.findUnique({
+        where: { id: quote.companyId },
+        select: { proposal_email_template: true },
+      }),
+    ]);
     const draft = draftProposalEmail({
       header,
       projectTitle,
       lineItems: dto.lineItems,
       total: dto.total,
       optionTotals: dto.optionTotals,
+      template: company?.proposal_email_template,
     });
     res.json({
       success: true,
@@ -736,7 +773,7 @@ export class QuoteController {
   }
 
   /**
-   * POST /api/v1/quotes/:quoteId/email — send the reviewed proposal email, DOCX attached.
+   * POST /api/v1/quotes/:quoteId/email — send the reviewed proposal email, PDF attached.
    * Body: { to, subject, body } as reviewed/edited in the app.
    */
   static async emailProposal(req: RequestWithUser, res: Response) {
@@ -752,7 +789,7 @@ export class QuoteController {
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
 
-    const { header, buffer, unpricedCount } = await buildProposalParts(quote);
+    const { header, input, unpricedCount } = await buildProposalParts(quote);
     // Sending is the customer-facing point of no return. A proposal with unpriced lines
     // prints a total that silently omits them — a real quote went out at labor + $37 of
     // materials for a contactor-replacement job. Download/draft still work (the document
@@ -763,6 +800,7 @@ export class QuoteController {
         409,
         `${unpricedCount} line item(s) have no price yet — the proposal total would be wrong. Price or remove them before sending.`
       );
+    const buffer = await buildProposalPdf(input);
     await sendEmail({
       to,
       from: SENDGRID_FROM_EMAIL,
@@ -772,9 +810,9 @@ export class QuoteController {
       html: renderProposalHtml(header, body),
       text: body,
       attachment: {
-        filename: `proposal-${new Date().toISOString().slice(0, 10)}.docx`,
+        filename: `proposal-${new Date().toISOString().slice(0, 10)}.pdf`,
         content: buffer,
-        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        type: "application/pdf",
       },
     });
     logger.info("Proposal emailed", { quoteId: quote.id, to });

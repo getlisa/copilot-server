@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
 import bcrypt from "bcryptjs";
+import { RequestWithUser } from "../middlewares/auth";
+import { DEFAULT_PROPOSAL_EMAIL_TEMPLATE } from "../../copilot/estimating/proposalEmail";
 import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { uploadBufferToS3, publicUrlForKey } from "../../lib/s3";
@@ -108,5 +110,50 @@ export class CompanyController {
         adminEmail: user.email,
       },
     });
+  }
+
+  /** GET /api/v1/companies/proposal-email-template — the caller's company's template. */
+  static async getProposalEmailTemplate(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const company = await prisma.companies.findUnique({
+      where: { id: companyId },
+      select: { proposal_email_template: true },
+    });
+    res.json({
+      success: true,
+      data: {
+        template: company?.proposal_email_template ?? null,
+        // The editor prefills with this when no company template is saved yet.
+        default: DEFAULT_PROPOSAL_EMAIL_TEMPLATE,
+      },
+    });
+  }
+
+  /**
+   * PUT /api/v1/companies/proposal-email-template — body { template: string | null }.
+   * Null/empty clears the override; the proposal email falls back to the built-in letter.
+   */
+  static async updateProposalEmailTemplate(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const raw = req.body?.template;
+    if (raw != null && typeof raw !== "string")
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "template must be a string or null" } });
+    const template = raw?.trim() ? raw.slice(0, 10_000) : null;
+    await prisma.companies.update({
+      where: { id: companyId },
+      data: { proposal_email_template: template },
+    });
+    logger.info("Proposal email template updated", { companyId, cleared: template == null });
+    res.json({ success: true, data: { template } });
   }
 }

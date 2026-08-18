@@ -54,9 +54,11 @@ export interface ProposalInput {
   optionTotals?: ProposalOptionTotal[];
   /** Lines with no price yet. Anything > 0 renders an explicit warning by the COST line. */
   unpricedCount?: number;
+  /** Chat-attached job photos (S3), rendered as a PROJECT PHOTOS section at the end. */
+  photos?: { s3Key: string; mimeType: string }[];
 }
 
-const STATIC_EXCLUSIONS = [
+export const STATIC_EXCLUSIONS = [
   "Patching or repair of walls, ceilings, or finishes of any kind",
   "Painting or finishing of any kind",
   "Any additional work not included in this bid — such work will be quoted separately upon discovery",
@@ -67,12 +69,12 @@ const STATIC_EXCLUSIONS = [
 // customer, outage duration, access work) must come from the narrative, not a constant:
 // these bullets go on EVERY proposal, and one job's conditions stamped on another job's
 // document misstates what that customer agreed to.
-const STATIC_COORDINATION = [
+export const STATIC_COORDINATION = [
   "Contractor will coordinate work schedule with the customer to minimize disruption",
   "Contractor will provide advance notice before any work requiring power outages",
 ];
 
-const STATIC_ASSUMPTIONS = [
+export const STATIC_ASSUMPTIONS = [
   "Work area is accessible and clear of materials or obstructions prior to Contractor's arrival",
   "Site conditions are as represented during initial assessment",
   "Work will be performed during normal business hours (Monday–Friday, 7:00 AM – 5:00 PM)",
@@ -128,7 +130,7 @@ export function amountInWords(amount: number): string {
 const money = (v: number) =>
   `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-async function loadLogo(
+export async function loadLogo(
   logoUrl: string | null
 ): Promise<{ data: Buffer; type: "png" | "jpg" }> {
   if (logoUrl) {
@@ -153,6 +155,74 @@ async function loadLogo(
   return { data: Buffer.from(CLARA_LOGO_PNG_BASE64, "base64"), type: "png" };
 }
 
+/**
+ * Pixel dimensions read straight from the file header (PNG IHDR / JPEG SOF), so photos keep
+ * their aspect ratio without an image library. Null when unreadable — caller falls back to 4:3.
+ * ponytail: EXIF orientation is ignored; add a rotation pass if sideways phone photos show up.
+ */
+export function imageDims(buf: Buffer, type: "png" | "jpg"): { width: number; height: number } | null {
+  try {
+    if (type === "png") {
+      if (buf.length < 24) return null;
+      return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+    }
+    let i = 2;
+    while (i + 9 < buf.length) {
+      if (buf[i] !== 0xff) {
+        i++;
+        continue;
+      }
+      const marker = buf[i + 1];
+      // SOF0–SOF15 carry dimensions, except DHT/JPG/DAC markers in that range.
+      if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+        return { height: buf.readUInt16BE(i + 5), width: buf.readUInt16BE(i + 7) };
+      }
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+  } catch {
+    /* fall through */
+  }
+  return null;
+}
+
+const PHOTO_MAX_W = 400;
+const PHOTO_MAX_H = 480;
+
+/** Load photo buffers from S3, skipping unsupported types and failed fetches. */
+export async function loadPhotos(
+  photos: { s3Key: string; mimeType: string }[]
+): Promise<{ data: Buffer; type: "png" | "jpg"; width: number; height: number }[]> {
+  const loaded: { data: Buffer; type: "png" | "jpg"; width: number; height: number }[] = [];
+  for (const p of photos) {
+    const type: "png" | "jpg" | null = /png/i.test(p.mimeType)
+      ? "png"
+      : /jpe?g/i.test(p.mimeType)
+        ? "jpg"
+        : null;
+    if (!type) {
+      logger.warn("Proposal photo skipped: unsupported type", { s3Key: p.s3Key, mimeType: p.mimeType });
+      continue;
+    }
+    try {
+      const data = await getObjectBufferFromS3(p.s3Key);
+      const dims = imageDims(data, type) ?? { width: 4, height: 3 };
+      const scale = Math.min(PHOTO_MAX_W / dims.width, PHOTO_MAX_H / dims.height);
+      loaded.push({
+        data,
+        type,
+        width: Math.round(dims.width * scale),
+        height: Math.round(dims.height * scale),
+      });
+    } catch (err) {
+      logger.warn("Proposal photo load failed; skipping", {
+        s3Key: p.s3Key,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return loaded;
+}
+
 const sectionHeader = (text: string) =>
   new Paragraph({
     spacing: { before: 300, after: 150 },
@@ -174,6 +244,7 @@ const numbered = (text: string, instance: number) =>
 export async function buildProposalDocx(input: ProposalInput): Promise<Buffer> {
   const { header } = input;
   const logo = await loadLogo(header.logoUrl);
+  const photos = input.photos?.length ? await loadPhotos(input.photos) : [];
   const contactLine = [header.companyPhone, header.companyEmail].filter(Boolean).join("  |  ");
   const customerLine = [header.customerName, header.billingAddress].filter(Boolean).join("  |  ");
   const assumptions = input.assumptions?.length ? input.assumptions : STATIC_ASSUMPTIONS;
@@ -386,6 +457,26 @@ export async function buildProposalDocx(input: ProposalInput): Promise<Buffer> {
             : []),
           ...(header.licenseNumber
             ? [new Paragraph({ children: [new TextRun({ text: `Contractor License: ${header.licenseNumber}` })] })]
+            : []),
+
+          // --- Job photos attached in the estimator chat ---
+          ...(photos.length
+            ? [
+                sectionHeader("PROJECT PHOTOS"),
+                ...photos.map(
+                  (p) =>
+                    new Paragraph({
+                      spacing: { before: 150 },
+                      children: [
+                        new ImageRun({
+                          data: p.data,
+                          type: p.type,
+                          transformation: { width: p.width, height: p.height },
+                        }),
+                      ],
+                    })
+                ),
+              ]
             : []),
         ],
       },
