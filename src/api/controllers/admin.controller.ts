@@ -1,0 +1,559 @@
+import { Request, Response } from "express";
+import prisma from "../../lib/prisma";
+import logger from "../../lib/logger";
+import { uploadBufferToS3, publicUrlForKey } from "../../lib/s3";
+import { parsePricebookFile, IngestError, ParsedRow } from "../../copilot/estimating/ingest";
+import { repriceDrafts, repriceLaborDrafts } from "../../copilot/estimating/reprice";
+
+/**
+ * Internal per-company configuration API (pricebook-config PRD + labor PRD): pricebooks,
+ * branding, templates, Home Depot fallback toggle, labor rates, and conversation cleanup.
+ * All routes sit behind adminAuth (X-Admin-Token) — this is the Clara-team backend
+ * mechanism; there is no technician-facing path to any of it.
+ */
+
+const fail = (res: Response, status: number, message: string) =>
+  res.status(status).json({ success: false, error: { status, message } });
+
+const str = (v: unknown): string | null => {
+  const s = String(v ?? "").trim();
+  return s || null;
+};
+
+function companyIdOf(req: Request, res: Response): number | null {
+  const id = Number(req.params.companyId);
+  if (!Number.isInteger(id) || id <= 0) {
+    fail(res, 400, "Numeric companyId required");
+    return null;
+  }
+  return id;
+}
+
+/**
+ * Item codes are unique per (companyId, code) across ALL of a company's books, so every
+ * book-owned row is namespaced by its book id. A file's own code column is kept inside
+ * that namespace; rows without one get their row number.
+ */
+const itemCode = (bookId: number, row: ParsedRow, index: number) =>
+  `B${bookId}:${row.code ?? `R${index + 1}`}`;
+
+async function insertRows(pricebookId: number, companyId: number, rows: ParsedRow[]) {
+  const seen = new Set<string>();
+  const duplicates: { line: number; reason: string }[] = [];
+  const data = rows.flatMap((row, i) => {
+    const code = itemCode(pricebookId, row, i);
+    if (seen.has(code)) {
+      duplicates.push({ line: i + 1, reason: `duplicate code "${row.code}"` });
+      return [];
+    }
+    seen.add(code);
+    return [
+      {
+        companyId,
+        pricebookId,
+        code,
+        description: row.description,
+        unit: row.unit ?? "EA",
+        unitPrice: row.unitPrice,
+        source: "MANUAL" as const,
+      },
+    ];
+  });
+  await prisma.pricebookItem.createMany({ data });
+  return { inserted: data.length, duplicates };
+}
+
+export class AdminController {
+  // ---------- companies ----------
+
+  /** GET /admin/companies — picker list. */
+  static async listCompanies(_req: Request, res: Response) {
+    const companies = await prisma.companies.findMany({
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    });
+    res.json({ success: true, data: companies });
+  }
+
+  /** GET /admin/companies/:companyId — branding + config + counts. */
+  static async getCompany(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const [company, config, pricebookCount, laborRateCount] = await Promise.all([
+      prisma.companies.findUnique({ where: { id: companyId } }),
+      prisma.company_configs.findUnique({ where: { company_id: companyId } }),
+      prisma.pricebook.count({ where: { companyId } }),
+      prisma.laborRate.count({ where: { companyId } }),
+    ]);
+    if (!company) return fail(res, 404, "Company not found");
+    res.json({
+      success: true,
+      data: {
+        id: company.id,
+        name: company.name,
+        logoUrl: company.logo_url,
+        phone: company.phone,
+        email: company.email,
+        licenseNumber: company.license_number,
+        website: company.website,
+        footerTerms: company.footer_terms,
+        address: company.address,
+        city: company.city,
+        state: company.state,
+        postalCode: company.postal_code,
+        hdFallbackEnabled: config?.hd_fallback_enabled === true,
+        pricebookCount,
+        laborRateCount,
+      },
+    });
+  }
+
+  /**
+   * PATCH /admin/companies/:companyId/config — branding fields, the fallback toggle, and
+   * active-template assignment, in any combination.
+   */
+  static async patchConfig(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const company = await prisma.companies.findUnique({ where: { id: companyId } });
+    if (!company) return fail(res, 404, "Company not found");
+    const b = req.body ?? {};
+
+    const companyData: Record<string, unknown> = {};
+    if (b.name !== undefined) {
+      const name = str(b.name);
+      if (!name) return fail(res, 400, "Company name cannot be blank");
+      companyData.name = name;
+    }
+    if (b.phone !== undefined) companyData.phone = str(b.phone);
+    if (b.email !== undefined) companyData.email = str(b.email);
+    if (b.licenseNumber !== undefined) companyData.license_number = str(b.licenseNumber);
+    if (b.website !== undefined) companyData.website = str(b.website);
+    if (b.footerTerms !== undefined) companyData.footer_terms = str(b.footerTerms);
+    if (b.city !== undefined) companyData.city = str(b.city);
+    if (b.state !== undefined) companyData.state = str(b.state);
+    if (b.postalCode !== undefined) companyData.postal_code = str(b.postalCode);
+    if (b.address !== undefined) companyData.address = { line1: str(b.address) ?? "" };
+
+    if (Object.keys(companyData).length > 0)
+      await prisma.companies.update({ where: { id: companyId }, data: companyData });
+
+    if (b.hdFallbackEnabled !== undefined) {
+      const enabled = b.hdFallbackEnabled === true;
+      await prisma.company_configs.upsert({
+        where: { company_id: companyId },
+        // checklists is constrained to an ARRAY of {label, description} — [] is the empty state.
+        create: { company_id: companyId, checklists: [], hd_fallback_enabled: enabled },
+        update: { hd_fallback_enabled: enabled },
+      });
+      logger.info("HD fallback toggled", { companyId, enabled });
+    }
+
+    if (b.activeTemplateId !== undefined) {
+      if (b.activeTemplateId === null) {
+        // Back to the built-in default invoice.
+        await prisma.quoteTemplate.updateMany({
+          where: { companyId },
+          data: { isActive: false },
+        });
+      } else {
+        const templateId = Number(b.activeTemplateId);
+        const template = await prisma.quoteTemplate.findFirst({
+          where: { id: templateId, companyId },
+        });
+        if (!template) return fail(res, 404, "Template not found for this company");
+        // Exactly one active template per company (template-config PRD).
+        await prisma.$transaction([
+          prisma.quoteTemplate.updateMany({ where: { companyId }, data: { isActive: false } }),
+          prisma.quoteTemplate.update({ where: { id: templateId }, data: { isActive: true } }),
+        ]);
+      }
+    }
+
+    return AdminController.getCompany(req, res);
+  }
+
+  /** POST /admin/companies/:companyId/logo — multipart "logo" image. */
+  static async uploadLogo(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const company = await prisma.companies.findUnique({ where: { id: companyId } });
+    if (!company) return fail(res, 404, "Company not found");
+    const file = (req as Request & { file?: Express.Multer.File }).file;
+    if (!file) return fail(res, 400, "A logo image file is required");
+    const ext = file.mimetype === "image/jpeg" ? "jpg" : "png";
+    const safeName = company.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40);
+    const key = `companies/logos/${Date.now()}-${safeName}.${ext}`;
+    try {
+      await uploadBufferToS3({ key, buffer: file.buffer, contentType: file.mimetype });
+    } catch (err) {
+      logger.error("Admin logo upload failed", {
+        companyId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return fail(res, 502, "Logo upload failed — try again");
+    }
+    const logoUrl = publicUrlForKey(key) ?? key;
+    await prisma.companies.update({ where: { id: companyId }, data: { logo_url: logoUrl } });
+    res.json({ success: true, data: { logoUrl } });
+  }
+
+  // ---------- pricebooks ----------
+
+  /** GET /admin/companies/:companyId/pricebooks */
+  static async listPricebooks(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const books = await prisma.pricebook.findMany({
+      where: { companyId },
+      orderBy: { priority: "asc" },
+    });
+    const counts = await prisma.pricebookItem.groupBy({
+      by: ["pricebookId"],
+      where: { pricebookId: { in: books.map((b) => b.id) } },
+      _count: true,
+    });
+    const countBy = new Map(counts.map((c) => [c.pricebookId, c._count]));
+    res.json({
+      success: true,
+      data: books.map((b) => ({
+        id: b.id,
+        name: b.name,
+        priority: b.priority,
+        sourceFormat: b.sourceFormat,
+        originalFilename: b.originalFilename,
+        itemCount: countBy.get(b.id) ?? 0,
+        createdAt: b.createdAt,
+        updatedAt: b.updatedAt,
+      })),
+    });
+  }
+
+  /** POST /admin/companies/:companyId/pricebooks — multipart "file" + name + priority. */
+  static async createPricebook(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const company = await prisma.companies.findUnique({ where: { id: companyId } });
+    if (!company) return fail(res, 404, "Company not found");
+    const file = (req as Request & { file?: Express.Multer.File }).file;
+    if (!file) return fail(res, 400, "A pricebook file is required (CSV, Excel, or PDF)");
+    const name = str(req.body?.name);
+    if (!name) return fail(res, 400, "A pricebook name is required");
+    const priority = Number(req.body?.priority);
+    if (!Number.isInteger(priority)) return fail(res, 400, "An integer priority is required");
+
+    const siblings = await prisma.pricebook.findMany({ where: { companyId } });
+    if (siblings.some((s) => s.name === name))
+      return fail(res, 409, `This company already has a pricebook named "${name}"`);
+    // No two books of one company may share a priority position (US1) — validated here
+    // because reorders swap values, which a DB unique constraint would fight mid-update.
+    if (siblings.some((s) => s.priority === priority))
+      return fail(res, 409, `Priority ${priority} is already taken for this company`);
+
+    let parsed;
+    try {
+      parsed = await parsePricebookFile(file.buffer, file.originalname);
+    } catch (err) {
+      if (err instanceof IngestError) return fail(res, 422, err.message);
+      throw err;
+    }
+    if (parsed.rows.length === 0)
+      return fail(
+        res,
+        422,
+        `No valid rows in the file — all ${parsed.skipped.length} entries failed validation (item identifier present + numeric price)`
+      );
+
+    const book = await prisma.pricebook.create({
+      data: {
+        companyId,
+        name,
+        priority,
+        sourceFormat: parsed.format,
+        originalFilename: file.originalname,
+      },
+    });
+    const { inserted, duplicates } = await insertRows(book.id, companyId, parsed.rows);
+    const repriced = await repriceDrafts(companyId);
+    logger.info("Pricebook created", { companyId, pricebookId: book.id, name, inserted });
+    res.status(201).json({
+      success: true,
+      data: {
+        pricebook: { id: book.id, name, priority, sourceFormat: parsed.format },
+        ingested: inserted,
+        skipped: [...parsed.skipped, ...duplicates],
+        repricedDraftLines: repriced,
+      },
+    });
+  }
+
+  /** PUT /admin/pricebooks/:pricebookId/file — replace the book's contents (re-upload). */
+  static async replacePricebookFile(req: Request, res: Response) {
+    const pricebookId = Number(req.params.pricebookId);
+    const book = await prisma.pricebook.findUnique({ where: { id: pricebookId } });
+    if (!book) return fail(res, 404, "Pricebook not found");
+    const file = (req as Request & { file?: Express.Multer.File }).file;
+    if (!file) return fail(res, 400, "A pricebook file is required (CSV, Excel, or PDF)");
+
+    let parsed;
+    try {
+      parsed = await parsePricebookFile(file.buffer, file.originalname);
+    } catch (err) {
+      if (err instanceof IngestError) return fail(res, 422, err.message);
+      throw err;
+    }
+    if (parsed.rows.length === 0)
+      return fail(res, 422, "No valid rows in the file — the existing pricebook was left unchanged");
+
+    await prisma.pricebookItem.deleteMany({ where: { pricebookId } });
+    const { inserted, duplicates } = await insertRows(pricebookId, book.companyId, parsed.rows);
+    await prisma.pricebook.update({
+      where: { id: pricebookId },
+      data: { sourceFormat: parsed.format, originalFilename: file.originalname },
+    });
+    // A replacement re-prices the company's open Drafts immediately (US1) — not on reopen.
+    const repriced = await repriceDrafts(book.companyId);
+    logger.info("Pricebook replaced", { pricebookId, inserted, repriced });
+    res.json({
+      success: true,
+      data: {
+        pricebook: { id: book.id, name: book.name, priority: book.priority, sourceFormat: parsed.format },
+        ingested: inserted,
+        skipped: [...parsed.skipped, ...duplicates],
+        repricedDraftLines: repriced,
+      },
+    });
+  }
+
+  /** PATCH /admin/companies/:companyId/pricebooks/priorities — body {orders: [{id, priority}]}. */
+  static async reorderPricebooks(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const orders: { id: number; priority: number }[] = Array.isArray(req.body?.orders)
+      ? req.body.orders
+      : [];
+    if (orders.length === 0) return fail(res, 400, "orders: [{id, priority}] is required");
+    if (orders.some((o) => !Number.isInteger(o?.id) || !Number.isInteger(o?.priority)))
+      return fail(res, 400, "Every order entry needs an integer id and priority");
+    const priorities = orders.map((o) => o.priority);
+    if (new Set(priorities).size !== priorities.length)
+      return fail(res, 409, "Priorities must be unique per company");
+
+    const books = await prisma.pricebook.findMany({ where: { companyId } });
+    const bookIds = new Set(books.map((b) => b.id));
+    if (orders.some((o) => !bookIds.has(o.id)))
+      return fail(res, 404, "One or more pricebook ids do not belong to this company");
+    if (orders.length !== books.length)
+      return fail(res, 400, "Provide a priority for every one of the company's pricebooks");
+
+    await prisma.$transaction(
+      orders.map((o) =>
+        prisma.pricebook.update({ where: { id: o.id }, data: { priority: o.priority } })
+      )
+    );
+    // A priority-order change re-prices open Drafts immediately (US1).
+    const repriced = await repriceDrafts(companyId);
+    res.json({ success: true, data: { repricedDraftLines: repriced } });
+  }
+
+  /** DELETE /admin/pricebooks/:pricebookId */
+  static async deletePricebook(req: Request, res: Response) {
+    const pricebookId = Number(req.params.pricebookId);
+    const book = await prisma.pricebook.findUnique({ where: { id: pricebookId } });
+    if (!book) return fail(res, 404, "Pricebook not found");
+    await prisma.$transaction([
+      prisma.pricebookItem.deleteMany({ where: { pricebookId } }),
+      prisma.pricebook.delete({ where: { id: pricebookId } }),
+    ]);
+    const repriced = await repriceDrafts(book.companyId);
+    logger.info("Pricebook deleted", { pricebookId, companyId: book.companyId, repriced });
+    res.json({ success: true, data: { repricedDraftLines: repriced } });
+  }
+
+  // ---------- labor rates ----------
+
+  /** GET /admin/companies/:companyId/labor-rates */
+  static async listLaborRates(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const rates = await prisma.laborRate.findMany({
+      where: { companyId },
+      orderBy: { name: "asc" },
+    });
+    res.json({
+      success: true,
+      data: rates.map((r) => ({ id: r.id, name: r.name, hourlyRate: Number(r.hourlyRate) })),
+    });
+  }
+
+  /** POST /admin/companies/:companyId/labor-rates — {name, hourlyRate}. $0 is valid. */
+  static async createLaborRate(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const name = str(req.body?.name);
+    if (!name) return fail(res, 400, "A labor type name is required");
+    const hourlyRate = Number(req.body?.hourlyRate);
+    if (!Number.isFinite(hourlyRate) || hourlyRate < 0)
+      return fail(res, 400, "hourlyRate must be zero or a positive number");
+    const existing = await prisma.laborRate.findFirst({ where: { companyId, name } });
+    if (existing) return fail(res, 409, `This company already has a labor type named "${name}"`);
+    const rate = await prisma.laborRate.create({ data: { companyId, name, hourlyRate } });
+    res.status(201).json({
+      success: true,
+      data: { id: rate.id, name: rate.name, hourlyRate: Number(rate.hourlyRate) },
+    });
+  }
+
+  /** PATCH /admin/labor-rates/:id — {name?, hourlyRate?}. Re-prices open Drafts (US8). */
+  static async updateLaborRate(req: Request, res: Response) {
+    const id = Number(req.params.id);
+    const rate = await prisma.laborRate.findUnique({ where: { id } });
+    if (!rate) return fail(res, 404, "Labor rate not found");
+    const data: Record<string, unknown> = {};
+    if (req.body?.name !== undefined) {
+      const name = str(req.body.name);
+      if (!name) return fail(res, 400, "A labor type name cannot be blank");
+      const clash = await prisma.laborRate.findFirst({
+        where: { companyId: rate.companyId, name, id: { not: id } },
+      });
+      if (clash) return fail(res, 409, `This company already has a labor type named "${name}"`);
+      data.name = name;
+    }
+    if (req.body?.hourlyRate !== undefined) {
+      const hourlyRate = Number(req.body.hourlyRate);
+      if (!Number.isFinite(hourlyRate) || hourlyRate < 0)
+        return fail(res, 400, "hourlyRate must be zero or a positive number");
+      data.hourlyRate = hourlyRate;
+    }
+    if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
+    const updated = await prisma.laborRate.update({ where: { id }, data });
+    const repriced = await repriceLaborDrafts(rate.companyId);
+    res.json({
+      success: true,
+      data: {
+        id: updated.id,
+        name: updated.name,
+        hourlyRate: Number(updated.hourlyRate),
+        repricedDraftLines: repriced,
+      },
+    });
+  }
+
+  /** DELETE /admin/labor-rates/:id — detaches (never deletes) any Draft lines using it. */
+  static async deleteLaborRate(req: Request, res: Response) {
+    const id = Number(req.params.id);
+    const rate = await prisma.laborRate.findUnique({ where: { id } });
+    if (!rate) return fail(res, 404, "Labor rate not found");
+    await prisma.laborRate.delete({ where: { id } });
+    const repriced = await repriceLaborDrafts(rate.companyId);
+    res.json({ success: true, data: { repricedDraftLines: repriced } });
+  }
+
+  // ---------- templates ----------
+
+  /** GET /admin/companies/:companyId/templates */
+  static async listTemplates(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const templates = await prisma.quoteTemplate.findMany({
+      where: { companyId },
+      orderBy: { createdAt: "asc" },
+    });
+    res.json({ success: true, data: templates });
+  }
+
+  /** POST /admin/companies/:companyId/templates — {name, renderer?, config?}. */
+  static async createTemplate(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const name = str(req.body?.name);
+    if (!name) return fail(res, 400, "A template name is required");
+    const renderer = str(req.body?.renderer) ?? "invoice";
+    const template = await prisma.quoteTemplate.create({
+      data: {
+        companyId,
+        name,
+        renderer,
+        config: req.body?.config && typeof req.body.config === "object" ? req.body.config : {},
+      },
+    });
+    res.status(201).json({ success: true, data: template });
+  }
+
+  // ---------- conversations (estimate chats) ----------
+
+  /** GET /admin/companies/:companyId/conversations — the company's estimate chats. */
+  static async listConversations(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const quotes = await prisma.quote.findMany({
+      where: { companyId },
+      orderBy: { createdAt: "desc" },
+      include: {
+        lineItems: { select: { id: true } },
+        conversation: {
+          select: {
+            messages: {
+              where: { senderType: "USER" },
+              orderBy: { createdAt: "asc" },
+              take: 1,
+              select: { content: true },
+            },
+          },
+        },
+      },
+    });
+    res.json({
+      success: true,
+      data: quotes.map((q) => ({
+        quoteId: q.id,
+        conversationId: q.conversationId,
+        status: q.status,
+        lineItemCount: q.lineItems.length,
+        firstMessage: q.conversation?.messages[0]?.content.slice(0, 120) ?? null,
+        createdAt: q.createdAt,
+        updatedAt: q.updatedAt,
+      })),
+    });
+  }
+
+  /**
+   * DELETE /admin/companies/:companyId/conversations — body {quoteIds: [], includeCompleted?}.
+   * Deleting a conversation cascades to its messages, quote, and line items. Permanent.
+   * Completed quotes are refused unless includeCompleted is explicitly true.
+   */
+  static async deleteConversations(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const quoteIds: string[] = Array.isArray(req.body?.quoteIds)
+      ? req.body.quoteIds.filter((id: unknown) => typeof id === "string")
+      : [];
+    if (quoteIds.length === 0) return fail(res, 400, "quoteIds: [] is required");
+    const includeCompleted = req.body?.includeCompleted === true;
+
+    // Company-scoped lookup: an id belonging to another company is rejected, not deleted.
+    const quotes = await prisma.quote.findMany({
+      where: { id: { in: quoteIds }, companyId },
+      select: { id: true, conversationId: true, status: true },
+    });
+    if (quotes.length !== quoteIds.length)
+      return fail(res, 404, "One or more quotes were not found for this company");
+    const refused = includeCompleted ? [] : quotes.filter((q) => q.status === "COMPLETED");
+    if (refused.length > 0)
+      return fail(
+        res,
+        409,
+        `${refused.length} of the selected quotes are Completed — pass includeCompleted: true to delete them too`
+      );
+
+    const result = await prisma.conversation.deleteMany({
+      where: { id: { in: quotes.map((q) => q.conversationId) } },
+    });
+    logger.info("Admin deleted estimate conversations", {
+      companyId,
+      deleted: result.count,
+      includeCompleted,
+    });
+    res.json({ success: true, data: { deleted: result.count } });
+  }
+}

@@ -8,6 +8,7 @@ import { voiceRoute } from "./api/routes/voice.route";
 import { estimateRoute } from "./api/routes/estimate.route";
 import { quoteRoute } from "./api/routes/quote.route";
 import { companyRoute } from "./api/routes/company.route";
+import { adminRoute } from "./api/routes/admin.route";
 import logger from "./lib/logger";
 
 dotenv.config();
@@ -26,7 +27,7 @@ app.use(
   cors({
     origin: process.env.ALLOW_ORIGIN,
     credentials: true,
-    allowedHeaders: "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Dev-Bypass, X-User-Id, X-User-Email, X-User-Role, X-Company-Id, X-Device-Timezone",
+    allowedHeaders: "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Dev-Bypass, X-User-Id, X-User-Email, X-User-Role, X-Company-Id, X-Device-Timezone, X-Admin-Token",
     preflightContinue: false,
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
   })
@@ -78,6 +79,7 @@ app.use("/api/v1/voice", voiceRoute);
 app.use("/api/v1/copilot", estimateRoute); // DEMO-ONLY estimate-cost mode
 app.use("/api/v1/quotes", quoteRoute); // Estimating Agent (chat-as-quote, Draft → Completed)
 app.use("/api/v1/companies", companyRoute); // Hidden company registration (URL-only access)
+app.use("/api/v1/admin", adminRoute); // Internal Clara-team config (X-Admin-Token required)
 
 // Health check
 app.get("/health", (req, res) => {

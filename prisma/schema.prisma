@@ -47,6 +47,8 @@ model companies {
   license_number   String?            @db.VarChar(100)
   /// Per-company proposal email body with {{placeholders}}; null = built-in default.
   proposal_email_template String?
+  website          String?            @db.VarChar(300)
+  footer_terms     String?
   company_configs  company_configs?
   crm_connections  crm_connections?
   crm_entity_links crm_entity_links[]
@@ -63,6 +65,10 @@ model company_configs {
   checklists             Json
   updated_at             DateTime  @default(now()) @db.Timestamp(6)
   sales_coaching_enabled Boolean   @default(true)
+  /// Home Depot fallback pricing for pricebook misses (pricebook-config PRD US5).
+  /// Off by default: a client's quotes only price from their own book(s) unless
+  /// this is deliberately enabled for them.
+  hd_fallback_enabled    Boolean   @default(false)
   companies              companies @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@schema("public")
@@ -351,7 +357,7 @@ model Quote {
   companyId      Int             @map("company_id")
   status         QuoteStatus     @default(DRAFT)
   /// Per-quote materials markup, as a percentage. Applies to MATERIAL lines only — labor is
-  /// never marked up (isLabor). 0 = no markup. Editable while DRAFT, frozen on COMPLETED.
+  /// never marked up (isLabor/labor). 0 = no markup. Editable while DRAFT, frozen on COMPLETED.
   /// Deliberately per-quote: there is no client-level default markup anywhere in the product.
   markupPercent  Decimal         @default(0) @map("markup_percent") @db.Decimal(5, 2)
   /// Customer identification, per quote. Free text with NO format validation (PRD is
@@ -360,6 +366,11 @@ model Quote {
   customerName    String?        @map("customer_name")
   customerAddress String?        @map("customer_address")
   customerPhone   String?        @map("customer_phone")
+  /// Template in effect when this quote was CREATED (template-config PRD): a later template
+  /// reassignment never touches an existing quote. Null = the built-in default invoice.
+  templateId     Int?            @map("template_id")
+  /// The end-of-materials labor-hours ask fires at most once per quote (labor PRD US2).
+  laborAsked     Boolean         @default(false) @map("labor_asked")
   createdAt      DateTime        @default(now()) @map("created_at")
   updatedAt      DateTime        @updatedAt @map("updated_at")
   completedAt    DateTime?       @map("completed_at")
@@ -397,6 +408,17 @@ model QuoteLineItem {
   manuallyEdited  Boolean  @default(false) @map("manually_edited")
   /// Pending ambiguous reference: { action: "remove"|"update", candidateItemIds: string[], referenceText: string, fields?: object }
   ambiguousAction Json?    @map("ambiguous_action")
+  /// Which of the company's named pricebooks priced this line (pricebook-config PRD US8).
+  /// Null when the price came from Home Depot fallback, a manual edit, or nowhere yet.
+  sourcePricebookId Int?   @map("source_pricebook_id")
+  /// Technician pressed Confirm on a fallback-sourced price. Clears the blocking
+  /// fallback_price flag without touching the price itself.
+  priceConfirmed  Boolean  @default(false) @map("price_confirmed")
+  /// Labor line (labor PRD): quantity = hours, unit = "hr", unitPrice = hourly rate.
+  labor           Boolean  @default(false)
+  /// Configured labor type this line was priced from. Null on a labor line = ad-hoc
+  /// technician-stated rate (zero types configured / unmatched type / no valid rate).
+  laborRateId     Int?     @map("labor_rate_id")
   sortOrder       Int      @map("sort_order")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
@@ -404,6 +426,63 @@ model QuoteLineItem {
 
   @@index([quoteId])
   @@map("quote_line_items")
+  @@schema("public")
+}
+
+/// A named pricebook attached to a company (pricebook-config PRD US1). Priority is the
+/// order books are CHECKED in and the tiebreaker for which book is shown as the price
+/// source when two books carry the same item at the same price — the price that wins a
+/// collision is always the HIGHER one, regardless of priority. Unique priority per company
+/// is validated at configuration time (reorders swap values, so no DB constraint).
+model Pricebook {
+  id               Int      @id @default(autoincrement())
+  companyId        Int      @map("company_id")
+  name             String
+  priority         Int
+  /// csv | excel | pdf — the format the book was ingested from.
+  sourceFormat     String?  @map("source_format")
+  originalFilename String?  @map("original_filename")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@unique([companyId, name])
+  @@index([companyId])
+  @@map("pricebooks")
+  @@schema("public")
+}
+
+/// Per-client named hourly labor rates (labor PRD US1). Distinct schema from pricebooks
+/// by explicit PRD decision: a labor type is a name + hourly rate, not a pricebook entry.
+/// A rate of 0 is valid (comped/warranty work), distinct from "no rate configured".
+model LaborRate {
+  id         Int      @id @default(autoincrement())
+  companyId  Int      @map("company_id")
+  name       String
+  hourlyRate Decimal  @map("hourly_rate") @db.Decimal(12, 2)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([companyId, name])
+  @@index([companyId])
+  @@map("labor_rates")
+  @@schema("public")
+}
+
+/// Per-client quote template (template-config PRD US3). `renderer` keys into the code
+/// registry in copilot/estimating/templates.ts — a custom client template is a new renderer
+/// implemented in code, referenced by a row here. At most one active template per company
+/// (validated at configuration time); no active row = the built-in default invoice.
+model QuoteTemplate {
+  id        Int      @id @default(autoincrement())
+  companyId Int      @map("company_id")
+  name      String
+  renderer  String   @default("invoice")
+  config    Json     @default("{}")
+  isActive  Boolean  @default(false) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([companyId])
+  @@map("quote_templates")
   @@schema("public")
 }
 
@@ -415,6 +494,9 @@ model PricebookItem {
   unit        String   @default("EA")
   unitPrice   Decimal  @map("unit_price") @db.Decimal(12, 2)
   synonyms    String[] @default([])
+  /// Which named pricebook this row belongs to. Null on HOME_DEPOT cache rows and on
+  /// legacy seeded rows that predate named pricebooks.
+  pricebookId Int?     @map("pricebook_id")
 
   /// Where this row came from. MANUAL rows are company-authored and never touched by the
   /// resolver; HOME_DEPOT rows are written by the catalog resolver on a pricebook miss so
@@ -438,6 +520,7 @@ model PricebookItem {
   @@index([companyId])
   @@index([companyId, source])
   @@index([externalId])
+  @@index([pricebookId])
   @@map("pricebook_items")
   @@schema("public")
 }

@@ -20,6 +20,10 @@ export const BLOCKING_FLAGS = [
   // price can. It blocks completion for the same reason an agent-suggested line does: a human
   // has to look at it before it reaches a customer.
   "estimated_price",
+  // Priced via online-retailer fallback, unconfirmed (pricebook-config PRD US6): the price
+  // came from Home Depot, not the client's own pricebook, so the technician must confirm or
+  // edit it before the quote can be marked Completed. Cleared by priceConfirmed.
+  "fallback_price",
 ] as const;
 
 export type LineItemFlag = (typeof BLOCKING_FLAGS)[number] | "manually_edited";
@@ -66,6 +70,15 @@ export interface LineItemDto {
   priceEstimated: boolean;
   /** Product URL when the search returned a real-looking one, else a Home Depot search URL. */
   estimateLink: string | null;
+  /**
+   * Review-screen price provenance (pricebook-config PRD US8): the named pricebook the
+   * price came from, "Home Depot — online fallback" for fallback prices, and null for a
+   * manually entered/edited price (the manually_edited flag carries that signal instead).
+   * Never rendered on the exported customer document.
+   */
+  priceSource: string | null;
+  /** Labor line (labor PRD): quantity is hours, unitPrice is the hourly rate. */
+  labor: boolean;
   flags: LineItemFlag[];
   ambiguousAction: {
     action: "remove" | "update";
@@ -139,6 +152,11 @@ export function isEstimatedPrice(item: { pricebookCode: string | null }): boolea
   return item.pricebookCode === ESTIMATED_PRICE_CODE;
 }
 
+/** True when the line's price came from the Home Depot fallback (catalog resolve). */
+export function isFallbackPrice(item: { pricebookCode: string | null }): boolean {
+  return item.pricebookCode?.startsWith("HD-") === true;
+}
+
 export function flagsFor(item: QuoteLineItem): LineItemFlag[] {
   if (item.ambiguousAction) return ["ambiguous"];
   const flags: LineItemFlag[] = [];
@@ -147,6 +165,8 @@ export function flagsFor(item: QuoteLineItem): LineItemFlag[] {
   if (item.unitPrice == null && item.totalPrice == null && !item.manuallyEdited)
     flags.push("unmatched");
   if (isEstimatedPrice(item) && !item.manuallyEdited) flags.push("estimated_price");
+  if (isFallbackPrice(item) && !item.manuallyEdited && !item.priceConfirmed)
+    flags.push("fallback_price");
   if (item.manuallyEdited) flags.push("manually_edited");
   return flags;
 }
@@ -182,7 +202,14 @@ export function markedUpPrices(
   item: QuoteLineItem,
   markupPercent: number
 ): { unitPrice: number | null; totalPrice: number | null } {
-  const m = item.isLabor ? 1 : 1 + markupPercent / 100;
+  // EITHER labor flag exempts the line. Two columns mean the same thing after the markup and
+  // labor-charges features landed independently: `is_labor` (markup PRD, set by the agent's
+  // op) and `labor` (labor PRD, set by the labor-rate flow). Checking only one marked up
+  // every labor line the other flow created — the exact silent overcharge this boundary
+  // exists to prevent.
+  // ponytail: collapse the two columns into one in a follow-up migration; until then this
+  // OR is the single guarantee, and it covers rows already written by either flow.
+  const m = item.isLabor || item.labor ? 1 : 1 + markupPercent / 100;
   const baseUnit = num(item.unitPrice);
   const unitPrice = baseUnit == null ? null : round2(baseUnit * m);
   const manualTotal = num(item.totalPrice);
@@ -229,6 +256,19 @@ function productFor(item: QuoteLineItem, catalog?: CatalogIndex): LineItemProduc
   };
 }
 
+/** Pricebook names keyed by id, for the priceSource display. */
+export type PricebookNameIndex = Map<number, string>;
+
+function priceSourceFor(item: QuoteLineItem, bookNames?: PricebookNameIndex): string | null {
+  // A technician's own number has no external source — the manually_edited flag carries
+  // that signal; the source display stays blank (US8's one exception).
+  if (item.manuallyEdited) return null;
+  if (item.sourcePricebookId != null)
+    return bookNames?.get(item.sourcePricebookId) ?? "Company pricebook";
+  if (isFallbackPrice(item) || isEstimatedPrice(item)) return "Home Depot — online fallback";
+  return null;
+}
+
 /**
  * `markupPercent` defaults to 0 only for callers that serialize a line without its quote in
  * hand; every real read goes through `toQuoteDto`, which passes the quote's actual percentage.
@@ -236,11 +276,15 @@ function productFor(item: QuoteLineItem, catalog?: CatalogIndex): LineItemProduc
  *
  * Because those prices are also what the editable fields commit back, the write side has to
  * undo this — see `stripMarkup`.
+ *
+ * `bookNames` is display-only (the review screen's price-source label) and never affects a
+ * price, so callers that don't have the index simply get `priceSource: null`.
  */
 export function toLineItemDto(
   item: QuoteLineItem,
   catalog?: CatalogIndex,
-  markupPercent = 0
+  markupPercent = 0,
+  bookNames?: PricebookNameIndex
 ): LineItemDto {
   const prices = markedUpPrices(item, markupPercent);
   return {
@@ -257,6 +301,8 @@ export function toLineItemDto(
     // verified nor a row, and a client that renders them identically would erase the difference.
     priceEstimated: isEstimatedPrice(item),
     estimateLink: isEstimatedPrice(item) ? homeDepotSearchLink(item.searchTerm ?? item.description) : null,
+    priceSource: priceSourceFor(item, bookNames),
+    labor: item.labor,
     flags: flagsFor(item),
     ambiguousAction: (item.ambiguousAction as LineItemDto["ambiguousAction"]) ?? null,
     optionGroup: item.optionGroup ?? null,
@@ -266,14 +312,15 @@ export function toLineItemDto(
 
 export function toQuoteDto(
   quote: Quote & { lineItems: QuoteLineItem[] },
-  catalog?: CatalogIndex
+  catalog?: CatalogIndex,
+  bookNames?: PricebookNameIndex
 ): QuoteDto {
   const items = [...quote.lineItems].sort((a, b) => a.sortOrder - b.sortOrder);
   // Markup is a live multiplier, not a stored snapshot: it is applied here, on every read, so
   // a line added after the percentage was set gets it with no extra action and a changed
   // percentage re-reflects on every line at once. Labor lines pass through untouched.
   const markupPercent = Number(quote.markupPercent ?? 0);
-  const dtos = items.map((i) => toLineItemDto(i, catalog, markupPercent));
+  const dtos = items.map((i) => toLineItemDto(i, catalog, markupPercent, bookNames));
   // Option groups are mutually exclusive alternatives: `total` covers base-scope lines only
   // and each group gets its own total. Summing alternatives billed customers for both —
   // observed on two real option-based quotes ($6,591 printed for a $3,430-or-$4,430 choice).

@@ -3,11 +3,19 @@ import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { RequestWithUser } from "../middlewares/auth";
 import { runEstimatingTurn } from "../../copilot/estimating/estimatingAgent";
-import { dedupeSharedRows, matchPricebook } from "../../copilot/estimating/pricebookMatch";
-import { pricebookRowsFor, resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
+import { dedupeSharedRows } from "../../copilot/estimating/pricebookMatch";
+import { resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
+import { loadCompanyPricing } from "../../copilot/estimating/companyPricing";
 import { packAwareQuantity, unitsCompatible } from "../../copilot/estimating/packMath";
-import { toQuoteDto, toLineItemDto, stripMarkup, ESTIMATED_PRICE_CODE, type CatalogIndex } from "../../copilot/estimating/quoteDto";
-import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
+import {
+  toQuoteDto,
+  toLineItemDto,
+  stripMarkup,
+  ESTIMATED_PRICE_CODE,
+  type CatalogIndex,
+  type PricebookNameIndex,
+} from "../../copilot/estimating/quoteDto";
+import { renderQuoteDocument } from "../../copilot/estimating/templates";
 import { buildProposalDocx, type ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { buildProposalPdf } from "../../copilot/estimating/proposalPdf";
 import { generateProposalNarrative } from "../../copilot/estimating/proposalNarrative";
@@ -146,9 +154,22 @@ async function catalogFor(
   return new Map(dedupeSharedRows(rows, quote.companyId).map((r) => [r.code, r]));
 }
 
-/** toQuoteDto with product provenance attached. */
+/** Pricebook names for the review screen's price-source display (US8). */
+async function bookNamesFor(companyId: number): Promise<PricebookNameIndex> {
+  const books = await prisma.pricebook.findMany({
+    where: { companyId },
+    select: { id: true, name: true },
+  });
+  return new Map(books.map((b) => [b.id, b.name]));
+}
+
+/** toQuoteDto with product provenance and pricebook names attached. */
 async function quoteDtoWithProducts(quote: Parameters<typeof toQuoteDto>[0] & { companyId: number }) {
-  return toQuoteDto(quote, await catalogFor(quote));
+  const [catalog, bookNames] = await Promise.all([
+    catalogFor(quote),
+    bookNamesFor(quote.companyId),
+  ]);
+  return toQuoteDto(quote, catalog, bookNames);
 }
 
 /**
@@ -260,19 +281,16 @@ async function quoteImagesDto(conversationId: string) {
   );
 }
 
+/**
+ * Company matcher with the PRD's ordering built in: the client's own books first (higher
+ * price wins a collision), the Home Depot cache only when their fallback toggle is on.
+ * Matches carry sourcePricebookId so callers can persist provenance (US8).
+ */
 async function matcherFor(companyId: number) {
-  const pricebook = await pricebookRowsFor(companyId);
-  const matchable = pricebook.map((p) => ({
-    id: p.id,
-    code: p.code,
-    description: p.description,
-    unit: p.unit,
-    unitPrice: Number(p.unitPrice),
-    synonyms: p.synonyms,
-    // Needed so a hand-added count is rounded to whole packs like a spoken one — see packMath.
-    packageQuantity: p.packageQuantity == null ? null : Number(p.packageQuantity),
-  }));
-  return (description: string) => matchPricebook(description, matchable);
+  const pricing = await loadCompanyPricing(companyId);
+  const match = (description: string) => pricing.match(description);
+  match.fallbackEnabled = pricing.fallbackEnabled;
+  return match;
 }
 
 export class QuoteController {
@@ -288,11 +306,18 @@ export class QuoteController {
         metadata: { kind: "estimating" },
       },
     });
+    // Stamp the company's active template at creation (template-config PRD): a later
+    // template reassignment only affects quotes created after it, never this one.
+    const activeTemplate = await prisma.quoteTemplate.findFirst({
+      where: { companyId: user.companyId, isActive: true },
+      select: { id: true },
+    });
     const quote = await prisma.quote.create({
       data: {
         conversationId: conversation.id,
         userId: user.userId,
         companyId: user.companyId,
+        templateId: activeTemplate?.id ?? null,
       },
       include: { lineItems: true },
     });
@@ -596,6 +621,7 @@ export class QuoteController {
         totalPrice: basePrice(totalPrice),
         pricebookCode: match?.code ?? null,
         isLabor,
+        sourcePricebookId: match?.sourcePricebookId ?? null,
         manuallyEdited: manualPrice,
         sortOrder: nextSort,
       },
@@ -652,7 +678,12 @@ export class QuoteController {
     }
 
     const data: Record<string, unknown> = {};
-    if (body.confirm === true) data.agentSuggested = false;
+    if (body.confirm === true) {
+      data.agentSuggested = false;
+      // Confirming also resolves a fallback-sourced price (pricebook-config PRD US6): the
+      // technician has looked at the Home Depot price and accepted it.
+      data.priceConfirmed = true;
+    }
     // A misclassified line is correctable here: markup skips labor, so getting this wrong is
     // the difference between a marked-up and a cost-price line.
     if (typeof body.isLabor === "boolean") data.isLabor = body.isLabor;
@@ -668,15 +699,22 @@ export class QuoteController {
         const match = (await matcherFor(user.companyId))(body.description);
         data.pricebookCode = match?.code ?? null;
         data.unitPrice = match?.unitPrice ?? null;
+        data.sourcePricebookId = match?.sourcePricebookId ?? null;
         if (match?.unit && body.unit == null && item.unit == null) data.unit = match.unit;
       }
     }
-    if (body.quantity !== undefined) data.quantity = body.quantity;
+    if (body.quantity !== undefined) {
+      // Labor hours must be greater than zero — the labor PRD's one sanity check (US7).
+      if (item.labor && !(Number(body.quantity) > 0))
+        return fail(res, 400, "Labor hours must be greater than zero");
+      data.quantity = body.quantity;
+    }
     if (body.unit !== undefined) data.unit = body.unit;
     // Manual price entry is used as-is, skips pricebook, and is flagged (US6).
     if (body.unitPrice !== undefined) {
       data.unitPrice = body.unitPrice == null ? null : toBase(body.unitPrice);
       data.manuallyEdited = true;
+      data.sourcePricebookId = null; // the technician's own number has no book source
       // The technician's own number retires any web-search estimate.
       if (item.pricebookCode === ESTIMATED_PRICE_CODE) data.pricebookCode = null;
     }
@@ -684,6 +722,7 @@ export class QuoteController {
       // not required to equal qty × unit price
       data.totalPrice = body.totalPrice == null ? null : toBase(body.totalPrice);
       data.manuallyEdited = true;
+      data.sourcePricebookId = null;
       if (item.pricebookCode === ESTIMATED_PRICE_CODE) data.pricebookCode = null;
     }
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
@@ -729,13 +768,19 @@ export class QuoteController {
         ? body.searchTerm.trim()
         : item.searchTerm?.trim() || item.description;
 
-    const match = (await matcherFor(user.companyId))(term);
-    const resolved = match ?? (await resolveFromHomeDepot(term, user.companyId));
+    const matcher = await matcherFor(user.companyId);
+    const match = matcher(term);
+    // Live Home Depot lookup only when this client's fallback toggle is on (US5); with it
+    // off, their own pricebooks are the only price source even for an explicit search.
+    const resolved =
+      match ?? (matcher.fallbackEnabled ? await resolveFromHomeDepot(term, user.companyId) : null);
     if (!resolved)
       return fail(
         res,
         404,
-        `No catalog match for "${term}" — reword the description to a product name (size + part), or type a price.`
+        matcher.fallbackEnabled
+          ? `No catalog match for "${term}" — reword the description to a product name (size + part), or type a price.`
+          : `No pricebook match for "${term}" — reword the description, type a price, or ask your office to add it to the pricebook.`
       );
 
     // A price only applies to a line whose unit measures the same thing — a per-EA spool
@@ -759,7 +804,10 @@ export class QuoteController {
       data: {
         unitPrice: resolved.unitPrice,
         pricebookCode: resolved.code,
+        sourcePricebookId: match?.sourcePricebookId ?? null,
         manuallyEdited: false,
+        // A fresh price needs a fresh look: a fallback-sourced one re-blocks until confirmed.
+        priceConfirmed: false,
         ...(resolved.unit ? { unit: resolved.unit } : {}),
         ...(packed.rounded ? { quantity: packed.quantity } : {}),
       },
@@ -917,14 +965,17 @@ export class QuoteController {
     res.json({ success: true, data: await quoteImagesDto(quote.conversationId) });
   }
 
-  /** GET /api/v1/quotes/:quoteId/docx — basic Word export, marked per current state (US7). */
+  /**
+   * GET /api/v1/quotes/:quoteId/docx — the quote document, rendered under the template
+   * stamped on the quote at creation (default: the client-branded invoice).
+   */
   static async downloadDocx(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
     const dto = await quoteDtoWithProducts(quote);
-    const buffer = await buildQuoteDocx(dto);
+    const buffer = await renderQuoteDocument(dto, quote.companyId, quote.templateId);
     const stamp = new Date(dto.createdAt).toISOString().slice(0, 16).replace(/[:T]/g, "-");
     res
       .setHeader(

@@ -13,6 +13,7 @@ import { dedupeSharedRows, tokenize } from "./pricebookMatch";
 import { isLengthUnit, packAwareQuantity, unitsCompatible } from "./packMath";
 import { lookupHomeDepotViaWebSearch } from "./modelPriceEstimate";
 import { ESTIMATED_PRICE_CODE } from "./quoteDto";
+import { hdFallbackEnabledFor } from "./companyPricing";
 
 /**
  * Home Depot catalog resolver for the Estimating Agent.
@@ -789,6 +790,10 @@ export function enqueueResolve(
 
   void (async () => {
     try {
+      // Per-client fallback toggle (pricebook-config PRD US5), checked here so EVERY caller —
+      // the self-heal sweep, priceFields' resolveTerm, description re-matches — is gated by
+      // the one guard. Off (the default) means no live Home Depot lookup of any kind.
+      if (!(await hdFallbackEnabledFor(companyId))) return;
       // Retry failed resolves — one item at a time, at most MAX_RESOLVE_ATTEMPTS total tries
       // per term. The ledger persists across turns, so the self-heal sweep in the agent can
       // re-enqueue an unpriced line every turn without an unstocked item burning searches
@@ -826,21 +831,16 @@ export function enqueueResolve(
         return;
       }
 
-      // Home Depot is the price source for every material line, so this also OVERRIDES a
-      // placeholder taken from the company's own book (any code not prefixed HD-). Without
-      // that, priceFields showing a MANUAL price while the resolve ran would leave
-      // `unitPrice` non-null and this update would skip the row, pinning the book price
-      // forever. A technician's own edit always wins — manuallyEdited rows are never touched.
+      // Fallback only ever fills a GAP (pricebook-config PRD): it backfills lines that are
+      // still unpriced or carry a web-search estimate. A price from the client's own book is
+      // final — Home Depot never overrides it — and a technician's own edit always wins
+      // (manuallyEdited rows are never touched).
       const targets = await prisma.quoteLineItem.findMany({
         where: {
           id: { in: lineItemIds },
           manuallyEdited: false,
           quote: { companyId, status: "DRAFT" },
-          OR: [
-            { unitPrice: null },
-            { pricebookCode: null },
-            { NOT: { pricebookCode: { startsWith: "HD-" } } },
-          ],
+          OR: [{ unitPrice: null }, { pricebookCode: ESTIMATED_PRICE_CODE }],
         },
         select: { id: true, quantity: true, unit: true },
       });
@@ -877,6 +877,7 @@ export function enqueueResolve(
             // A verified catalog price supersedes any web-search estimate: writing the real
             // code over the EST sentinel is what retires it.
             pricebookCode: resolved.code,
+            sourcePricebookId: null, // fallback-sourced, not from a named book
             ...(packed.rounded ? { quantity: packed.quantity } : {}),
           },
         });
