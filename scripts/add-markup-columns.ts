@@ -1,10 +1,29 @@
-// One-off dev migration, applied through DATABASE_URL (the app's connection) on purpose:
-// prisma migrate/db push read DIRECT_URL, which the duplicated .env entry points at PROD.
-// For prod, run these same ALTERs via the migration runbook in docs/.
+// One-off migration. Both columns are additive with defaults, so this is safe to run against a
+// live database and safe to run twice. It MUST be applied BEFORE the code that reads these
+// columns deploys — Prisma selects them on every quote query, so deploying first breaks the
+// whole quotes API.
 //
-// Both columns are additive with defaults, so this is safe to run against a live database and
-// safe to run twice. It MUST be applied BEFORE the code that reads these columns deploys —
-// Prisma selects them on every quote query, so deploying first breaks the whole quotes API.
+// THIS CANNOT RUN AS THE APPLICATION USER. Measured against techcopilot prod on 2026-08-19:
+//
+//   - quotes, quote_line_items, companies, conversations and pricebook_items are ALL owned by
+//     `postgres`.
+//   - DATABASE_URL and DIRECT_URL both connect as `app_user` (same user, both port 5432 — the
+//     two URLs are not the privilege split they look like).
+//   - `app_user` is not a member of `postgres`, so SET ROLE is not a way around it.
+//   - The ALTER therefore fails with `42501: must be owner of table quotes`.
+//
+// This is the same wall documented in quoteDto.ts, which is why a web-search price is carried
+// as an "EST" sentinel inside pricebookCode instead of getting its own column. Note that
+// companies.proposal_email_template DOES exist in prod despite the sibling script implying
+// app_user added it — that column is owned by `postgres` too, so it was applied out-of-band
+// with a credential this repo does not hold.
+//
+// Run it as the Aurora master user (`postgres`), whose credential is the RDS-managed secret
+// arn:aws:secretsmanager:us-east-1:458799594709:secret:rds!cluster-354ddf05-2500-40c0-a536-ab171d0ac675
+// — readable by neither techcopilot-prod-ecs-execution-role (scoped to techcopilot/prod/*) nor
+// the task role (S3 only). The database is Aurora on a private subnet, so this has to execute
+// inside the VPC: a one-off `aws ecs run-task` against techcopilot-prod-assistant with
+// DATABASE_URL overridden to the master credential is the shortest path.
 //
 // No existing quote's prices change. markup_percent defaults to 0, and at 0 the pricing path
 // returns exactly what it returned before (pinned by scripts/check-markup.ts, which asserts

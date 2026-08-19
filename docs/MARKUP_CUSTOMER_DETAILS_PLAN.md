@@ -83,22 +83,51 @@ material line at once. **Worth a fast-follow ticket.**
 | *technician-copilot* `src/services/quotesService.ts` | types + `updateQuote` |
 | *technician-copilot* `src/components/quotes/QuoteInvoiceTab.tsx` | Markup field, Material/Labor chip |
 
-### Deploy order — mandatory
+### Deploy order — mandatory, and currently BLOCKED
 
 `scripts/add-markup-columns.ts` must run **before** the server image deploys. Prisma selects
 both columns on every quote query, so deploying first breaks the entire quotes API. The ALTERs
 are additive with defaults and idempotent (`IF NOT EXISTS`), so they are safe against a live
 database and safe to run twice.
 
+**The application cannot apply them.** Measured against techcopilot prod on 2026-08-19 by
+running the ALTER from inside the VPC:
+
 ```
-npx tsx scripts/add-markup-columns.ts
+42501: must be owner of table quotes
 ```
 
-This follows `scripts/add-proposal-email-template.ts`: DDL through `$executeRawUnsafe` on
-`DATABASE_URL`, because `prisma migrate` / `db push` read `DIRECT_URL`, which the duplicated
-`.env` entry points at **prod**. (This also settles the old worry recorded in `quoteDto.ts`
-about `app_user` not being able to `ALTER` — `companies.proposal_email_template` was added this
-way, so the path works.)
+- `quotes`, `quote_line_items`, `companies`, `conversations`, `pricebook_items` — all owned by
+  `postgres`.
+- `DATABASE_URL` and `DIRECT_URL` both connect as `app_user`, same user, both port 5432. The
+  two URLs are not the privilege split they appear to be.
+- `app_user` is not a member of `postgres`, so `SET ROLE` is not a way around it.
+
+This is the same wall recorded in `quoteDto.ts`, and the reason a web-search price lives as an
+`"EST"` sentinel inside `pricebookCode` rather than in its own column. `companies.proposal_email_template`
+exists in prod despite `add-proposal-email-template.ts` implying `app_user` added it — that
+column is owned by `postgres` too, so it was applied out-of-band with a credential this repo
+does not hold. **There is no migration path in this repo that actually works on prod.** Worth
+fixing as its own piece of work, separately from either feature here.
+
+To apply: run as the Aurora master (`postgres`), whose credential is the RDS-managed secret
+`rds!cluster-354ddf05-2500-40c0-a536-ab171d0ac675`. Readable by neither
+`techcopilot-prod-ecs-execution-role` (scoped to `techcopilot/prod/*`) nor the task role (S3
+only). Aurora sits on a private subnet — `10.0.4.221`, no public endpoint — so this must execute
+inside the VPC. Shortest path is a one-off `aws ecs run-task` against
+`techcopilot-prod-assistant` (exec is enabled, cluster `techcopilot-prod-ecs-cluster`,
+us-east-1) with `DATABASE_URL` overridden to the master credential.
+
+`prod/postgres/credentials` is **not** it — that secret holds Metabase/PostHog config.
+
+### No-DDL fallback, if the owner credential stays out of reach
+
+Both values can live in `conversations.metadata` (already `Json?`, already writable by
+`app_user`, and 1:1 with a quote): `markupPercent` plus a `laborItemIds` array standing in for
+the `is_labor` column. That is the same class of workaround as the `"EST"` sentinel, so it has
+precedent here — but it is strictly worse: no column default, no type, no query-ability, and
+the labor flag drifts if a line item is deleted outside the write path that maintains the array.
+Prefer getting the ALTER run.
 
 ---
 
