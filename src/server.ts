@@ -27,7 +27,7 @@ app.use(
   cors({
     origin: process.env.ALLOW_ORIGIN,
     credentials: true,
-    allowedHeaders: "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Dev-Bypass, X-User-Id, X-User-Email, X-User-Role, X-Company-Id, X-Device-Timezone, X-Admin-Token",
+    allowedHeaders: "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Dev-Bypass, X-User-Id, X-User-Email, X-User-Role, X-Company-Id, X-Device-Timezone",
     preflightContinue: false,
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
   })
@@ -79,7 +79,11 @@ app.use("/api/v1/voice", voiceRoute);
 app.use("/api/v1/copilot", estimateRoute); // DEMO-ONLY estimate-cost mode
 app.use("/api/v1/quotes", quoteRoute); // Estimating Agent (chat-as-quote, Draft → Completed)
 app.use("/api/v1/companies", companyRoute); // Hidden company registration (URL-only access)
-app.use("/api/v1/admin", adminRoute); // Internal Clara-team config (X-Admin-Token required)
+// Internal Clara-team config console. Deliberately unauthenticated with a non-obvious
+// path, same pattern as the hidden company registration above — access is by knowing
+// the URL. ponytail: obscurity-only by explicit owner decision; add real auth if this
+// ever holds more than internal config.
+app.use("/api/v1/op-x7k2", adminRoute);
 
 // Health check
 app.get("/health", (req, res) => {

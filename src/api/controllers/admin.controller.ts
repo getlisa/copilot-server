@@ -4,6 +4,7 @@ import logger from "../../lib/logger";
 import { uploadBufferToS3, publicUrlForKey } from "../../lib/s3";
 import { parsePricebookFile, IngestError, ParsedRow } from "../../copilot/estimating/ingest";
 import { repriceDrafts, repriceLaborDrafts } from "../../copilot/estimating/reprice";
+import { validateDocxTemplate } from "../../copilot/estimating/templates";
 
 /**
  * Internal per-company configuration API (pricebook-config PRD + labor PRD): pricebooks,
@@ -462,12 +463,54 @@ export class AdminController {
     res.json({ success: true, data: templates });
   }
 
-  /** POST /admin/companies/:companyId/templates — {name, renderer?, config?}. */
+  /**
+   * POST /admin/companies/:companyId/templates — multipart: "file" (a .docx template
+   * using the placeholders documented in the admin UI) + name. The template is
+   * compile-checked at upload so a broken tag is rejected here, not on a technician's
+   * download. Without a file, a bare row can still be created for a code renderer
+   * ({name, renderer}).
+   */
   static async createTemplate(req: Request, res: Response) {
     const companyId = companyIdOf(req, res);
     if (!companyId) return;
+    const company = await prisma.companies.findUnique({ where: { id: companyId } });
+    if (!company) return fail(res, 404, "Company not found");
     const name = str(req.body?.name);
     if (!name) return fail(res, 400, "A template name is required");
+
+    const file = (req as Request & { file?: Express.Multer.File }).file;
+    if (file) {
+      if (!file.originalname.toLowerCase().endsWith(".docx"))
+        return fail(res, 422, "A template must be a .docx Word file");
+      const problem = validateDocxTemplate(file.buffer);
+      if (problem) return fail(res, 422, `Template has invalid placeholders: ${problem}`);
+      const key = `companies/templates/${companyId}/${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]+/g, "-")}`;
+      try {
+        await uploadBufferToS3({
+          key,
+          buffer: file.buffer,
+          contentType:
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        });
+      } catch (err) {
+        logger.error("Template upload to S3 failed", {
+          companyId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return fail(res, 502, "Template upload failed — try again");
+      }
+      const template = await prisma.quoteTemplate.create({
+        data: {
+          companyId,
+          name,
+          renderer: "docx",
+          config: { s3Key: key, originalFilename: file.originalname },
+        },
+      });
+      logger.info("Custom docx template uploaded", { companyId, templateId: template.id, name });
+      return res.status(201).json({ success: true, data: template });
+    }
+
     const renderer = str(req.body?.renderer) ?? "invoice";
     const template = await prisma.quoteTemplate.create({
       data: {
@@ -478,6 +521,20 @@ export class AdminController {
       },
     });
     res.status(201).json({ success: true, data: template });
+  }
+
+  /**
+   * DELETE /admin/templates/:id — removes the template row. Quotes stamped with it keep
+   * their stamp and fall back to the default invoice at render time; new quotes stop
+   * using it (if it was active, the company reverts to the default).
+   */
+  static async deleteTemplate(req: Request, res: Response) {
+    const id = Number(req.params.id);
+    const template = await prisma.quoteTemplate.findUnique({ where: { id } });
+    if (!template) return fail(res, 404, "Template not found");
+    await prisma.quoteTemplate.delete({ where: { id } });
+    logger.info("Template deleted", { templateId: id, companyId: template.companyId });
+    res.json({ success: true, data: { deleted: true } });
   }
 
   // ---------- conversations (estimate chats) ----------

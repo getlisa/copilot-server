@@ -1,16 +1,14 @@
 import { Router } from "express";
 import multer from "multer";
-import { adminAuth } from "../middlewares/adminAuth";
 import { imageUpload } from "../middlewares/imageUpload";
 import { AdminController } from "../controllers/admin.controller";
 
 /**
- * Internal Clara-team configuration API — the PRDs' backend mechanism. Everything here
- * requires the X-Admin-Token header (see adminAuth); nothing is reachable with a
- * technician JWT.
+ * Internal Clara-team configuration API — the PRDs' backend mechanism. Mounted under a
+ * non-obvious path (see server.ts) and deliberately unauthenticated, the same hidden-URL
+ * pattern as company registration. Never link to it from any user-facing surface.
  */
 const adminRoute = Router();
-adminRoute.use(adminAuth);
 
 // Pricebook files: parsed in memory, validated by format inside ingest.ts.
 const pricebookUpload = multer({
@@ -43,7 +41,12 @@ adminRoute.patch("/labor-rates/:id", AdminController.updateLaborRate);
 adminRoute.delete("/labor-rates/:id", AdminController.deleteLaborRate);
 
 adminRoute.get("/companies/:companyId/templates", AdminController.listTemplates);
-adminRoute.post("/companies/:companyId/templates", AdminController.createTemplate);
+adminRoute.post(
+  "/companies/:companyId/templates",
+  pricebookUpload.single("file"), // .docx template file; validated in the controller
+  AdminController.createTemplate
+);
+adminRoute.delete("/templates/:id", AdminController.deleteTemplate);
 
 adminRoute.get("/companies/:companyId/conversations", AdminController.listConversations);
 adminRoute.delete("/companies/:companyId/conversations", AdminController.deleteConversations);
