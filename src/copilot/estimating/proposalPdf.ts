@@ -164,7 +164,6 @@ export async function buildProposalPdf(input: ProposalInput): Promise<Buffer> {
 
       sectionHeader("PREPARED BY:");
       para(header.companyName, { bold: true });
-      if (header.companyAddress) para(header.companyAddress);
       if (header.companyPhone) para(header.companyPhone);
       if (header.companyEmail) para(header.companyEmail);
       if (header.licenseNumber) para(`Contractor License: ${header.licenseNumber}`);

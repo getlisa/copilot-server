@@ -446,9 +446,6 @@ export async function buildProposalDocx(input: ProposalInput): Promise<Buffer> {
 
           sectionHeader("PREPARED BY:"),
           new Paragraph({ children: [new TextRun({ text: header.companyName, bold: true })] }),
-          ...(header.companyAddress
-            ? [new Paragraph({ children: [new TextRun({ text: header.companyAddress })] })]
-            : []),
           ...(header.companyPhone
             ? [new Paragraph({ children: [new TextRun({ text: header.companyPhone })] })]
             : []),
