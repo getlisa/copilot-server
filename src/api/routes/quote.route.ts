@@ -13,6 +13,7 @@ quoteRoute.use(authMiddleware);
 quoteRoute.post("/", QuoteController.create);
 quoteRoute.get("/", QuoteController.list);
 quoteRoute.get("/:quoteId", QuoteController.get);
+quoteRoute.patch("/:quoteId", QuoteController.updateQuote);
 quoteRoute.post("/:quoteId/messages", QuoteController.sendMessage);
 quoteRoute.post("/:quoteId/items", QuoteController.addItem);
 quoteRoute.patch("/:quoteId/items/:itemId", QuoteController.updateItem);

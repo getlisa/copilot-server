@@ -9,7 +9,7 @@ import {
 import { dedupeSharedRows, matchPricebook } from "../../copilot/estimating/pricebookMatch";
 import { pricebookRowsFor, resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
 import { packAwareQuantity, unitsCompatible } from "../../copilot/estimating/packMath";
-import { toQuoteDto, toLineItemDto, ESTIMATED_PRICE_CODE, type CatalogIndex } from "../../copilot/estimating/quoteDto";
+import { toQuoteDto, toLineItemDto, stripMarkup, ESTIMATED_PRICE_CODE, type CatalogIndex } from "../../copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
 import { buildProposalDocx, type ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { buildProposalPdf } from "../../copilot/estimating/proposalPdf";
@@ -465,6 +465,40 @@ export class QuoteController {
     });
   }
 
+  /**
+   * PATCH /api/v1/quotes/:quoteId — quote-level fields. Currently the materials markup
+   * percentage, which the technician sets on the Invoice tab or states in the chat.
+   *
+   * Markup is stored as a percentage and applied on every read, never written into the line
+   * items, so setting it re-prices every material line at once and any line added afterwards
+   * picks it up with no extra action.
+   */
+  static async updateQuote(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
+
+    const { markupPercent } = req.body ?? {};
+    if (markupPercent === undefined) return fail(res, 400, "Nothing to update");
+    if (typeof markupPercent !== "number" || !Number.isFinite(markupPercent))
+      return fail(res, 400, "markupPercent must be a number");
+    // Floored at 0 on purpose: a negative markup is a discount, and a percentage-off workflow
+    // is an explicit non-goal — allowing it here would reopen that through a side door.
+    if (markupPercent < 0) return fail(res, 400, "markupPercent cannot be negative");
+    // Not a product sanity bound (there deliberately isn't one yet) — this is the column's own
+    // limit, Decimal(5,2), rejected here so it fails with a message instead of a Prisma error.
+    if (markupPercent > 999.99) return fail(res, 400, "markupPercent cannot exceed 999.99");
+
+    await prisma.quote.update({
+      where: { id: quote.id },
+      data: { markupPercent },
+    });
+    const updated = await loadOwnedQuote(quote.id, user.userId);
+    res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
+  }
+
   /** POST /api/v1/quotes/:quoteId/items — manual add (US6). */
   static async addItem(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
@@ -475,8 +509,14 @@ export class QuoteController {
     const { description, quantity, unit, unitPrice, totalPrice } = req.body ?? {};
     if (!description || typeof description !== "string")
       return fail(res, 400, "description is required");
+    const isLabor = req.body?.isLabor === true;
 
     const manualPrice = unitPrice != null || totalPrice != null;
+    // Prices in the UI are shown marked up and submitted as shown, but the column stores base
+    // prices — divide the markup back out before it is stored (see stripMarkup).
+    const markup = Number(quote.markupPercent ?? 0);
+    const basePrice = (v: unknown) =>
+      typeof v === "number" ? stripMarkup(v, markup, isLabor) : null;
     // No manual price → same pricebook matching as a spoken item (US6).
     const match = manualPrice ? null : (await matcherFor(user.companyId))(description);
     const nextSort =
@@ -496,16 +536,23 @@ export class QuoteController {
         description,
         quantity: addQty.quantity,
         unit: addUnit,
-        unitPrice: unitPrice ?? match?.unitPrice ?? null,
-        totalPrice: totalPrice ?? null,
+        unitPrice: basePrice(unitPrice) ?? match?.unitPrice ?? null,
+        totalPrice: basePrice(totalPrice),
         pricebookCode: match?.code ?? null,
+        isLabor,
         manuallyEdited: manualPrice,
         sortOrder: nextSort,
       },
     });
     res.status(201).json({
       success: true,
-      data: toLineItemDto(item, await catalogFor({ companyId: user.companyId, lineItems: [item] })),
+      // Marked up like every other read, or the new line would show a bare cost price until
+      // the next full refetch of the quote.
+      data: toLineItemDto(
+        item,
+        await catalogFor({ companyId: user.companyId, lineItems: [item] }),
+        markup
+      ),
     });
   }
 
@@ -550,6 +597,14 @@ export class QuoteController {
 
     const data: Record<string, unknown> = {};
     if (body.confirm === true) data.agentSuggested = false;
+    // A misclassified line is correctable here: markup skips labor, so getting this wrong is
+    // the difference between a marked-up and a cost-price line.
+    if (typeof body.isLabor === "boolean") data.isLabor = body.isLabor;
+    // The price fields showed a marked-up figure and submit what they showed, so recover the
+    // base price. `item.isLabor` is what the field was rendered from, even if this same request
+    // also reclassifies the line.
+    const toBase = (v: number) =>
+      stripMarkup(v, Number(quote.markupPercent ?? 0), item.isLabor);
     if (typeof body.description === "string" && body.description !== item.description) {
       data.description = body.description;
       // Edited description on an unmatched, un-priced item → try matching again.
@@ -564,13 +619,14 @@ export class QuoteController {
     if (body.unit !== undefined) data.unit = body.unit;
     // Manual price entry is used as-is, skips pricebook, and is flagged (US6).
     if (body.unitPrice !== undefined) {
-      data.unitPrice = body.unitPrice;
+      data.unitPrice = body.unitPrice == null ? null : toBase(body.unitPrice);
       data.manuallyEdited = true;
       // The technician's own number retires any web-search estimate.
       if (item.pricebookCode === ESTIMATED_PRICE_CODE) data.pricebookCode = null;
     }
     if (body.totalPrice !== undefined) {
-      data.totalPrice = body.totalPrice; // not required to equal qty × unit price
+      // not required to equal qty × unit price
+      data.totalPrice = body.totalPrice == null ? null : toBase(body.totalPrice);
       data.manuallyEdited = true;
       if (item.pricebookCode === ESTIMATED_PRICE_CODE) data.pricebookCode = null;
     }

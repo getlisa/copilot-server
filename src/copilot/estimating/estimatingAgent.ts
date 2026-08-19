@@ -56,8 +56,16 @@ interface AgentOp {
   /**
    * Technician-STATED price only — labor rates and other prices the catalog cannot know.
    * Never model-invented and never used for materials, which are priced downstream.
+   *
+   * Always a BASE price, even when the quote carries a markup: a technician stating a rate in
+   * conversation is telling us their cost, not a marked-up customer price.
    */
   unitPrice: number | null;
+  /**
+   * This line is labor/diagnostic time, not a purchasable material. The quote's markup applies
+   * to materials only, so this is what keeps labor out of it. Pairs with a null searchTerm.
+   */
+  isLabor: boolean | null;
   action: "remove" | "update" | null;
   candidateItemIds: string[] | null;
   referenceText: string | null;
@@ -71,12 +79,25 @@ interface AgentQuestion {
 
 interface AgentOutput {
   operations: AgentOp[];
+  /**
+   * A materials markup percentage the technician stated this turn, else null. Carried beside
+   * the operations rather than as another op type because the op schema is strict with every
+   * property required — a new op would force a new required field onto every other op.
+   */
+  markupPercent: number | null;
   reply: string;
   isFollowUpQuestion: boolean;
   questions: AgentQuestion[] | null;
 }
 
 const nullable = (t: string) => ({ type: [t, "null"] });
+
+/**
+ * Appended to the system prompt: how a stated markup percentage becomes markupPercent.
+ * Kept as its own block because it is about a quote-level field, not a line-item operation.
+ */
+const MARKUP_PROMPT = `
+MATERIALS MARKUP. The quote carries one markup percentage that applies to every material line. When the technician states one ("mark it up 20 percent", "add a 15% markup", "make the markup 10"), set markupPercent to that number — 20 for 20%, not 0.2 — and leave it null on every turn where they do not. Setting it replaces any previous value; it is one number for the whole quote, never per line, so never emit line-item operations to apply a markup yourself. A stated 0 clears it. Never invent or suggest a percentage they did not say, and never treat a negative number as a markup: if they ask for a discount or a negative markup, set markupPercent null and say in your reply that markup cannot go below 0%. A price the technician states for a line is always their own cost or rate, never a marked-up figure, so a markup being set changes nothing about how you record it.`;
 
 const TURN_JSON_SCHEMA = {
   name: "estimating_turn",
@@ -108,6 +129,7 @@ const TURN_JSON_SCHEMA = {
             quantity: nullable("number"),
             unit: nullable("string"),
             unitPrice: nullable("number"),
+            isLabor: { type: ["boolean", "null"] },
             action: { type: ["string", "null"], enum: ["remove", "update", null] },
             candidateItemIds: {
               type: ["array", "null"],
@@ -125,6 +147,7 @@ const TURN_JSON_SCHEMA = {
             "quantity",
             "unit",
             "unitPrice",
+            "isLabor",
             "action",
             "candidateItemIds",
             "referenceText",
@@ -132,6 +155,7 @@ const TURN_JSON_SCHEMA = {
           ],
         },
       },
+      markupPercent: nullable("number"),
       reply: { type: "string" },
       isFollowUpQuestion: { type: "boolean" },
       questions: {
@@ -147,7 +171,7 @@ const TURN_JSON_SCHEMA = {
         },
       },
     },
-    required: ["operations", "reply", "isFollowUpQuestion", "questions"],
+    required: ["operations", "markupPercent", "reply", "isFollowUpQuestion", "questions"],
   },
 };
 
@@ -175,7 +199,7 @@ Rules:
   - "Accessible junction box(es) and cover(s), as needed"          → searchTerm "4 in square junction box"
   - "Wire connectors / repair consumables, as needed"              → searchTerm "wire connectors"
   - "Conduit for EV charger circuit"                               → searchTerm "3/4 in EMT conduit"
-  - If a line is genuinely pure labor, diagnosis, or testing with no material to buy, set searchTerm null — it is not a purchasable part and must not be priced as one.
+  - If a line is genuinely pure labor, diagnosis, or testing with no material to buy, set searchTerm null — it is not a purchasable part and must not be priced as one. Set isLabor true on exactly those lines, and on nothing else: the quote's markup percentage is applied to materials only, so a labor line marked isLabor false gets marked up as if it were a part. Every line naming something purchasable is isLabor false.
   - Same for workmanship/consumables allowances that name no product: "Terminations and feeder makeup" → searchTerm null. No supplier lists "makeup"; price it as a technician-stated allowance or fold it into labor instead.
   - A labor line still needs a price no catalog can supply: NEVER add a labor line without a technician-stated price. If they haven't given their rate, ask via the questions array (like a missing quantity — options with common rates, e.g. "$95/hr" / "$125/hr" / "$150/hr", the UI adds an "Other" box), then emit the line with unitPrice from their answer: rate per HR with hours as quantity, or a flat price with quantity 1. Never invent a labor rate; this question is exempt from the follow-up round cap. unitPrice stays null on every material line — materials are priced downstream.
 - LABOR IS PART OF EVERY SCOPED JOB. This rule applies when YOU scope a described job (the CLARIFY/PROPOSE/CONFIRM flow below); it does NOT apply when the technician is simply dictating specific materials or the request genuinely has no work to perform (a parts-only/supply quote) — never inject labor into a list they are building themselves. A job you scope for install/repair/replacement work is INCOMPLETE without at least one labor line — the technician never mentions labor themselves; asking is your job. When you propose an itemized list, always include the labor line(s): hours as quantity, the technician's hourly rate as unitPrice. If rate or hours are unknown, ask for BOTH in the questions array (exempt from the follow-up round cap, like the rate rule above). SCALE the hour options to the scope instead of defaulting small — a small repair is 2-8 hr, a panel/service change 16-32 hr, an industrial motor/feeder job 80-200 hr, a whole-house rewire 60-120 hr — and put a realistic mid value among the options, not as "Other". Never emit the final add_items for a scoped job without its labor line — with ONE exception: the technician explicitly declining labor ("no labor line", "materials only", "labor is separate") is their call. Honor it, don't re-ask, and don't sneak labor back in on a later turn; a declined labor line stays out until they ask for it.
@@ -320,7 +344,7 @@ export async function runEstimatingTurn(opts: {
   const catalog = new Map(pricebook.map((p) => [p.code, p]));
   const turnContext = buildTurnContext(items, kbEntries, opts.followUpsAsked, opts.utterance, catalog);
   const { raw } = await callStructured({
-    system: SYSTEM_PROMPT,
+    system: SYSTEM_PROMPT + MARKUP_PROMPT,
     userContent: opts.imageUrls?.length
       ? [
           { type: "text", text: turnContext },
@@ -468,6 +492,7 @@ export async function runEstimatingTurn(opts: {
                 unit: op.unit,
                 unitPrice: op.unitPrice,
                 optionGroup: op.optionGroup?.trim() || null,
+                isLabor: op.isLabor === true,
                 manuallyEdited: true,
                 sortOrder: nextSort++,
               },
@@ -512,6 +537,7 @@ export async function runEstimatingTurn(opts: {
               unitPrice: priced.unitPrice,
               pricebookCode: priced.pricebookCode,
               optionGroup: op.optionGroup?.trim() || null,
+              isLabor: op.isLabor === true,
               sortOrder: nextSort++,
             },
           });
@@ -551,6 +577,7 @@ export async function runEstimatingTurn(opts: {
               unitPrice: priced.unitPrice,
               pricebookCode: priced.pricebookCode,
               optionGroup: op.optionGroup?.trim() || null,
+              isLabor: op.isLabor === true,
               agentSuggested: true,
               sortOrder: nextSort++,
             },
@@ -568,6 +595,7 @@ export async function runEstimatingTurn(opts: {
             data.unitPrice = op.unitPrice;
             data.manuallyEdited = true;
           }
+          if (op.isLabor != null) data.isLabor = op.isLabor;
           let repriced: ReturnType<typeof priceFields> | null = null;
           if (op.description != null && op.description !== existing.description) {
             data.description = op.description;
@@ -651,6 +679,18 @@ export async function runEstimatingTurn(opts: {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // A markup stated in the chat and one typed on the Invoice tab are the same single value on
+  // the quote, so this writes the same column the PATCH endpoint does. Negatives are refused
+  // rather than clamped to 0: silently turning "mark it down 10%" into "no markup" would look
+  // like the request was honoured.
+  const stated = output.markupPercent;
+  if (typeof stated === "number" && Number.isFinite(stated) && stated >= 0 && stated <= 999.99) {
+    await prisma.quote.update({
+      where: { id: opts.quoteId },
+      data: { markupPercent: stated },
+    });
   }
 
   return {

@@ -11,7 +11,7 @@
     "check:pricebook": "tsx scripts/check-pricebook-amperage.ts",
     "check:electrical": "tsx scripts/check-electrical-cases.ts",
     "check:catalog": "tsx scripts/check-home-depot-catalog.ts",
-    "test": "npm run typecheck && npm run check:pricebook && npm run check:pack && npm run check:estimatelink && npm run check:proposalphotos && npm run check:proposalemail",
+    "test": "npm run typecheck && npm run check:pricebook && npm run check:pack && npm run check:estimatelink && npm run check:markup && npm run check:proposalphotos && npm run check:proposalemail",
     "check:proposalphotos": "tsx scripts/check-proposal-photos.ts",
     "check:proposalemail": "tsx scripts/check-proposal-email.ts",
     "db:generate": "prisma generate",
@@ -22,7 +22,8 @@
     "postinstall": "prisma generate",
     "check:pack": "tsx scripts/check-pack-parsing.ts",
     "check:options": "tsx scripts/check-option-totals.ts",
-    "check:estimatelink": "tsx scripts/check-estimate-link.ts"
+    "check:estimatelink": "tsx scripts/check-estimate-link.ts",
+    "check:markup": "tsx scripts/check-markup.ts"
   },
   "keywords": [],
   "author": "",

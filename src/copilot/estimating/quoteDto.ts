@@ -51,6 +51,11 @@ export interface LineItemDto {
   unitPrice: number | null;
   totalPrice: number | null;
   pricebookCode: string | null;
+  /**
+   * Labor/diagnostic time rather than a purchasable material. The quote's markup percentage
+   * applies to materials only, so this flag is what keeps labor out of it.
+   */
+  isLabor: boolean;
   /** Null when the line is unpriced or priced from the company's own book. */
   product: LineItemProduct | null;
   /**
@@ -90,9 +95,15 @@ export interface QuoteDto {
   completedAt: string | null;
   lineItems: LineItemDto[];
   /**
-   * Base-scope lines only. Option-group lines are alternatives the customer picks between,
-   * so they are NEVER part of this sum — see optionTotals. With no option groups this is
-   * simply the sum of every line, as before.
+   * The quote's materials markup percentage, for the Invoice tab's input field. Every price in
+   * `lineItems` already has it applied, so nothing downstream should multiply by this again.
+   * Deliberately the only markup number in the DTO: the PRD wants markup baked into line
+   * prices with no subtotal → markup → total breakdown and no pre-markup price shown anywhere.
+   */
+  markupPercent: number;
+  /**
+   * Base-scope lines only, at their marked-up prices. Option-group lines are alternatives the
+   * customer picks between, so they are NEVER part of this sum — see optionTotals.
    */
   total: number;
   /** Present (non-empty) only when the quote carries alternative option groups. */
@@ -101,6 +112,8 @@ export interface QuoteDto {
 }
 
 const num = (v: unknown): number | null => (v == null ? null : Number(v));
+
+const round2 = (v: number) => Math.round(v * 100) / 100;
 
 /**
  * Sentinel pricebook code for a line priced by web search instead of the catalog.
@@ -142,6 +155,53 @@ export function effectiveTotal(item: QuoteLineItem): number | null {
 }
 
 /**
+ * The line's prices with a markup percentage applied. This is the ONE place markup arithmetic
+ * happens; every total in this file sums marked-up line totals from here, so the app's total
+ * and a document's printed line prices can never disagree.
+ *
+ * Labor is returned untouched — that boundary is the whole point of the feature. A zero
+ * markup returns exactly what `unitPrice`/`effectiveTotal` return today.
+ *
+ * The unit price is marked up and rounded to cents FIRST, then multiplied by the quantity, so
+ * a printed row always multiplies out: a technician who sees 3 × $12.10 must read $36.30. A
+ * manually entered line total is marked up directly, keeping the same precedence
+ * `effectiveTotal` uses — a hand-typed total deliberately isn't qty × unit price.
+ *
+ * That precedence is restated here rather than delegated, because the rounding has to happen
+ * per unit before the multiply. check-markup.ts pins the two together: at 0% markup this must
+ * return exactly what `effectiveTotal` does, so the pair cannot drift apart unnoticed.
+ */
+export function markedUpPrices(
+  item: QuoteLineItem,
+  markupPercent: number
+): { unitPrice: number | null; totalPrice: number | null } {
+  const m = item.isLabor ? 1 : 1 + markupPercent / 100;
+  const baseUnit = num(item.unitPrice);
+  const unitPrice = baseUnit == null ? null : round2(baseUnit * m);
+  const manualTotal = num(item.totalPrice);
+  if (manualTotal != null) return { unitPrice, totalPrice: round2(manualTotal * m) };
+  const qty = num(item.quantity);
+  if (qty != null && unitPrice != null) return { unitPrice, totalPrice: round2(qty * unitPrice) };
+  return { unitPrice, totalPrice: null };
+}
+
+/**
+ * Inverse of `markedUpPrices` for ONE price submitted by a client.
+ *
+ * The Invoice tab's price fields display marked-up figures and commit exactly what they
+ * display, while the column stores BASE prices. Without this the marked-up figure would be
+ * stored as the new base and marked up again on the next read, compounding on every edit.
+ *
+ * Rounds to cents because the column is Decimal(12,2), so a hand-typed price can re-display a
+ * cent off. That is the accepted cost of the PRD's rule that no pre-markup price is shown
+ * anywhere, which leaves the marked-up field as the only place a price can be edited.
+ */
+export function stripMarkup(value: number, markupPercent: number, isLabor = false): number {
+  if (isLabor || !markupPercent) return value;
+  return round2(value / (1 + markupPercent / 100));
+}
+
+/**
  * Catalog rows keyed by pricebook code, so a line can carry its product link.
  * Optional throughout: callers that don't supply it simply get `product: null`, which keeps
  * every existing call site working unchanged.
@@ -162,15 +222,29 @@ function productFor(item: QuoteLineItem, catalog?: CatalogIndex): LineItemProduc
   };
 }
 
-export function toLineItemDto(item: QuoteLineItem, catalog?: CatalogIndex): LineItemDto {
+/**
+ * `markupPercent` defaults to 0 only for callers that serialize a line without its quote in
+ * hand; every real read goes through `toQuoteDto`, which passes the quote's actual percentage.
+ * Marked-up prices are what the review screen and the documents alike are meant to show.
+ *
+ * Because those prices are also what the editable fields commit back, the write side has to
+ * undo this — see `stripMarkup`.
+ */
+export function toLineItemDto(
+  item: QuoteLineItem,
+  catalog?: CatalogIndex,
+  markupPercent = 0
+): LineItemDto {
+  const prices = markedUpPrices(item, markupPercent);
   return {
     id: item.id,
     description: item.description,
     quantity: num(item.quantity),
     unit: item.unit,
-    unitPrice: num(item.unitPrice),
-    totalPrice: effectiveTotal(item),
+    unitPrice: prices.unitPrice,
+    totalPrice: prices.totalPrice,
     pricebookCode: item.pricebookCode,
+    isLabor: item.isLabor,
     product: productFor(item, catalog),
     // Kept separate from `product`, which means "verified catalog row". An estimate is neither
     // verified nor a row, and a client that renders them identically would erase the difference.
@@ -183,14 +257,16 @@ export function toLineItemDto(item: QuoteLineItem, catalog?: CatalogIndex): Line
   };
 }
 
-const round2 = (v: number) => Math.round(v * 100) / 100;
-
 export function toQuoteDto(
   quote: Quote & { lineItems: QuoteLineItem[] },
   catalog?: CatalogIndex
 ): QuoteDto {
   const items = [...quote.lineItems].sort((a, b) => a.sortOrder - b.sortOrder);
-  const dtos = items.map((i) => toLineItemDto(i, catalog));
+  // Markup is a live multiplier, not a stored snapshot: it is applied here, on every read, so
+  // a line added after the percentage was set gets it with no extra action and a changed
+  // percentage re-reflects on every line at once. Labor lines pass through untouched.
+  const markupPercent = Number(quote.markupPercent ?? 0);
+  const dtos = items.map((i) => toLineItemDto(i, catalog, markupPercent));
   // Option groups are mutually exclusive alternatives: `total` covers base-scope lines only
   // and each group gets its own total. Summing alternatives billed customers for both —
   // observed on two real option-based quotes ($6,591 printed for a $3,430-or-$4,430 choice).
@@ -212,6 +288,7 @@ export function toQuoteDto(
     updatedAt: quote.updatedAt.toISOString(),
     completedAt: quote.completedAt?.toISOString() ?? null,
     lineItems: dtos,
+    markupPercent,
     total: baseTotal,
     optionTotals,
     blockingFlagCount: dtos.filter((d) =>

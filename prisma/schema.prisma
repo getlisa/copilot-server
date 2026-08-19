@@ -347,6 +347,10 @@ model Quote {
   userId         BigInt          @map("user_id")
   companyId      Int             @map("company_id")
   status         QuoteStatus     @default(DRAFT)
+  /// Per-quote materials markup, as a percentage. Applies to MATERIAL lines only — labor is
+  /// never marked up (isLabor). 0 = no markup. Editable while DRAFT, frozen on COMPLETED.
+  /// Deliberately per-quote: there is no client-level default markup anywhere in the product.
+  markupPercent  Decimal         @default(0) @map("markup_percent") @db.Decimal(5, 2)
   createdAt      DateTime        @default(now()) @map("created_at")
   updatedAt      DateTime        @updatedAt @map("updated_at")
   completedAt    DateTime?       @map("completed_at")
@@ -375,6 +379,11 @@ model QuoteLineItem {
   /// different option groups are mutually exclusive alternatives: totals are computed per
   /// group and NEVER summed across groups — a customer picks one.
   optionGroup     String?  @map("option_group")
+  /// Labor/diagnostic time rather than a purchasable material. The quote's markup percentage
+  /// applies to materials ONLY, so this is the boundary that keeps labor out of it. Defaults
+  /// to false: a line is a material unless something says otherwise. Set by the agent when it
+  /// emits a labor line, and correctable by the technician on the Invoice tab.
+  isLabor         Boolean  @default(false) @map("is_labor")
   agentSuggested  Boolean  @default(false) @map("agent_suggested")
   manuallyEdited  Boolean  @default(false) @map("manually_edited")
   /// Pending ambiguous reference: { action: "remove"|"update", candidateItemIds: string[], referenceText: string, fields?: object }
