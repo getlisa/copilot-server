@@ -18,11 +18,21 @@ async function main() {
   );
   console.log("quote_line_items.is_labor: OK");
 
-  // Existing rows all default to is_labor = false, i.e. "material". Labor lines already on an
-  // open Draft would therefore be marked up. Backfill the one shape that is unambiguously
-  // labor today: the agent emits a null search_term precisely when a line has nothing to buy
-  // (see estimatingAgent priceFields), and pairs it with a technician-stated price. A material
-  // line always either carries a search_term or is still waiting to be priced.
+  // Existing rows all default to is_labor = false, i.e. "material", so labor lines already on
+  // an open Draft would be marked up. This backfills the shape that is USUALLY labor: the agent
+  // emits a null search_term precisely when a line has nothing to buy (see estimatingAgent
+  // priceFields) and pairs it with a technician-stated rate, which is how every labor line it
+  // has ever created looks.
+  //
+  // It is a heuristic, not a proof, and it has a known false positive: a line hand-added
+  // through addItem with a typed price has no search_term and no pricebook_code either, so a
+  // hand-priced MATERIAL matches this too and is flipped to labor. That errs toward
+  // undercharging, which is the direction that hides — the Material/Labor chip on the Invoice
+  // tab is the fix, and it is why that chip exists.
+  //
+  // Accepted here because every existing quote has markup_percent = 0 at migration time, so
+  // nothing re-prices until someone sets a markup on one of them. Drop this UPDATE if you would
+  // rather start from "everything is a material" and classify by hand.
   const backfilled = await prisma.$executeRawUnsafe(
     `UPDATE quote_line_items
         SET is_labor = TRUE
