@@ -845,17 +845,9 @@ export class QuoteController {
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
 
-    const { header, input, unpricedCount } = await buildProposalParts(quote);
-    // Sending is the customer-facing point of no return. A proposal with unpriced lines
-    // prints a total that silently omits them — a real quote went out at labor + $37 of
-    // materials for a contactor-replacement job. Download/draft still work (the document
-    // carries a visible warning); sending is blocked until every line is priced or removed.
-    if (unpricedCount > 0)
-      return fail(
-        res,
-        409,
-        `${unpricedCount} line item(s) have no price yet — the proposal total would be wrong. Price or remove them before sending.`
-      );
+    const { header, input } = await buildProposalParts(quote);
+    // Unpriced lines no longer block sending — the attached PDF prints a visible
+    // "NOT included in the total" note for them (proposalPdf.ts), which is the guard.
     const buffer = await buildProposalPdf(input);
     await sendEmail({
       to,
