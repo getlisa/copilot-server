@@ -8,7 +8,7 @@
  */
 import { toQuoteDto } from "../src/copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../src/copilot/estimating/quoteDocx";
-import { scrubAddressFromTitle } from "../src/copilot/estimating/proposalNarrative";
+import { scrubAddressFromTitle } from "../src/copilot/estimating/scrubAddress";
 
 const now = new Date();
 

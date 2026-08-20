@@ -10,10 +10,8 @@ import { toQuoteDto, toLineItemDto, stripMarkup, ESTIMATED_PRICE_CODE, type Cata
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
 import { buildProposalDocx, type ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { buildProposalPdf } from "../../copilot/estimating/proposalPdf";
-import {
-  generateProposalNarrative,
-  scrubAddressFromTitle,
-} from "../../copilot/estimating/proposalNarrative";
+import { generateProposalNarrative } from "../../copilot/estimating/proposalNarrative";
+import { scrubAddressFromTitle } from "../../copilot/estimating/scrubAddress";
 import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating/proposalEmail";
 import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
 import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
