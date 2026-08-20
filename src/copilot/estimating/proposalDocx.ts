@@ -35,7 +35,6 @@ export interface ProposalOptionTotal {
 export interface ProposalInput {
   header: QuoteHeader;
   projectTitle: string;
-  projectAddress: string;
   date: Date;
   /** Numbered DETAILED SCOPE OF WORK sections describing the work to be performed. */
   scopeSections: ProposalScopeSection[];
@@ -292,7 +291,8 @@ export async function buildProposalDocx(input: ProposalInput): Promise<Buffer> {
           centered([new TextRun({ text: "Bid Proposal", bold: true, size: 32 })]),
           // --- Project block ---
           centered([new TextRun({ text: `Project: ${input.projectTitle}`, bold: true })]),
-          ...(input.projectAddress ? [centered([new TextRun({ text: input.projectAddress })])] : []),
+          // The address prints once, in the Customer line below — a second copy directly
+          // under the title read as part of the project name.
           centered([new TextRun({ text: `Customer: ${customerLine}`, bold: true })]),
           centered([new TextRun({ text: `Contractor: ${header.companyName}`, bold: true })]),
           centered([new TextRun({ text: `Date: ${dateText}`, bold: true })]),

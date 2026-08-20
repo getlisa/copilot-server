@@ -120,7 +120,6 @@ export function renderProposalHtml(header: QuoteHeader, body: string): string {
   <div style="font-family:Helvetica,Arial,sans-serif;max-width:640px;margin:0 auto;color:${INK};">
     <div style="border-bottom:3px solid ${BRAND};padding:16px 0;">
       <div style="font-size:20px;font-weight:bold;color:${BRAND};">${esc(company)}</div>
-      <div style="font-size:12px;color:${MUTED};">${esc(header.companyAddress || "")}</div>
     </div>
 
     <div style="font-size:14px;line-height:1.6;white-space:pre-wrap;margin-top:14px;">${esc(body)}</div>

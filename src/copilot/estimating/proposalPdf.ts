@@ -88,7 +88,8 @@ export async function buildProposalPdf(input: ProposalInput): Promise<Buffer> {
       centered("Bid Proposal", { bold: true, size: 18 });
       doc.moveDown(0.4);
       centered(`Project: ${input.projectTitle}`, { bold: true });
-      if (input.projectAddress) centered(input.projectAddress);
+      // The address prints once, in the Customer line — a second copy directly under the
+      // title read as part of the project name.
       centered(`Customer: ${customerLine}`, { bold: true });
       centered(`Contractor: ${header.companyName}`, { bold: true });
       centered(`Date: ${dateText}`, { bold: true });

@@ -10,7 +10,10 @@ import { toQuoteDto, toLineItemDto, stripMarkup, ESTIMATED_PRICE_CODE, type Cata
 import { buildQuoteDocx } from "../../copilot/estimating/quoteDocx";
 import { buildProposalDocx, type ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { buildProposalPdf } from "../../copilot/estimating/proposalPdf";
-import { generateProposalNarrative } from "../../copilot/estimating/proposalNarrative";
+import {
+  generateProposalNarrative,
+  scrubAddressFromTitle,
+} from "../../copilot/estimating/proposalNarrative";
 import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating/proposalEmail";
 import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
 import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
@@ -180,11 +183,19 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     (header.customerName !== "Customer"
       ? header.customerName
       : narrative?.project.customerName ?? header.customerName);
+  // The title names the WORK only — an address in it would print on the documents and land in
+  // the email subject/greeting. The prompt forbids it and this scrub enforces it; a title the
+  // scrub empties falls through to the same defaults as no title at all.
+  const scrubbedTitle = narrative?.project.title
+    ? scrubAddressFromTitle(narrative.project.title, [
+        quote.customerAddress,
+        header.serviceAddress,
+        header.billingAddress,
+        narrative.project.siteAddress,
+      ])
+    : null;
   const projectTitle =
-    narrative?.project.title ??
-    (customerName !== "Customer" ? `Work for ${customerName}` : "Scope of Work");
-  const projectAddress =
-    quote.customerAddress || header.serviceAddress || narrative?.project.siteAddress || "";
+    scrubbedTitle || (customerName !== "Customer" ? `Work for ${customerName}` : "Scope of Work");
   const unpricedCount = dto.lineItems.filter((i) => i.flags.includes("unmatched")).length;
   // Photos attached in the estimator chat render at the bottom of the proposal.
   const photos = await prisma.imageFile.findMany({
@@ -205,7 +216,6 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
   const input: ProposalInput = {
     header: mergedHeader,
     projectTitle,
-    projectAddress,
     date: new Date(),
     scopeSections: narrative?.scopeSections ?? [
       {

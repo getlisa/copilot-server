@@ -8,6 +8,7 @@
  */
 import { toQuoteDto } from "../src/copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../src/copilot/estimating/quoteDocx";
+import { scrubAddressFromTitle } from "../src/copilot/estimating/proposalNarrative";
 
 const now = new Date();
 
@@ -99,6 +100,33 @@ async function main() {
       process.exit(1);
     }
   }
+
+  // The project title must never carry an address — it prints on documents and in the email.
+  eq(
+    scrubAddressFromTitle("Conduit Installation at 3400 Stockman Rd", ["3400 Stockman Rd"]),
+    "Conduit Installation",
+    "known address scrubbed from title"
+  );
+  eq(
+    scrubAddressFromTitle("Rewire — 236 West 27th Street", []),
+    "Rewire",
+    "street-shaped fragment scrubbed without a known address"
+  );
+  eq(
+    scrubAddressFromTitle("200 Amp Panel Replacement", ["3400 Stockman Rd"]),
+    "200 Amp Panel Replacement",
+    "spec numbers survive the scrub"
+  );
+  eq(
+    scrubAddressFromTitle("Main Street Lighting Upgrade", []),
+    "Main Street Lighting Upgrade",
+    "street word without a leading number survives"
+  );
+  eq(
+    scrubAddressFromTitle("At 42 Oak St", ["42 Oak St"]),
+    "",
+    "title that is only an address empties (caller falls back)"
+  );
 
   console.log(`check-customer-details: ${checks} checks passed`);
 }
