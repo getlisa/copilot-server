@@ -50,7 +50,8 @@ type ImageFile = {
   createdAt?: Date;
   updatedAt?: Date;
   conversationId: string;
-  messageId: string;
+  /** Null for images attached directly to a quote (estimator attach action). */
+  messageId: string | null;
   s3Key: string;
   mimeType: string;
   sizeBytes: bigint | null;
@@ -238,6 +239,9 @@ export class ConversationController {
 
             const byMessage: Record<string, ImageFile[]> = imageFiles.reduce(
               (acc: Record<string, ImageFile[]>, rec: ImageFile) => {
+                // The query above filters on messageId IN (...), so null never matches — this
+                // narrows the type, it doesn't skip data.
+                if (rec.messageId == null) return acc;
                 const arr = acc[rec.messageId] || [];
                 arr.push(rec);
                 acc[rec.messageId] = arr;

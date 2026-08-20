@@ -85,6 +85,14 @@ interface AgentOutput {
    * property required — a new op would force a new required field onto every other op.
    */
   markupPercent: number | null;
+  /**
+   * Customer details the technician stated this turn, else null. Quote-level fields like
+   * markupPercent, carried beside the operations for the same strict-schema reason. Null means
+   * "not mentioned" — a null never clears a stored value.
+   */
+  customerName: string | null;
+  customerAddress: string | null;
+  customerPhone: string | null;
   reply: string;
   isFollowUpQuestion: boolean;
   questions: AgentQuestion[] | null;
@@ -96,6 +104,14 @@ const nullable = (t: string) => ({ type: [t, "null"] });
  * Appended to the system prompt: how a stated markup percentage becomes markupPercent.
  * Kept as its own block because it is about a quote-level field, not a line-item operation.
  */
+/**
+ * Appended to the system prompt: how stated customer details become the customer* fields.
+ * Correction ("actually the address is …") needs no machinery of its own — the corrected value
+ * is simply the one stated this turn, and it replaces the stored one.
+ */
+const CUSTOMER_PROMPT = `
+CUSTOMER DETAILS. The quote carries the customer's name, address, and phone number — all optional, free text. When the technician states one ("this is for John Miller", "the address is 42 Oak Street", "her number is 555-0142"), set customerName / customerAddress / customerPhone to exactly what they said, each independently — one stated field never requires the others, and never ask for the missing ones. Leave a field null on every turn where it is not stated; null never clears a stored value, and a newly stated value replaces the previous one (corrections work the same way). Never invent, guess, or complete a customer detail — no inferring a name from context, no formatting or "fixing" a phone number or address. These are quote-level fields, never line items, so never emit operations for them. Do not confuse the CUSTOMER's details with product, supplier, or company names.`;
+
 const MARKUP_PROMPT = `
 MATERIALS MARKUP. The quote carries one markup percentage that applies to every material line. When the technician states one ("mark it up 20 percent", "add a 15% markup", "make the markup 10"), set markupPercent to that number — 20 for 20%, not 0.2 — and leave it null on every turn where they do not. Setting it replaces any previous value; it is one number for the whole quote, never per line, so never emit line-item operations to apply a markup yourself. A stated 0 clears it. Never invent or suggest a percentage they did not say, and never treat a negative number as a markup: if they ask for a discount or a negative markup, set markupPercent null and say in your reply that markup cannot go below 0%. A price the technician states for a line is always their own cost or rate, never a marked-up figure, so a markup being set changes nothing about how you record it.`;
 
@@ -156,6 +172,9 @@ const TURN_JSON_SCHEMA = {
         },
       },
       markupPercent: nullable("number"),
+      customerName: nullable("string"),
+      customerAddress: nullable("string"),
+      customerPhone: nullable("string"),
       reply: { type: "string" },
       isFollowUpQuestion: { type: "boolean" },
       questions: {
@@ -171,7 +190,16 @@ const TURN_JSON_SCHEMA = {
         },
       },
     },
-    required: ["operations", "markupPercent", "reply", "isFollowUpQuestion", "questions"],
+    required: [
+      "operations",
+      "markupPercent",
+      "customerName",
+      "customerAddress",
+      "customerPhone",
+      "reply",
+      "isFollowUpQuestion",
+      "questions",
+    ],
   },
 };
 
@@ -344,7 +372,7 @@ export async function runEstimatingTurn(opts: {
   const catalog = new Map(pricebook.map((p) => [p.code, p]));
   const turnContext = buildTurnContext(items, kbEntries, opts.followUpsAsked, opts.utterance, catalog);
   const { raw } = await callStructured({
-    system: SYSTEM_PROMPT + MARKUP_PROMPT,
+    system: SYSTEM_PROMPT + MARKUP_PROMPT + CUSTOMER_PROMPT,
     userContent: opts.imageUrls?.length
       ? [
           { type: "text", text: turnContext },
@@ -691,6 +719,20 @@ export async function runEstimatingTurn(opts: {
       where: { id: opts.quoteId },
       data: { markupPercent: stated },
     });
+  }
+
+  // Customer details stated in chat write the same columns the Invoice tab's fields PATCH, so
+  // the two entry paths are one underlying value. Null = not mentioned this turn — a stored
+  // value is only ever replaced, never cleared, by the agent.
+  const customerData: Record<string, string> = {};
+  for (const field of ["customerName", "customerAddress", "customerPhone"] as const) {
+    const value = output[field];
+    if (typeof value === "string" && value.trim()) {
+      customerData[field] = value.trim().slice(0, 500);
+    }
+  }
+  if (Object.keys(customerData).length > 0) {
+    await prisma.quote.update({ where: { id: opts.quoteId }, data: customerData });
   }
 
   return {

@@ -1,9 +1,34 @@
-# Estimator Agent — Customer Details & Materials Markup
+# Estimator Agent — Customer Details, Materials Markup & Image Attachments
 
-Source PRD: [PRD: Estimator Agent — Customer Details & Materials Markup](https://justclara.atlassian.net/wiki/spaces/EA/pages/105709569/PRD+Estimator+Agent+Customer+Details+Materials+Markup)
-(SivaRaman, 2026-08-18).
+Source PRD: [PRD: Estimator Agent — Improvements (Customer Details, Materials Markup and Image attachments)](https://justclara.atlassian.net/wiki/spaces/EA/pages/105709569)
+(SivaRaman, 2026-08-18 — since retitled to add image attachments as a third feature).
 
-**Materials markup: shipped to prod 2026-08-19.** **Customer details: not started** — task list in §3.
+**Status: all three features are CODE-COMPLETE in both repos, and the prod DDL is APPLIED
+(2026-08-20).** Markup backend was already live in prod; the markup frontend UI, customer
+details (server + agent + docs + frontend), and quote-level image attachments (server +
+frontend) are implemented and pass `npm test` (including the new `check:customerdetails`).
+The customer/image columns were applied to prod Aurora on 2026-08-20 via the §1 escalation
+path, this time with the DDL executed through the container's own Prisma client (`node -e` +
+`$executeRawUnsafe`, master creds injected as task-definition secrets) — all four statements
+verified `is_nullable = YES`. The same columns are applied to the dev Supabase DB.
+Remaining: deploy copilot-server → green → technician-copilot, and rotate the Aurora master
+secret (it was handled interactively during this run).
+
+UI decisions (PM, 2026-08-19, from the design canvas
+"Customer Details Entry Options" — Option D): customer details render as a **card at the top of
+the Invoice tab** with three states:
+
+- **Empty:** a single-line card — muted "Add customer details (optional)" text plus a pencil
+  button, nothing else. No "Bill To" label and no empty field rows until data exists.
+- **Display:** "BILL TO" label, the details as printed text (name bold, address, phone; a
+  missing field shows a muted "No phone"-style line), pencil button in the corner.
+- **Edit (via pencil):** the card switches to boxed inputs (Name / Address / Phone); Done or
+  blur commits and returns to display. Pencil hidden when Completed — the card freezes in
+  display state.
+
+Chat/voice capture updates the same card. The **Markup field moves to the top** of the Invoice
+tab, directly below the customer card, labeled "materials only"; only the Total row stays at
+the bottom.
 
 Both features live in `src/copilot/estimating/` (the Estimating Agent: `Quote` /
 `QuoteLineItem`, `DRAFT → COMPLETED`, pricebook + Home Depot fallback, Chat/Invoice tabs).
@@ -155,12 +180,13 @@ should also fix `scripts/add-proposal-email-template.ts`, which cannot do what i
 
 ---
 
-## 2. Customer details — not started (PRD US1–US3)
+## 2. Customer details — implemented (PRD US1–US3); A1's DDL still to run on prod
 
 ### Server
 
 - **A1** `quotes`: add `customer_name`, `customer_address`, `customer_phone`, nullable text.
-  Free text, no format validation (PRD is explicit). Same script pattern as above.
+  Free text, no format validation (PRD is explicit). Same script pattern as above. **Batch this
+  DDL with C1's `image_files.message_id` change — one escalation run, not two.**
 - **A2** `quoteDto.ts`: add the three fields to `QuoteDto`.
 - **A3** Extend the existing `PATCH /api/v1/quotes/:quoteId` (already built for markup) to
   accept them. Draft-only guard is already there.
@@ -186,14 +212,80 @@ should also fix `scripts/add-proposal-email-template.ts`, which cannot do what i
 ### Frontend
 
 - **B1** `quotesService.ts`: three fields on `Quote`, extend `updateQuote`'s patch type.
-- **B2** `QuoteInvoiceTab.tsx`: three dedicated fields. Reuse `CellInput` (commit-on-blur, iOS
-  zoom already handled) and the `frozen` guard.
+- **B2** `QuoteInvoiceTab.tsx`: the customer card per the PM's picked design — the three-state
+  spec in the header note (empty one-liner without the "Bill To" label / printed-text display /
+  pencil → boxed inputs, reusing `CellInput` — commit-on-blur, iOS zoom already handled).
+  Pencil hidden under the `frozen` guard. Also move the Markup field to the top, below this
+  card.
 - **B3** Chat ↔ field convergence is free as long as both read the same `quote` object and
   `sendMessage`'s returned quote is applied — verify, don't assume.
 
 ---
 
-## 3. Still open
+## 3. Image attachments — implemented (PRD US6); C1's DDL still to run on prod
+
+Implementation notes (2026-08-19): C1–C7 are done as specified below, with two resolutions —
+**C4:** verified, `buildProposalParts` queries by conversationId so quote-attached
+(null-messageId) rows flow into both proposal formats unchanged; the basic `quoteDocx`
+deliberately stays photo-free pending the PM's answer on whether it counts as a final output
+document. **C5:** no conversion needed — `loadPhotos` already skips non-JPEG/PNG types with a
+logged warning, so a HEIC can never break a document build (it renders in-app but is omitted
+from the printed doc; iOS Safari transcodes HEIC→JPEG on file inputs anyway). **C6 placement
+(PM, 2026-08-19, revised same day): no new buttons — the composer's EXISTING camera/gallery
+buttons now perform the quote-level attach.** A picked/captured photo uploads immediately to
+the quote (success toast points at the Invoice tab); it is never sent with a message and never
+reaches the agent. The Invoice tab keeps the photo gallery: display + remove-while-Draft only.
+
+What already exists and is kept: the S3 + multer upload stack (`s3.ts`, `imageUpload.ts`),
+`POST /conversations/:id/images`, and both proposal documents' `PROJECT PHOTOS` section
+(`proposalDocx.ts` `loadPhotos`, `proposalPdf.ts`). What the PRD adds is a **quote-level,
+agent-free** attach path — today's flow hangs every image off a chat message and feeds it to
+the agent as vision input (`runEstimatingTurn({ imageUrls })`), which the PRD explicitly
+forbids for attachments ("no image analysis, recognition, or vision processing of any kind").
+
+### Server
+
+- **C1** `image_files`: make `message_id` nullable, so an image can belong to the quote's
+  conversation without a carrier message. **Same DDL run as A1.**
+- **C2** New routes `POST /quotes/:quoteId/images` (multer `imageUpload.array`, no enforced
+  count cap per PRD) and `DELETE /quotes/:quoteId/images/:imageId`. Both carry the per-handler
+  Completed→409 guard like every other mutation in `quote.controller.ts`. Neither touches the
+  agent.
+- **C3** Keep quote-attached images out of the agent's sight everywhere: the attach path never
+  calls `runEstimatingTurn`, and any code that assembles agent vision context must select only
+  message-attached images (`messageId != null`).
+- **C4** Documents: `buildProposalParts` already queries `imageFile.findMany({ where:
+  { conversationId } })`, so null-`messageId` rows flow into both proposal formats with no
+  change — verify, don't assume. `quoteDocx` has no photos section; confirm with the PM whether
+  the basic .docx counts as a "final output document" before adding one.
+- **C5** HEIC: the multer filter accepts it, but the docx/pdf libraries likely can't render it.
+  The PRD specifies no conversion *requirement*, not a prohibition — convert to JPEG on upload
+  if rendering breaks. Extend `check-proposal-photos.ts` to cover a quote-attached image.
+
+### Frontend
+
+- **C6** Attach button near the chat text box with two distinctly-named actions — "Attach
+  photo" (`<input type="file" accept="image/*" multiple>`) and "Take photo"
+  (`capture="environment"`). Native inputs; OS permission prompts come free; denied permission
+  gets a visible message, never a silent failure. No new dependency.
+- **C7** Review-screen gallery: thumbnails of every attached image on the Invoice tab, with
+  remove while Draft; remove hidden under `frozen`. Images render below the line items,
+  matching their position on the output document.
+
+### Resolved PM question
+
+The existing chat attach button sent images *with a message, through the agent* (vision); the
+PRD's attach is agent-free and quote-level. **Answered 2026-08-19: the existing composer
+buttons are REPURPOSED to the quote-level attach** — no second set of buttons, and the
+send-image-with-message flow is gone from the estimator web UI. Consequence, accepted: the
+estimating agent no longer receives photos as vision input from this UI ("look at this panel"
+won't work), which is exactly the PRD's no-analysis rule. The server still accepts
+`imageUrls` on the messages endpoint — the agent's vision path remains for any other caller —
+and the estimator system prompt's photo line is now moot for the web app.
+
+---
+
+## 4. Still open
 
 - **Coordination:** the PRD's own item — whether per-client custom invoice templates (from the
   pricebook-template-config PRD, page 104497153, Draft) need explicit support for rendering

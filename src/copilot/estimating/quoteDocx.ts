@@ -104,6 +104,19 @@ export async function buildQuoteDocx(quote: QuoteDto): Promise<Buffer> {
               }),
             ],
           }),
+          // Customer block (PRD US1–US3): only the fields that are set — a blank field is
+          // omitted entirely, never a placeholder, and a quote with none set has no block.
+          ...(quote.customerName || quote.customerAddress || quote.customerPhone
+            ? [
+                new Paragraph({ text: "" }),
+                new Paragraph({
+                  children: [new TextRun({ text: "Bill To", bold: true, size: 22 })],
+                }),
+                ...[quote.customerName, quote.customerAddress, quote.customerPhone]
+                  .filter((v): v is string => !!v)
+                  .map((v) => new Paragraph({ children: [new TextRun({ text: v, size: 22 })] })),
+              ]
+            : []),
           new Paragraph({ text: "" }),
           new Table({
             width: { size: 100, type: WidthType.PERCENTAGE },

@@ -14,6 +14,8 @@ export interface QuoteHeader {
   customerName: string;
   billingAddress: string;
   serviceAddress: string;
+  /** Customer phone from the quote's stored details, when set. No CRM source exists for it. */
+  customerPhone?: string;
   technicianName: string;
   logoUrl: string | null;
   licenseNumber: string;

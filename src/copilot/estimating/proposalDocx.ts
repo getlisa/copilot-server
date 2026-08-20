@@ -246,7 +246,9 @@ export async function buildProposalDocx(input: ProposalInput): Promise<Buffer> {
   const logo = await loadLogo(header.logoUrl);
   const photos = input.photos?.length ? await loadPhotos(input.photos) : [];
   const contactLine = [header.companyPhone, header.companyEmail].filter(Boolean).join("  |  ");
-  const customerLine = [header.customerName, header.billingAddress].filter(Boolean).join("  |  ");
+  const customerLine = [header.customerName, header.billingAddress, header.customerPhone]
+    .filter(Boolean)
+    .join("  |  ");
   const assumptions = input.assumptions?.length ? input.assumptions : STATIC_ASSUMPTIONS;
   const dateText = input.date.toLocaleDateString("en-US", {
     year: "numeric",

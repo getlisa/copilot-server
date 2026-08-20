@@ -102,6 +102,13 @@ export interface QuoteDto {
    */
   markupPercent: number;
   /**
+   * Customer identification, per quote (PRD US1–US3). Free text, all optional, never
+   * validated; null renders blank/omitted on documents — never a placeholder, never an error.
+   */
+  customerName: string | null;
+  customerAddress: string | null;
+  customerPhone: string | null;
+  /**
    * Base-scope lines only, at their marked-up prices. Option-group lines are alternatives the
    * customer picks between, so they are NEVER part of this sum — see optionTotals.
    */
@@ -289,6 +296,9 @@ export function toQuoteDto(
     completedAt: quote.completedAt?.toISOString() ?? null,
     lineItems: dtos,
     markupPercent,
+    customerName: quote.customerName ?? null,
+    customerAddress: quote.customerAddress ?? null,
+    customerPhone: quote.customerPhone ?? null,
     total: baseTotal,
     optionTotals,
     blockingFlagCount: dtos.filter((d) =>

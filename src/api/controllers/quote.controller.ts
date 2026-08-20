@@ -17,7 +17,9 @@ import { generateProposalNarrative } from "../../copilot/estimating/proposalNarr
 import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating/proposalEmail";
 import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
 import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
-import { getPresignedUrlForKey } from "../../lib/s3";
+import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
+import { randomUUID } from "crypto";
+import sharp from "sharp";
 import { EstimateTurn } from "../../copilot/estimate/estimateService";
 
 /**
@@ -171,16 +173,21 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     conversationId: quote.conversationId,
     lineItems: dto.lineItems,
   });
-  // The CRM header wins when it has real data; the narrative's conversation-recovered fields
-  // fill the placeholders ("Customer", empty address) that shipped on real proposals.
+  // Precedence: the quote's own stored customer fields (typed on the Invoice tab or captured
+  // in chat) are what the technician explicitly said — they beat both the CRM header and the
+  // narrative's LLM-recovered guesses. Below that, the CRM header wins when it has real data,
+  // and the narrative's conversation-recovered fields fill the placeholders ("Customer",
+  // empty address) that shipped on real proposals.
   const customerName =
-    header.customerName !== "Customer"
+    quote.customerName ??
+    (header.customerName !== "Customer"
       ? header.customerName
-      : narrative?.project.customerName ?? header.customerName;
+      : narrative?.project.customerName ?? header.customerName);
   const projectTitle =
     narrative?.project.title ??
     (customerName !== "Customer" ? `Work for ${customerName}` : "Scope of Work");
-  const projectAddress = header.serviceAddress || narrative?.project.siteAddress || "";
+  const projectAddress =
+    quote.customerAddress || header.serviceAddress || narrative?.project.siteAddress || "";
   const unpricedCount = dto.lineItems.filter((i) => i.flags.includes("unmatched")).length;
   // Photos attached in the estimator chat render at the bottom of the proposal.
   const photos = await prisma.imageFile.findMany({
@@ -190,7 +197,14 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
   });
   // Every consumer (docx, PDF, email draft/send) must see the recovered customer name —
   // handing out the raw header made the email greet "there" while the document said the name.
-  const mergedHeader = { ...header, customerName };
+  // Stored quote fields override the CRM's here too, so the proposal's customer line prints
+  // what the technician entered.
+  const mergedHeader = {
+    ...header,
+    customerName,
+    ...(quote.customerAddress ? { billingAddress: quote.customerAddress } : {}),
+    ...(quote.customerPhone ? { customerPhone: quote.customerPhone } : {}),
+  };
   const input: ProposalInput = {
     header: mergedHeader,
     projectTitle,
@@ -218,6 +232,28 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * The quote's directly-attached images (PRD US6): rows with a null messageId, i.e. attached
+ * via the quote's attach action rather than sent with a chat message. Chat-message images are
+ * deliberately NOT in this list — they belong to the conversation history, and only
+ * message-attached images ever reach the agent as vision input.
+ */
+async function quoteImagesDto(conversationId: string) {
+  const images = await prisma.imageFile.findMany({
+    where: { conversationId, messageId: null },
+    orderBy: { createdAt: "asc" },
+  });
+  return Promise.all(
+    images.map(async (img) => ({
+      id: img.id,
+      url: await getPresignedUrlForKey(img.s3Key),
+      mimeType: img.mimeType,
+      filename: img.filename,
+      createdAt: img.createdAt.toISOString(),
+    }))
+  );
+}
 
 async function matcherFor(companyId: number) {
   const pricebook = await pricebookRowsFor(companyId);
@@ -466,12 +502,16 @@ export class QuoteController {
   }
 
   /**
-   * PATCH /api/v1/quotes/:quoteId — quote-level fields. Currently the materials markup
-   * percentage, which the technician sets on the Invoice tab or states in the chat.
+   * PATCH /api/v1/quotes/:quoteId — quote-level fields: the materials markup percentage and
+   * the customer details (name/address/phone), each settable on the Invoice tab or stated in
+   * the chat.
    *
    * Markup is stored as a percentage and applied on every read, never written into the line
    * items, so setting it re-prices every material line at once and any line added afterwards
    * picks it up with no extra action.
+   *
+   * Customer fields are free text with NO format validation (PRD is explicit) and fully
+   * optional — null/empty clears a field, and a quote completes with any subset of them set.
    */
   static async updateQuote(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
@@ -480,21 +520,33 @@ export class QuoteController {
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
 
-    const { markupPercent } = req.body ?? {};
-    if (markupPercent === undefined) return fail(res, 400, "Nothing to update");
-    if (typeof markupPercent !== "number" || !Number.isFinite(markupPercent))
-      return fail(res, 400, "markupPercent must be a number");
-    // Floored at 0 on purpose: a negative markup is a discount, and a percentage-off workflow
-    // is an explicit non-goal — allowing it here would reopen that through a side door.
-    if (markupPercent < 0) return fail(res, 400, "markupPercent cannot be negative");
-    // Not a product sanity bound (there deliberately isn't one yet) — this is the column's own
-    // limit, Decimal(5,2), rejected here so it fails with a message instead of a Prisma error.
-    if (markupPercent > 999.99) return fail(res, 400, "markupPercent cannot exceed 999.99");
+    const body = req.body ?? {};
+    const data: Record<string, unknown> = {};
 
-    await prisma.quote.update({
-      where: { id: quote.id },
-      data: { markupPercent },
-    });
+    const { markupPercent } = body;
+    if (markupPercent !== undefined) {
+      if (typeof markupPercent !== "number" || !Number.isFinite(markupPercent))
+        return fail(res, 400, "markupPercent must be a number");
+      // Floored at 0 on purpose: a negative markup is a discount, and a percentage-off workflow
+      // is an explicit non-goal — allowing it here would reopen that through a side door.
+      if (markupPercent < 0) return fail(res, 400, "markupPercent cannot be negative");
+      // Not a product sanity bound (there deliberately isn't one yet) — this is the column's own
+      // limit, Decimal(5,2), rejected here so it fails with a message instead of a Prisma error.
+      if (markupPercent > 999.99) return fail(res, 400, "markupPercent cannot exceed 999.99");
+      data.markupPercent = markupPercent;
+    }
+
+    // Free text, no format validation. The length cap is a storage guard, not a format rule.
+    for (const field of ["customerName", "customerAddress", "customerPhone"] as const) {
+      if (body[field] === undefined) continue;
+      if (body[field] !== null && typeof body[field] !== "string")
+        return fail(res, 400, `${field} must be a string or null`);
+      const value = body[field] == null ? null : body[field].trim().slice(0, 500);
+      data[field] = value || null;
+    }
+
+    if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
+    await prisma.quote.update({ where: { id: quote.id }, data });
     const updated = await loadOwnedQuote(quote.id, user.userId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
@@ -745,6 +797,120 @@ export class QuoteController {
       include: { lineItems: true },
     });
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });
+  }
+
+  /**
+   * GET /api/v1/quotes/:quoteId/images — the quote's directly-attached images, presigned.
+   * Readable in any state: a Completed quote still SHOWS its frozen attachments.
+   */
+  static async listImages(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    res.json({ success: true, data: await quoteImagesDto(quote.conversationId) });
+  }
+
+  /**
+   * POST /api/v1/quotes/:quoteId/images — attach images to the quote itself (PRD US6).
+   * multipart field "images". A pure attach: the images NEVER reach the agent — no vision, no
+   * captioning, no analysis of any kind. Standard formats stored as-is; no count limit beyond
+   * the transport's 4-per-request (attach again for more).
+   */
+  static async uploadImages(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
+    // imageUpload.array() puts an array here; the object shape belongs to .fields(), unused.
+    const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+    if (files.length === 0) return fail(res, 400, "No images uploaded");
+
+    const uploaded: { id: string; key: string; mimeType: string; filename: string; size: number }[] = [];
+    for (const file of files) {
+      // The document builders embed only JPEG/PNG (loadPhotos skips everything else), while
+      // browsers happily render AVIF/WebP/etc — so a photo could show on the Invoice tab yet
+      // silently vanish from the proposal. Convert anything else to JPEG at upload time; if
+      // the codec is one sharp can't decode (some HEICs), store the original as-is — it still
+      // displays in-app, and the doc-side skip is logged.
+      let { buffer, mimetype } = file;
+      let filename = file.originalname || "photo";
+      if (!/^image\/(jpeg|png)$/i.test(mimetype)) {
+        try {
+          buffer = await sharp(buffer).rotate().jpeg({ quality: 85 }).toBuffer();
+          mimetype = "image/jpeg";
+          filename = filename.replace(/\.[^.]+$/, "") + ".jpg";
+        } catch (err) {
+          logger.warn("Quote image kept in original format (conversion failed)", {
+            mimeType: file.mimetype,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      const { key } = await uploadBufferToS3({
+        key: `conversations/${quote.conversationId}/quote-images/${randomUUID()}-${filename}`,
+        buffer,
+        contentType: mimetype,
+      });
+      const row = await prisma.imageFile.create({
+        data: {
+          conversationId: quote.conversationId,
+          messageId: null,
+          s3Key: key,
+          mimeType: mimetype,
+          sizeBytes: BigInt(buffer.length),
+          filename,
+        },
+      });
+      uploaded.push({ id: row.id, key, mimeType: mimetype, filename, size: buffer.length });
+    }
+
+    // A visible record in the chat timeline — but ONLY a record: the ImageFile rows above keep
+    // a null messageId (the quote gallery and doc queries key on that), and this message is
+    // never fed to the agent as vision input. The attachments use the same JSON shape the
+    // conversation upload flow stores, so the existing re-sign-on-read path renders them.
+    await prisma.message.create({
+      data: {
+        conversationId: quote.conversationId,
+        senderType: "USER",
+        senderId: user.userId,
+        content:
+          uploaded.length === 1
+            ? "Photo attached to the quote"
+            : `${uploaded.length} photos attached to the quote`,
+        contentType: "IMAGE",
+        attachments: uploaded.map((u) => ({
+          id: u.id,
+          type: u.mimeType,
+          filename: u.filename,
+          size: u.size,
+          metadata: { s3Key: u.key },
+        })) as any,
+      },
+    });
+    res.status(201).json({ success: true, data: await quoteImagesDto(quote.conversationId) });
+  }
+
+  /** DELETE /api/v1/quotes/:quoteId/images/:imageId — remove an attachment while Draft. */
+  static async removeImage(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
+    // Scoped to quote-attached rows: a chat-message image is part of the conversation record
+    // and is not removable from here.
+    const image = await prisma.imageFile.findFirst({
+      where: {
+        id: req.params.imageId as string,
+        conversationId: quote.conversationId,
+        messageId: null,
+      },
+    });
+    if (!image) return fail(res, 404, "Image not found");
+    await prisma.imageFile.delete({ where: { id: image.id } });
+    res.json({ success: true, data: await quoteImagesDto(quote.conversationId) });
   }
 
   /** GET /api/v1/quotes/:quoteId/docx — basic Word export, marked per current state (US7). */

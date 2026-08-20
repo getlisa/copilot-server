@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { authMiddleware } from "../middlewares/auth";
+import { imageUpload } from "../middlewares/imageUpload";
 import { QuoteController } from "../controllers/quote.controller";
 
 /**
@@ -19,6 +20,9 @@ quoteRoute.post("/:quoteId/items", QuoteController.addItem);
 quoteRoute.patch("/:quoteId/items/:itemId", QuoteController.updateItem);
 quoteRoute.delete("/:quoteId/items/:itemId", QuoteController.removeItem);
 quoteRoute.post("/:quoteId/items/:itemId/price", QuoteController.priceItem);
+quoteRoute.get("/:quoteId/images", QuoteController.listImages);
+quoteRoute.post("/:quoteId/images", imageUpload.array("images"), QuoteController.uploadImages);
+quoteRoute.delete("/:quoteId/images/:imageId", QuoteController.removeImage);
 quoteRoute.post("/:quoteId/complete", QuoteController.complete);
 quoteRoute.post("/:quoteId/reopen", QuoteController.reopen);
 quoteRoute.get("/:quoteId/docx", QuoteController.downloadDocx);
