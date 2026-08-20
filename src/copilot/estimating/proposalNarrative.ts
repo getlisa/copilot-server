@@ -88,7 +88,7 @@ You are given the technician's estimate conversation and the final material/line
 
 4. coordination: 2-4 coordination bullets that are TRUE FOR THIS JOB. Call the customer "homeowner" only on residential work; commercial/industrial customers are "customer" and coordination is about minimizing disruption to site operations. State power-outage expectations at the duration actually discussed (a full service changeout is a multi-hour outage — never call it "brief" unless it is), and mention access work (wall/ceiling penetrations, shiplap or sheetrock removal, area shutdowns) only when the scope actually involves it.
 
-5. project: the header fields, recovered from the conversation. title is a short project name like "Residential Rewire & Panel Replacement" or "Lighting Contactor Replacement". customerName and siteAddress exactly as the technician stated them. Use null for anything never mentioned — never invent a name or address.
+5. project: the header fields, recovered from the conversation. title is a short project name like "Residential Rewire & Panel Replacement" or "Lighting Contactor Replacement" — it names the WORK only, and must never contain the customer's name, address, or phone number (it is reused in the email subject and greeting line, where an address reads as a mail-merge mistake; the address has its own field). customerName and siteAddress exactly as the technician stated them. Use null for anything never mentioned — never invent a name or address.
 
 Ground everything in what was actually discussed — do not invent work that was never mentioned. The materials list tells you what is being installed; the conversation tells you why and where.`;
 

@@ -2,10 +2,7 @@ import { Response } from "express";
 import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { RequestWithUser } from "../middlewares/auth";
-import {
-  runEstimatingTurn,
-  countRecentFollowUps,
-} from "../../copilot/estimating/estimatingAgent";
+import { runEstimatingTurn } from "../../copilot/estimating/estimatingAgent";
 import { dedupeSharedRows, matchPricebook } from "../../copilot/estimating/pricebookMatch";
 import { pricebookRowsFor, resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
 import { packAwareQuantity, unitsCompatible } from "../../copilot/estimating/packMath";
@@ -442,7 +439,6 @@ export class QuoteController {
         companyId: user.companyId,
         utterance: content,
         history,
-        followUpsAsked: countRecentFollowUps(priorMessages),
         imageUrls,
       });
     } catch (err) {

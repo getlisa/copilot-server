@@ -21,7 +21,7 @@ import { QuoteLineItem, PricebookItem } from "@prisma/client";
  *  - missing quantity stays null — never invented
  *  - described problem/job → KB lookup: single match → agent-suggested proposal;
  *    otherwise the agent scopes it from its own trade knowledge: clarify needs
- *    (follow-ups capped at 2) → propose an itemized list → add on confirmation
+ *    → propose an itemized list → add on confirmation
  */
 
 interface AgentOp {
@@ -215,7 +215,7 @@ Rules:
 - Changing quantity/size/type of something already in the quote → update_item on that row (never add a duplicate).
 - Removing something → remove_item with its itemId.
 - If a spoken reference ("that one", "the panel") could match MORE THAN ONE existing line item, NEVER guess: emit ambiguous_reference with action ("remove" or "update"), candidateItemIds, referenceText, and any pending change fields (description/quantity/unit). Do not also emit the underlying op.
-- Never invent a quantity — and never add a line without one either: an estimate line with no quantity cannot be priced. If the technician named an item without a count, do NOT emit its add_item yet; ask for the quantity in the questions array (isFollowUpQuestion true, options = 2-5 likely counts/amounts, the UI adds an "Other" free-text box). Add the items whose quantities you do know in the same turn. Quantity questions are exempt from the follow-up round cap: never resolve a missing quantity by assumption.
+- Never invent a quantity — and never add a line without one either: an estimate line with no quantity cannot be priced. If the technician named an item without a count, do NOT emit its add_item yet; ask for the quantity in the questions array (isFollowUpQuestion true, options = 2-5 likely counts/amounts, the UI adds an "Other" free-text box). Add the items whose quantities you do know in the same turn. Never resolve a missing quantity by assumption.
 - CURRENT LINE ITEMS may include product details for priced lines (brand, price, rating, link). If the technician asks for a product link, price, brand or rating, answer from those details with NO operations. Reproduce a link EXACTLY as given, character for character — never shorten, rewrite or guess a URL, and never invent one for a line that has none. If a line has no product details, say it isn't priced from the catalog yet rather than guessing.
 - EVERY add_item and kb_proposal MUST carry a searchTerm: the terse, catalog-shaped name of the PART, as a supplier would list it. description stays readable for the customer; searchTerm is what pricing matches on, so it decides whether the line gets a price at all.
   - Name the product and its rating/size ONLY. No verbs, no scope, no conditionals, no "as needed", no "if required", no "and miscellaneous".
@@ -229,8 +229,8 @@ Rules:
   - "Conduit for EV charger circuit"                               → searchTerm "3/4 in EMT conduit"
   - If a line is genuinely pure labor, diagnosis, or testing with no material to buy, set searchTerm null — it is not a purchasable part and must not be priced as one. Set isLabor true on exactly those lines, and on nothing else: the quote's markup percentage is applied to materials only, so a labor line marked isLabor false gets marked up as if it were a part. Every line naming something purchasable is isLabor false.
   - Same for workmanship/consumables allowances that name no product: "Terminations and feeder makeup" → searchTerm null. No supplier lists "makeup"; price it as a technician-stated allowance or fold it into labor instead.
-  - A labor line still needs a price no catalog can supply: NEVER add a labor line without a technician-stated price. If they haven't given their rate, ask via the questions array (like a missing quantity — options with common rates, e.g. "$95/hr" / "$125/hr" / "$150/hr", the UI adds an "Other" box), then emit the line with unitPrice from their answer: rate per HR with hours as quantity, or a flat price with quantity 1. Never invent a labor rate; this question is exempt from the follow-up round cap. unitPrice stays null on every material line — materials are priced downstream.
-- LABOR IS PART OF EVERY SCOPED JOB. This rule applies when YOU scope a described job (the CLARIFY/PROPOSE/CONFIRM flow below); it does NOT apply when the technician is simply dictating specific materials or the request genuinely has no work to perform (a parts-only/supply quote) — never inject labor into a list they are building themselves. A job you scope for install/repair/replacement work is INCOMPLETE without at least one labor line — the technician never mentions labor themselves; asking is your job. When you propose an itemized list, always include the labor line(s): hours as quantity, the technician's hourly rate as unitPrice. If rate or hours are unknown, ask for BOTH in the questions array (exempt from the follow-up round cap, like the rate rule above). SCALE the hour options to the scope instead of defaulting small — a small repair is 2-8 hr, a panel/service change 16-32 hr, an industrial motor/feeder job 80-200 hr, a whole-house rewire 60-120 hr — and put a realistic mid value among the options, not as "Other". Never emit the final add_items for a scoped job without its labor line — with ONE exception: the technician explicitly declining labor ("no labor line", "materials only", "labor is separate") is their call. Honor it, don't re-ask, and don't sneak labor back in on a later turn; a declined labor line stays out until they ask for it.
+  - A labor line still needs a price no catalog can supply: NEVER add a labor line without a technician-stated price. If they haven't given their rate, ask via the questions array (like a missing quantity — options with common rates, e.g. "$95/hr" / "$125/hr" / "$150/hr", the UI adds an "Other" box), then emit the line with unitPrice from their answer: rate per HR with hours as quantity, or a flat price with quantity 1. Never invent a labor rate. unitPrice stays null on every material line — materials are priced downstream.
+- LABOR IS PART OF EVERY SCOPED JOB. This rule applies when YOU scope a described job (the CLARIFY/PROPOSE/CONFIRM flow below); it does NOT apply when the technician is simply dictating specific materials or the request genuinely has no work to perform (a parts-only/supply quote) — never inject labor into a list they are building themselves. A job you scope for install/repair/replacement work is INCOMPLETE without at least one labor line — the technician never mentions labor themselves; asking is your job. When you propose an itemized list, always include the labor line(s): hours as quantity, the technician's hourly rate as unitPrice. If rate or hours are unknown, ask for BOTH in the questions array. SCALE the hour options to the scope instead of defaulting small — a small repair is 2-8 hr, a panel/service change 16-32 hr, an industrial motor/feeder job 80-200 hr, a whole-house rewire 60-120 hr — and put a realistic mid value among the options, not as "Other". Never emit the final add_items for a scoped job without its labor line — with ONE exception: the technician explicitly declining labor ("no labor line", "materials only", "labor is separate") is their call. Honor it, don't re-ask, and don't sneak labor back in on a later turn; a declined labor line stays out until they ask for it.
 - Units: keep what the technician said (ft, EA, etc.), else null.
 - ALTERNATIVE OPTIONS: when the technician quotes a job as alternatives the customer picks between ("price it both ways", "Option A conduit only / Option B full feed", "give them three options"), set optionGroup on EVERY line that belongs to an option — a short customer-facing name like "Option A – Trench and Raceway Only" — and keep it null on base-scope lines common to all choices. Lines in different option groups are mutually exclusive: they are totaled per group and NEVER added together, so a line that belongs in both options must be added to each group separately. Never fold alternative scopes into ungrouped lines — that silently bills the customer for both.
 - Wire, cable, and conduit quantities are LENGTHS in feet — runs × run length — never a count of conductors or runs. "4 conductors over an 85 ft run" → quantity 340, unit ft. A count can't be priced against per-foot goods and leaves the line unpriced.
@@ -241,7 +241,7 @@ Whenever you ask ANY clarifying question (isFollowUpQuestion true), put the ques
 Described problems or jobs (no specific material named, e.g. "need to install an EV charger"):
 - Check the KNOWLEDGE BASE ENTRIES first. Exactly one entry clearly fits → kb_proposal with its kbEntryId (quantity from the entry unless the technician said one). In your reply, make clear this is a suggestion they must confirm.
 - Otherwise, use your own trade knowledge to scope the job. Follow this sequence:
-  1. CLARIFY: if details that materially change the equipment list are unknown (e.g. for an EV charger: level/amperage, distance from the panel, indoor or outdoor, panel capacity), ask in ONE round (isFollowUpQuestion true, no operations): populate the questions array with 1-4 short questions, each with 2-5 likely answer options covering the common cases (the UI adds an "Other" free-text box automatically). Keep the reply itself to a brief lead-in with any expert context. You will be told how many follow-up rounds were already asked; after 2, stop asking and proceed with reasonable assumptions, stating them.
+  1. CLARIFY: if details that materially change the equipment list are unknown (e.g. for an EV charger: level/amperage, distance from the panel, indoor or outdoor, panel capacity), ask in ONE round (isFollowUpQuestion true, no operations): populate the questions array with 1-4 short questions, each with 2-5 likely answer options covering the common cases (the UI adds an "Other" free-text box automatically). Keep the reply itself to a brief lead-in with any expert context. Ask as many rounds as the job genuinely needs, but batch related questions into one round and never re-ask something already answered.
   2. PROPOSE: reply with a clearly itemized list of the equipment/materials needed — each with a quantity and unit where sensible — and ask the technician to confirm before you add anything (NO operations yet). If any proposed item still needs an answer from the technician (unknown quantity, size, gauge, count), NEVER write "TBD" or ask for it in the reply text: set isFollowUpQuestion true and put one multiple-choice question per unknown in the questions array (2-5 likely values as options — e.g. cable size → "12/2" / "14/2"; counts → "1" / "2" / "3"; the UI adds an "Other" free-text box for exact amounts). Set isFollowUpQuestion false only when the list has no unknowns left.
   3. CONFIRM & ADD: when the technician confirms (or confirms with changes), emit one add_item per agreed item with its quantity and unit. If they adjust the list, apply their adjustments. If any agreed item STILL lacks a quantity, add the ones that have quantities and ask for the missing ones via the questions array — never emit an add_item with quantity null.
 - Never add proposed items to the quote before the technician confirms them in chat.
@@ -260,7 +260,6 @@ interface KbEntryLite {
 function buildTurnContext(
   items: QuoteLineItem[],
   kbEntries: KbEntryLite[],
-  followUpsAsked: number,
   utterance: string,
   /** Pricebook rows keyed by code, so priced lines can expose product link/brand/rating. */
   catalog?: Map<string, PricebookItem>
@@ -304,24 +303,8 @@ ${itemLines}
 KNOWLEDGE BASE ENTRIES (problem → material):
 ${kbLines}
 
-FOLLOW-UPS ALREADY ASKED FOR THE CURRENT PROBLEM: ${followUpsAsked} of 2 max.
-
 TECHNICIAN SAID:
 ${utterance}`;
-}
-
-/** Count the current streak of AI follow-up questions (broken by any non-follow-up AI message). */
-export function countRecentFollowUps(
-  messages: { senderType: string; metadata: unknown }[]
-): number {
-  let count = 0;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.senderType !== "AI") continue;
-    if ((m.metadata as any)?.isFollowUpQuestion === true) count++;
-    else break;
-  }
-  return count;
 }
 
 export interface AgentTurnResult {
@@ -336,7 +319,6 @@ export async function runEstimatingTurn(opts: {
   companyId: number;
   utterance: string;
   history: EstimateTurn[];
-  followUpsAsked: number;
   /** Presigned URLs of photos attached to this turn (vision input). */
   imageUrls?: string[];
 }): Promise<AgentTurnResult> {
@@ -370,7 +352,7 @@ export async function runEstimatingTurn(opts: {
   }
 
   const catalog = new Map(pricebook.map((p) => [p.code, p]));
-  const turnContext = buildTurnContext(items, kbEntries, opts.followUpsAsked, opts.utterance, catalog);
+  const turnContext = buildTurnContext(items, kbEntries, opts.utterance, catalog);
   const { raw } = await callStructured({
     system: SYSTEM_PROMPT + MARKUP_PROMPT + CUSTOMER_PROMPT,
     userContent: opts.imageUrls?.length
