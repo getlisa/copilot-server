@@ -38,7 +38,7 @@ const line = (overrides: Partial<QuoteLineItem>): QuoteLineItem =>
     ambiguousAction: null,
     sourcePricebookId: 1,
     priceConfirmed: false,
-    labor: false,
+    isLabor: false,
     laborRateId: null,
     sortOrder: 0,
     createdAt: new Date(),
@@ -96,7 +96,7 @@ expect(
 
 // Labor lines (labor PRD): ordinary priced lines, no flag until the rate is overridden.
 const laborLine = line({
-  labor: true,
+  isLabor: true,
   laborRateId: 7,
   unit: "hr",
   quantity: 3,
@@ -106,17 +106,17 @@ const laborLine = line({
 });
 expect("configured-rate labor line carries no flags", flagsFor(laborLine), []);
 expect("labor line has a blank price source", toLineItemDto(laborLine).priceSource, null);
-expect("labor flag is carried on the DTO", toLineItemDto(laborLine).labor, true);
+expect("labor flag is carried on the DTO", toLineItemDto(laborLine).isLabor, true);
 // Ad-hoc rate (zero types configured / unmatched type): still an ordinary priced line (US5).
 expect(
   "ad-hoc-rate labor line carries no flags",
-  flagsFor(line({ labor: true, laborRateId: null, unit: "hr", unitPrice: 120, pricebookCode: null, sourcePricebookId: null })),
+  flagsFor(line({ isLabor: true, laborRateId: null, unit: "hr", unitPrice: 120, pricebookCode: null, sourcePricebookId: null })),
   []
 );
 // Overriding the RATE flags it (US7) — the hours-only edit path never sets manuallyEdited.
 expect(
   "rate override flags the labor line",
-  flagsFor(line({ labor: true, laborRateId: 7, manuallyEdited: true, pricebookCode: null, sourcePricebookId: null })),
+  flagsFor(line({ isLabor: true, laborRateId: 7, manuallyEdited: true, pricebookCode: null, sourcePricebookId: null })),
   ["manually_edited"]
 );
 

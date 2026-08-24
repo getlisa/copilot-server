@@ -705,7 +705,7 @@ export class QuoteController {
     }
     if (body.quantity !== undefined) {
       // Labor hours must be greater than zero — the labor PRD's one sanity check (US7).
-      if (item.labor && !(Number(body.quantity) > 0))
+      if (item.isLabor && !(Number(body.quantity) > 0))
         return fail(res, 400, "Labor hours must be greater than zero");
       data.quantity = body.quantity;
     }

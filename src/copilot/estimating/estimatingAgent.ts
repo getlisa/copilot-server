@@ -319,7 +319,7 @@ function buildTurnContext(
               : "";
             return (
               `- id=${i.id} | ${i.description} | qty=${i.quantity ?? "MISSING"}${i.unit ? " " + i.unit : ""}` +
-              `${i.labor ? ` | LABOR line${i.unitPrice != null ? ` @ $${Number(i.unitPrice)}/hr` : ""}` : ""}` +
+              `${i.isLabor ? ` | LABOR line${i.unitPrice != null ? ` @ $${Number(i.unitPrice)}/hr` : ""}` : ""}` +
               `${i.agentSuggested ? " | agent-suggested, unconfirmed" : ""}` +
               `${i.ambiguousAction ? " | pending ambiguous reference" : ""}${product}`
             );
@@ -403,7 +403,7 @@ export async function runEstimatingTurn(opts: {
       if (
         (line.unitPrice == null || line.pricebookCode === ESTIMATED_PRICE_CODE) &&
         !line.manuallyEdited &&
-        !line.labor && // labor is never priced from a catalog
+        !line.isLabor && // labor is never priced from a catalog
         !line.ambiguousAction
       ) {
         enqueueResolve(line.searchTerm ?? line.description, opts.companyId, line.description, [line.id]);
@@ -611,7 +611,7 @@ export async function runEstimatingTurn(opts: {
               quantity: hours,
               unit: "hr",
               unitPrice: rate,
-              labor: true,
+              isLabor: true,
               laborRateId: configured?.id ?? null,
               // An ad-hoc technician-stated rate is an ordinary priced line (US5), not a
               // manual override of configured data — manuallyEdited stays false either way.
@@ -678,7 +678,7 @@ export async function runEstimatingTurn(opts: {
           const data: Record<string, unknown> = {};
           if (op.quantity != null) {
             // Labor hours must be greater than zero — the labor PRD's one sanity check.
-            if (existing.labor && !(op.quantity > 0)) break;
+            if (existing.isLabor && !(op.quantity > 0)) break;
             data.quantity = op.quantity;
           }
           if (op.unit != null) data.unit = op.unit;
@@ -691,7 +691,7 @@ export async function runEstimatingTurn(opts: {
           }
           if (op.isLabor != null) data.isLabor = op.isLabor;
           // Audit trail (labor PRD): hours corrections/additions log prior and new values.
-          if (existing.labor && op.quantity != null)
+          if (existing.isLabor && op.quantity != null)
             logger.info("Labor line hours updated", {
               quoteId: opts.quoteId,
               lineItemId: existing.id,

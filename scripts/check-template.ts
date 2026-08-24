@@ -63,13 +63,13 @@ async function main() {
       {
         id: "l1", description: "20A breaker", quantity: 2, unit: "EA", unitPrice: 8.5,
         totalPrice: 17, pricebookCode: "B1:X", product: null, priceEstimated: false,
-        estimateLink: null, priceSource: "Supplier A", labor: false, flags: [],
+        estimateLink: null, priceSource: "Supplier A", isLabor: false, flags: [],
         ambiguousAction: null, optionGroup: null, sortOrder: 0,
       },
       {
         id: "l2", description: "Standard labor", quantity: 3, unit: "hr", unitPrice: 105,
         totalPrice: 315, pricebookCode: null, product: null, priceEstimated: false,
-        estimateLink: null, priceSource: null, labor: true, flags: [],
+        estimateLink: null, priceSource: null, isLabor: true, flags: [],
         ambiguousAction: null, optionGroup: null, sortOrder: 1,
       },
     ],

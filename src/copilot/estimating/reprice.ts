@@ -20,7 +20,7 @@ export async function repriceDrafts(companyId: number): Promise<number> {
       where: {
         quote: { companyId, status: "DRAFT" },
         manuallyEdited: false,
-        labor: false,
+        isLabor: false,
       },
     }),
   ]);
@@ -69,7 +69,7 @@ export async function repriceLaborDrafts(companyId: number): Promise<number> {
     prisma.quoteLineItem.findMany({
       where: {
         quote: { companyId, status: "DRAFT" },
-        labor: true,
+        isLabor: true,
         laborRateId: { not: null },
         manuallyEdited: false, // an overridden rate is never silently overwritten (US8)
       },

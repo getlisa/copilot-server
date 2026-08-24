@@ -177,7 +177,9 @@ ALTER TABLE public.quotes           ADD COLUMN IF NOT EXISTS template_id INT;
 ALTER TABLE public.quotes           ADD COLUMN IF NOT EXISTS labor_asked BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS source_pricebook_id INT;
 ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS price_confirmed BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS labor BOOLEAN NOT NULL DEFAULT false;
+-- NOTE: there is deliberately no `labor` column. quote_line_items.is_labor (already in prod
+-- since the markup migration) is the single labor flag; a second column meant the markup
+-- exemption and the labor flow could disagree.
 ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS labor_rate_id INT;
 
 -- New tables are created by postgres; hand them to app_user like the rest (see below).

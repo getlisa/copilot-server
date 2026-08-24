@@ -77,8 +77,6 @@ export interface LineItemDto {
    * Never rendered on the exported customer document.
    */
   priceSource: string | null;
-  /** Labor line (labor PRD): quantity is hours, unitPrice is the hourly rate. */
-  labor: boolean;
   flags: LineItemFlag[];
   ambiguousAction: {
     action: "remove" | "update";
@@ -202,14 +200,10 @@ export function markedUpPrices(
   item: QuoteLineItem,
   markupPercent: number
 ): { unitPrice: number | null; totalPrice: number | null } {
-  // EITHER labor flag exempts the line. Two columns mean the same thing after the markup and
-  // labor-charges features landed independently: `is_labor` (markup PRD, set by the agent's
-  // op) and `labor` (labor PRD, set by the labor-rate flow). Checking only one marked up
-  // every labor line the other flow created — the exact silent overcharge this boundary
-  // exists to prevent.
-  // ponytail: collapse the two columns into one in a follow-up migration; until then this
-  // OR is the single guarantee, and it covers rows already written by either flow.
-  const m = item.isLabor || item.labor ? 1 : 1 + markupPercent / 100;
+  // One labor flag, by design: `is_labor` is the single boundary both the markup feature and
+  // the labor-charges flow set and read. (They briefly had a column each; checking only one
+  // marked up the other's labor lines, so they were collapsed into this one.)
+  const m = item.isLabor ? 1 : 1 + markupPercent / 100;
   const baseUnit = num(item.unitPrice);
   const unitPrice = baseUnit == null ? null : round2(baseUnit * m);
   const manualTotal = num(item.totalPrice);
@@ -302,7 +296,6 @@ export function toLineItemDto(
     priceEstimated: isEstimatedPrice(item),
     estimateLink: isEstimatedPrice(item) ? homeDepotSearchLink(item.searchTerm ?? item.description) : null,
     priceSource: priceSourceFor(item, bookNames),
-    labor: item.labor,
     flags: flagsFor(item),
     ambiguousAction: (item.ambiguousAction as LineItemDto["ambiguousAction"]) ?? null,
     optionGroup: item.optionGroup ?? null,

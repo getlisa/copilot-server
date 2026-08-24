@@ -358,7 +358,7 @@ model Quote {
   companyId      Int             @map("company_id")
   status         QuoteStatus     @default(DRAFT)
   /// Per-quote materials markup, as a percentage. Applies to MATERIAL lines only — labor is
-  /// never marked up (isLabor/labor). 0 = no markup. Editable while DRAFT, frozen on COMPLETED.
+  /// never marked up (isLabor). 0 = no markup. Editable while DRAFT, frozen on COMPLETED.
   /// Deliberately per-quote: there is no client-level default markup anywhere in the product.
   markupPercent  Decimal         @default(0) @map("markup_percent") @db.Decimal(5, 2)
   /// Customer identification, per quote. Free text with NO format validation (PRD is
@@ -416,7 +416,6 @@ model QuoteLineItem {
   /// fallback_price flag without touching the price itself.
   priceConfirmed  Boolean  @default(false) @map("price_confirmed")
   /// Labor line (labor PRD): quantity = hours, unit = "hr", unitPrice = hourly rate.
-  labor           Boolean  @default(false)
   /// Configured labor type this line was priced from. Null on a labor line = ad-hoc
   /// technician-stated rate (zero types configured / unmatched type / no valid rate).
   laborRateId     Int?     @map("labor_rate_id")
