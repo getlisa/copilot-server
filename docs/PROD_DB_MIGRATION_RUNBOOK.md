@@ -156,7 +156,21 @@ CREATE INDEX IF NOT EXISTS quote_templates_company_id_idx ON public.quote_templa
 
 ALTER TABLE public.pricebook_items  ADD COLUMN IF NOT EXISTS pricebook_id INT;
 CREATE INDEX IF NOT EXISTS pricebook_items_pricebook_id_idx ON public.pricebook_items (pricebook_id);
-ALTER TABLE public.company_configs  ADD COLUMN IF NOT EXISTS hd_fallback_enabled BOOLEAN NOT NULL DEFAULT false;
+-- DEFAULT true (PM decision 2026-08-21): the HD fallback is pre-existing behavior for every
+-- client; the column exists to opt a client OUT. A false default would silently unprice
+-- every current client's pricebook misses on deploy.
+ALTER TABLE public.company_configs  ADD COLUMN IF NOT EXISTS hd_fallback_enabled BOOLEAN NOT NULL DEFAULT true;
+-- The two statements below are REQUIRED on any environment where an earlier run of this
+-- runbook already created the column with DEFAULT false: ADD COLUMN IF NOT EXISTS is then a
+-- no-op, so neither the default nor the already-written false rows get corrected. Harmless
+-- where the column is new (default is already true, no row says false).
+--
+-- ONE-TIME ONLY. The UPDATE cannot distinguish "false because it was the old default" from
+-- "false because someone deliberately opted this client out", and today no deliberate opt-out
+-- exists (the feature is unreleased). Once real opt-outs exist, DROP THE UPDATE — re-running
+-- it would silently switch those clients back on.
+ALTER TABLE public.company_configs  ALTER COLUMN hd_fallback_enabled SET DEFAULT true;
+UPDATE public.company_configs       SET hd_fallback_enabled = true WHERE hd_fallback_enabled = false;
 ALTER TABLE public.companies        ADD COLUMN IF NOT EXISTS website VARCHAR(300);
 ALTER TABLE public.companies        ADD COLUMN IF NOT EXISTS footer_terms TEXT;
 ALTER TABLE public.quotes           ADD COLUMN IF NOT EXISTS template_id INT;

@@ -60,7 +60,9 @@ export async function hdFallbackEnabledFor(companyId: number): Promise<boolean> 
     where: { company_id: companyId },
     select: { hd_fallback_enabled: true },
   });
-  return config?.hd_fallback_enabled === true;
+  // Default ON (PM decision 2026-08-21): the fallback is pre-existing behavior for every
+  // client, so a company with no config row at all gets it — the switch opts a client OUT.
+  return config ? config.hd_fallback_enabled : true;
 }
 
 export async function loadCompanyPricing(companyId: number): Promise<CompanyPricing> {

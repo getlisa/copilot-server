@@ -66,9 +66,10 @@ model company_configs {
   updated_at             DateTime  @default(now()) @db.Timestamp(6)
   sales_coaching_enabled Boolean   @default(true)
   /// Home Depot fallback pricing for pricebook misses (pricebook-config PRD US5).
-  /// Off by default: a client's quotes only price from their own book(s) unless
-  /// this is deliberately enabled for them.
-  hd_fallback_enabled    Boolean   @default(false)
+  /// Default ON (PM decision 2026-08-21): the automatic fallback is pre-existing behavior
+  /// for every client, so this switch exists to opt a client OUT, not in. Turned off, that
+  /// client's quotes price only from their own book(s).
+  hd_fallback_enabled    Boolean   @default(true)
   companies              companies @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@schema("public")
