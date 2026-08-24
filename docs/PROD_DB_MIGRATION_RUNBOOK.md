@@ -173,10 +173,12 @@ ALTER TABLE public.company_configs  ALTER COLUMN hd_fallback_enabled SET DEFAULT
 UPDATE public.company_configs       SET hd_fallback_enabled = true WHERE hd_fallback_enabled = false;
 ALTER TABLE public.companies        ADD COLUMN IF NOT EXISTS website VARCHAR(300);
 ALTER TABLE public.companies        ADD COLUMN IF NOT EXISTS footer_terms TEXT;
+ALTER TABLE public.companies        ADD COLUMN IF NOT EXISTS proposal_template JSONB;
 ALTER TABLE public.quotes           ADD COLUMN IF NOT EXISTS template_id INT;
 ALTER TABLE public.quotes           ADD COLUMN IF NOT EXISTS labor_asked BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS source_pricebook_id INT;
-ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS price_confirmed BOOLEAN NOT NULL DEFAULT false;
+-- NOTE: no price_confirmed column — the fallback-price confirm step was cut before release
+-- (owner decision 2026-08-24 overriding pricebook PRD US6; the source label is the disclosure).
 -- NOTE: there is deliberately no `labor` column. quote_line_items.is_labor (already in prod
 -- since the markup migration) is the single labor flag; a second column meant the markup
 -- exemption and the labor flow could disagree.

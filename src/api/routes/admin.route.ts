@@ -48,6 +48,19 @@ adminRoute.post(
 );
 adminRoute.delete("/templates/:id", AdminController.deleteTemplate);
 
+adminRoute.get("/companies/:companyId/proposal-template", AdminController.getProposalTemplate);
+adminRoute.put("/companies/:companyId/proposal-template", AdminController.putProposalTemplate);
+adminRoute.delete("/companies/:companyId/proposal-template", AdminController.deleteProposalTemplate);
+adminRoute.post(
+  "/companies/:companyId/proposal-template/import",
+  pricebookUpload.single("file"), // .docx or .pdf; validated inside the importer
+  AdminController.importProposalTemplate
+);
+adminRoute.post(
+  "/companies/:companyId/proposal-template/preview",
+  AdminController.previewProposalTemplate
+);
+
 adminRoute.get("/companies/:companyId/conversations", AdminController.listConversations);
 adminRoute.delete("/companies/:companyId/conversations", AdminController.deleteConversations);
 

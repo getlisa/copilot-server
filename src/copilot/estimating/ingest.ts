@@ -22,34 +22,63 @@ export interface ParsedRow {
 export interface SkippedRow {
   line: number;
   reason: string;
+  /** Worksheet the row came from (Excel only; a workbook can carry the book across sheets). */
+  sheet?: string;
 }
 
 export interface IngestParse {
   format: "csv" | "excel" | "pdf";
   rows: ParsedRow[];
   skipped: SkippedRow[];
+  /** Header names each field was read from (tabular formats) — shown to the admin so a
+   *  mis-mapped sheet is caught at upload, not weeks later on an unmatched quote line. */
+  columns?: { code?: string; description: string; price: string; unit?: string };
 }
 
 /** Thrown when the FILE as a whole is unusable (vs. individual rows, which are skipped). */
 export class IngestError extends Error {}
 
+// Alias order IS priority: specific names first, generic last. A distributor sheet has both
+// an "Item" column (part numbers) and a "Description" column — leftmost-any-alias matching
+// silently ingested 16k part numbers as descriptions (bug 2026-08-24), which no query can
+// ever match. "item" survives only as the identifier of last resort, and doubles as a code
+// column when a real description column exists.
 const HEADER_ALIASES = {
-  code: ["code", "sku", "itemcode", "itemnumber", "itemno", "item#", "partnumber", "partno", "productcode"],
-  description: ["description", "desc", "item", "itemname", "name", "product", "productname", "material", "itemdescription"],
-  price: ["price", "unitprice", "cost", "unitcost", "rate", "sellprice", "listprice", "saleprice"],
+  code: ["code", "sku", "itemcode", "itemnumber", "itemno", "item#", "partnumber", "partno", "productcode", "item"],
+  description: ["description", "itemdescription", "desc", "productname", "itemname", "material", "product", "name", "item"],
+  price: ["price", "unitprice", "cost", "unitcost", "rate", "sellprice", "listprice", "saleprice", "netprice"],
   unit: ["unit", "uom", "unitofmeasure", "units", "measure"],
 } as const;
 
 const normalizeHeader = (v: string) => v.toLowerCase().replace(/[^a-z0-9#]/g, "");
 
-function detectColumns(header: string[]): { code: number; description: number; price: number; unit: number } | null {
-  const find = (aliases: readonly string[]) =>
-    header.findIndex((h) => aliases.includes(normalizeHeader(h)));
+function detectColumns(
+  header: string[]
+): { code: number; description: number; price: number; unit: number } | null {
+  const find = (aliases: readonly string[]) => {
+    for (const alias of aliases) {
+      const i = header.findIndex((h) => normalizeHeader(h) === alias);
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
   const description = find(HEADER_ALIASES.description);
   const price = find(HEADER_ALIASES.price);
   if (description < 0 || price < 0) return null;
-  return { code: find(HEADER_ALIASES.code), description, price, unit: find(HEADER_ALIASES.unit) };
+  let code = find(HEADER_ALIASES.code);
+  if (code === description) code = -1; // one "Item" column serves as identifier, not also code
+  return { code, description, price, unit: find(HEADER_ALIASES.unit) };
 }
+
+const columnNames = (
+  header: string[],
+  cols: { code: number; description: number; price: number; unit: number }
+) => ({
+  ...(cols.code >= 0 ? { code: header[cols.code] } : {}),
+  description: header[cols.description],
+  price: header[cols.price],
+  ...(cols.unit >= 0 ? { unit: header[cols.unit] } : {}),
+});
 
 /** "$1,234.50" → 1234.5; anything non-numeric → null. */
 function parsePrice(raw: string): number | null {
@@ -97,6 +126,7 @@ function parseCsvBuffer(buffer: Buffer): IngestParse {
     throw new IngestError(
       "Could not find the required columns — the header row must name an item/description column and a price column"
     );
+  const columns = columnNames(records[0], cols);
   const rows: ParsedRow[] = [];
   const skipped: SkippedRow[] = [];
   records.slice(1).forEach((record, i) => {
@@ -108,7 +138,7 @@ function parseCsvBuffer(buffer: Buffer): IngestParse {
     if (result.row) rows.push(result.row);
     else if (result.skip) skipped.push(result.skip);
   });
-  return { format: "csv", rows, skipped };
+  return { format: "csv", rows, skipped, columns };
 }
 
 /** Excel cells can hold rich text, formula results, dates — reduce each to display text. */
@@ -123,6 +153,9 @@ function cellText(value: ExcelJS.CellValue): string {
   return String(value);
 }
 
+/** How many leading non-empty rows may precede the header (title rows, logos-as-text). */
+const HEADER_SCAN_ROWS = 10;
+
 async function parseExcelBuffer(buffer: Buffer): Promise<IngestParse> {
   const workbook = new ExcelJS.Workbook();
   try {
@@ -132,36 +165,69 @@ async function parseExcelBuffer(buffer: Buffer): Promise<IngestParse> {
       `Not a parseable Excel (.xlsx) file: ${err instanceof Error ? err.message : String(err)}`
     );
   }
-  const sheet = workbook.worksheets[0];
-  if (!sheet) throw new IngestError("The workbook has no worksheets");
+  if (workbook.worksheets.length === 0) throw new IngestError("The workbook has no worksheets");
 
-  const grid: string[][] = [];
-  sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-    const cells: string[] = [];
-    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-      cells[colNumber - 1] = cellText(cell.value);
-    });
-    grid[rowNumber - 1] = cells;
-  });
-  const compact = grid.map((r, i) => ({ cells: r ?? [], line: i + 1 })).filter((r) => r.cells.some((c) => c?.trim()));
-  if (compact.length === 0) throw new IngestError("The worksheet is empty");
-  const cols = detectColumns(compact[0].cells.map((c) => c ?? ""));
-  if (!cols)
-    throw new IngestError(
-      "Could not find the required columns — the first row must name an item/description column and a price column"
-    );
   const rows: ParsedRow[] = [];
   const skipped: SkippedRow[] = [];
-  for (const { cells, line } of compact.slice(1)) {
-    const cell = (idx: number) => (idx >= 0 ? (cells[idx] ?? "") : "");
-    const result = validateRow(
-      { code: cell(cols.code), description: cell(cols.description), unit: cell(cols.unit), price: cell(cols.price) },
-      line
-    );
-    if (result.row) rows.push(result.row);
-    else if (result.skip) skipped.push(result.skip);
+  let sheetsParsed = 0;
+  let columns: IngestParse["columns"];
+
+  // EVERY worksheet is read — real pricebooks split the catalog across tabs (one per trade or
+  // category). Each sheet detects its own header, since column order routinely differs by tab;
+  // a sheet with no recognisable header is skipped WITH a visible reason, never silently.
+  for (const sheet of workbook.worksheets) {
+    const grid: string[][] = [];
+    sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+      const cells: string[] = [];
+      row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+        cells[colNumber - 1] = cellText(cell.value);
+      });
+      grid[rowNumber - 1] = cells;
+    });
+    const compact = grid
+      .map((r, i) => ({ cells: r ?? [], line: i + 1 }))
+      .filter((r) => r.cells.some((c) => c?.trim()));
+    if (compact.length === 0) continue; // a blank tab is not an error
+
+    // The header is rarely literally row 1 — catalogs put a title above it. Scan down.
+    let cols: ReturnType<typeof detectColumns> = null;
+    let headerAt = -1;
+    for (let i = 0; i < Math.min(HEADER_SCAN_ROWS, compact.length); i++) {
+      cols = detectColumns(compact[i].cells.map((c) => c ?? ""));
+      if (cols) {
+        headerAt = i;
+        break;
+      }
+    }
+    if (!cols) {
+      skipped.push({
+        sheet: sheet.name,
+        line: 0,
+        reason:
+          "sheet skipped — no header row naming an item/description column and a price column " +
+          `was found in the first ${HEADER_SCAN_ROWS} rows`,
+      });
+      continue;
+    }
+    sheetsParsed++;
+    columns ??= columnNames(compact[headerAt].cells.map((c) => c ?? ""), cols);
+
+    for (const { cells, line } of compact.slice(headerAt + 1)) {
+      const cell = (idx: number) => (idx >= 0 ? (cells[idx] ?? "") : "");
+      const result = validateRow(
+        { code: cell(cols.code), description: cell(cols.description), unit: cell(cols.unit), price: cell(cols.price) },
+        line
+      );
+      if (result.row) rows.push(result.row);
+      else if (result.skip) skipped.push({ ...result.skip, sheet: sheet.name });
+    }
   }
-  return { format: "excel", rows, skipped };
+
+  if (sheetsParsed === 0)
+    throw new IngestError(
+      "No worksheet had a recognisable header row — each sheet needs an item/description column and a price column"
+    );
+  return { format: "excel", rows, skipped, columns };
 }
 
 /**
@@ -247,7 +313,13 @@ export async function parsePricebookFile(buffer: Buffer, filename: string): Prom
   const ext = filename.toLowerCase().split(".").pop() ?? "";
   let parsed: IngestParse;
   if (ext === "csv" || ext === "txt") parsed = parseCsvBuffer(buffer);
-  else if (ext === "xlsx" || ext === "xls") parsed = await parseExcelBuffer(buffer);
+  else if (ext === "xls")
+    // ExcelJS reads only the modern zip-based format; pretending to accept .xls produced a
+    // baffling "not parseable" error instead of telling the uploader what to do.
+    throw new IngestError(
+      "Legacy .xls files aren't supported — open it in Excel and save as .xlsx (or CSV), then re-upload"
+    );
+  else if (ext === "xlsx") parsed = await parseExcelBuffer(buffer);
   else if (ext === "pdf") parsed = await parsePdfBuffer(buffer);
   else throw new IngestError(`Unsupported file type ".${ext}" — upload a CSV, Excel (.xlsx), or PDF pricebook`);
 
@@ -258,6 +330,7 @@ export async function parsePricebookFile(buffer: Buffer, filename: string): Prom
     format: parsed.format,
     rows: parsed.rows.length,
     skipped: parsed.skipped.length,
+    columns: parsed.columns,
   });
   return parsed;
 }

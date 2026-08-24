@@ -20,10 +20,6 @@ export const BLOCKING_FLAGS = [
   // price can. It blocks completion for the same reason an agent-suggested line does: a human
   // has to look at it before it reaches a customer.
   "estimated_price",
-  // Priced via online-retailer fallback, unconfirmed (pricebook-config PRD US6): the price
-  // came from Home Depot, not the client's own pricebook, so the technician must confirm or
-  // edit it before the quote can be marked Completed. Cleared by priceConfirmed.
-  "fallback_price",
 ] as const;
 
 export type LineItemFlag = (typeof BLOCKING_FLAGS)[number] | "manually_edited";
@@ -163,8 +159,9 @@ export function flagsFor(item: QuoteLineItem): LineItemFlag[] {
   if (item.unitPrice == null && item.totalPrice == null && !item.manuallyEdited)
     flags.push("unmatched");
   if (isEstimatedPrice(item) && !item.manuallyEdited) flags.push("estimated_price");
-  if (isFallbackPrice(item) && !item.manuallyEdited && !item.priceConfirmed)
-    flags.push("fallback_price");
+  // A fallback (HD-) price is deliberately NOT a flag (owner decision 2026-08-24, overriding
+  // pricebook PRD US6): the review screen's "Home Depot — online fallback" source label is
+  // the disclosure, and completion is not gated on confirming it.
   if (item.manuallyEdited) flags.push("manually_edited");
   return flags;
 }

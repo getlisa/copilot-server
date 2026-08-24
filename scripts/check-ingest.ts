@@ -21,6 +21,81 @@ const expect = (label: string, actual: unknown, expected: unknown) => {
 };
 
 async function main() {
+  // --- Excel: the catalog split across sheets, with title rows above the headers ---
+  const wb = new ExcelJS.Workbook();
+  const s1 = wb.addWorksheet("Sprinklers");
+  s1.addRow(["ACME SUPPLY — 2026 PRICE LIST"]); // title row above the header
+  s1.addRow([]);
+  s1.addRow(["Item Number", "Description", "UOM", "Unit Price"]);
+  s1.addRow(["SP-001", "Sprinkler head, pendent", "EA", 5.25]);
+  const s2 = wb.addWorksheet("Fittings");
+  // Different column ORDER on this tab — each sheet detects its own header.
+  s2.addRow(["Description", "Price", "SKU"]);
+  s2.addRow(["1/2 in EMT coupling", 0.89, "FIT-100"]);
+  s2.addRow(["", 9.99, "FIT-BAD"]); // skipped: no identifier
+  wb.addWorksheet("Notes").addRow(["Just prose, no table here"]); // skipped sheet, visibly
+  wb.addWorksheet("Blank"); // empty tab: ignored, not an error
+  const multiSheet = await parsePricebookFile(
+    Buffer.from(await wb.xlsx.writeBuffer()),
+    "multi.xlsx"
+  );
+  expect("xlsx: rows gathered from EVERY sheet", multiSheet.rows.length, 2);
+  expect(
+    "xlsx: each sheet's own header/column order respected",
+    multiSheet.rows.map((r) => r.code),
+    ["SP-001", "FIT-100"]
+  );
+  expect(
+    "xlsx: a header below title rows is still found",
+    multiSheet.rows[0].description,
+    "Sprinkler head, pendent"
+  );
+  expect(
+    "xlsx: a no-table sheet is skipped with a visible reason",
+    multiSheet.skipped.some((k) => k.sheet === "Notes" && k.reason.includes("sheet skipped")),
+    true
+  );
+  expect(
+    "xlsx: row skips name their sheet",
+    multiSheet.skipped.some((k) => k.sheet === "Fittings" && k.reason === "missing item identifier"),
+    true
+  );
+
+  // --- the distributor-sheet shape that silently broke (bug 2026-08-24) ---
+  // "Item" holds part numbers, "Description" holds the words. Leftmost-any-alias matching
+  // ingested the part numbers as descriptions; alias PRIORITY must pick Description.
+  const wb2 = new ExcelJS.Workbook();
+  const dist = wb2.addWorksheet("Net Pricing");
+  dist.addRow(["Item", "Description", "UOM", "Net Price"]);
+  dist.addRow(["VSRF0100", "FLOW SWITCH RETARD 1-2IN", "EA", 475.02]);
+  dist.addRow(["V5097P", "ONE STOP SOLVENT CEMENT PINT", "EA", 54.58]);
+  const distParsed = await parsePricebookFile(Buffer.from(await wb2.xlsx.writeBuffer()), "net_pricing.xlsx");
+  expect("distributor sheet: words become the description", distParsed.rows[0].description, "FLOW SWITCH RETARD 1-2IN");
+  expect("distributor sheet: the part number becomes the code", distParsed.rows[0].code, "VSRF0100");
+  expect(
+    "the chosen mapping is reported for the admin to see",
+    distParsed.columns,
+    { code: "Item", description: "Description", price: "Net Price", unit: "UOM" }
+  );
+
+  // A sheet with ONLY an Item column still ingests: Item is the identifier of last resort.
+  const wb3 = new ExcelJS.Workbook();
+  const bare = wb3.addWorksheet("Bare");
+  bare.addRow(["Item", "Price"]);
+  bare.addRow(["Widget thing", 9.99]);
+  const bareParsed = await parsePricebookFile(Buffer.from(await wb3.xlsx.writeBuffer()), "bare.xlsx");
+  expect("item-only sheet: Item is the description", bareParsed.rows[0].description, "Widget thing");
+  expect("item-only sheet: no code column is claimed", bareParsed.rows[0].code, null);
+
+  // Legacy .xls: rejected with instructions, not a baffling parse error.
+  let xlsError = "";
+  try {
+    await parsePricebookFile(Buffer.from("junk"), "legacy.xls");
+  } catch (err) {
+    xlsError = err instanceof IngestError ? (err as Error).message : "other";
+  }
+  expect("xls: rejected with a save-as-xlsx instruction", xlsError.includes("save as .xlsx"), true);
+
   // --- CSV ---
   const csv = Buffer.from(
     [

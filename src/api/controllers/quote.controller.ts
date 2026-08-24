@@ -18,6 +18,10 @@ import {
 import { renderQuoteDocument } from "../../copilot/estimating/templates";
 import { buildProposalDocx, type ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { buildProposalPdf } from "../../copilot/estimating/proposalPdf";
+import {
+  renderTemplatedProposalDocx,
+  renderTemplatedProposalPdf,
+} from "../../copilot/estimating/proposalTemplateRender";
 import { generateProposalNarrative } from "../../copilot/estimating/proposalNarrative";
 import { scrubAddressFromTitle } from "../../copilot/estimating/scrubAddress";
 import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating/proposalEmail";
@@ -254,7 +258,14 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     unpricedCount,
     photos,
   };
-  return { header: mergedHeader, dto, projectTitle, input, unpricedCount };
+  // The company's own proposal format, when they have one. Null → the built-in proposal,
+  // rendered by the original builders, unchanged.
+  const company = await prisma.companies.findUnique({
+    where: { id: quote.companyId },
+    select: { proposal_template: true },
+  });
+  const proposalTemplate = company?.proposal_template ?? null;
+  return { header: mergedHeader, dto, projectTitle, input, unpricedCount, proposalTemplate };
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -678,12 +689,7 @@ export class QuoteController {
     }
 
     const data: Record<string, unknown> = {};
-    if (body.confirm === true) {
-      data.agentSuggested = false;
-      // Confirming also resolves a fallback-sourced price (pricebook-config PRD US6): the
-      // technician has looked at the Home Depot price and accepted it.
-      data.priceConfirmed = true;
-    }
+    if (body.confirm === true) data.agentSuggested = false;
     // A misclassified line is correctable here: markup skips labor, so getting this wrong is
     // the difference between a marked-up and a cost-price line.
     if (typeof body.isLabor === "boolean") data.isLabor = body.isLabor;
@@ -806,8 +812,6 @@ export class QuoteController {
         pricebookCode: resolved.code,
         sourcePricebookId: match?.sourcePricebookId ?? null,
         manuallyEdited: false,
-        // A fresh price needs a fresh look: a fallback-sourced one re-blocks until confirmed.
-        priceConfirmed: false,
         ...(resolved.unit ? { unit: resolved.unit } : {}),
         ...(packed.rounded ? { quantity: packed.quantity } : {}),
       },
@@ -995,8 +999,10 @@ export class QuoteController {
     if (!user) return;
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
-    const { input } = await buildProposalParts(quote);
-    const buffer = await buildProposalDocx(input);
+    const { input, proposalTemplate } = await buildProposalParts(quote);
+    const buffer = proposalTemplate
+      ? await renderTemplatedProposalDocx(input, proposalTemplate)
+      : await buildProposalDocx(input);
     const stamp = new Date().toISOString().slice(0, 10);
     res
       .setHeader(
@@ -1013,8 +1019,10 @@ export class QuoteController {
     if (!user) return;
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
-    const { input } = await buildProposalParts(quote);
-    const buffer = await buildProposalPdf(input);
+    const { input, proposalTemplate } = await buildProposalParts(quote);
+    const buffer = proposalTemplate
+      ? await renderTemplatedProposalPdf(input, proposalTemplate)
+      : await buildProposalPdf(input);
     const stamp = new Date().toISOString().slice(0, 10);
     res
       .setHeader("Content-Type", "application/pdf")
@@ -1066,10 +1074,12 @@ export class QuoteController {
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
 
-    const { header, input } = await buildProposalParts(quote);
+    const { header, input, proposalTemplate } = await buildProposalParts(quote);
     // Unpriced lines no longer block sending — the attached PDF prints a visible
     // "NOT included in the total" note for them (proposalPdf.ts), which is the guard.
-    const buffer = await buildProposalPdf(input);
+    const buffer = proposalTemplate
+      ? await renderTemplatedProposalPdf(input, proposalTemplate)
+      : await buildProposalPdf(input);
     await sendEmail({
       to,
       from: SENDGRID_FROM_EMAIL,

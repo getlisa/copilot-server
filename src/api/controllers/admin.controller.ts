@@ -1,9 +1,19 @@
 import { Request, Response } from "express";
 import prisma from "../../lib/prisma";
+import { Prisma } from "@prisma/client";
 import logger from "../../lib/logger";
 import { uploadBufferToS3, publicUrlForKey } from "../../lib/s3";
 import { parsePricebookFile, IngestError, ParsedRow } from "../../copilot/estimating/ingest";
 import { repriceDrafts, repriceLaborDrafts } from "../../copilot/estimating/reprice";
+import {
+  DEFAULT_PROPOSAL_BLOCKS,
+  blocksOrDefault,
+  validateProposalBlocks,
+} from "../../copilot/estimating/proposalTemplate";
+import { renderTemplatedProposalPdf } from "../../copilot/estimating/proposalTemplateRender";
+import { importProposalDocument } from "../../copilot/estimating/proposalImportClassify";
+import { ProposalImportError } from "../../copilot/estimating/proposalImport";
+import type { ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { validateDocxTemplate } from "../../copilot/estimating/templates";
 
 /**
@@ -129,6 +139,9 @@ export class AdminController {
       if (!name) return fail(res, 400, "Company name cannot be blank");
       companyData.name = name;
     }
+    // Explicit null removes the logo; the templated proposal then prints none (there is
+    // deliberately no Clara-logo fallback on that path).
+    if (b.logoUrl === null) companyData.logo_url = null;
     if (b.phone !== undefined) companyData.phone = str(b.phone);
     if (b.email !== undefined) companyData.email = str(b.email);
     if (b.licenseNumber !== undefined) companyData.license_number = str(b.licenseNumber);
@@ -287,6 +300,7 @@ export class AdminController {
         ingested: inserted,
         skipped: [...parsed.skipped, ...duplicates],
         repricedDraftLines: repriced,
+        columns: parsed.columns,
       },
     });
   }
@@ -325,6 +339,7 @@ export class AdminController {
         ingested: inserted,
         skipped: [...parsed.skipped, ...duplicates],
         repricedDraftLines: repriced,
+        columns: parsed.columns,
       },
     });
   }
@@ -615,5 +630,172 @@ export class AdminController {
       includeCompleted,
     });
     res.json({ success: true, data: { deleted: result.count } });
+  }
+
+  // ---------- proposal document format ----------
+
+  /**
+   * Representative quote data for the preview, so the admin sees a realistic document without
+   * needing a real quote to exist for the company. Deliberately obvious sample values: a
+   * preview must never be mistaken for a customer's actual proposal.
+   */
+  private static previewInput(company: {
+    name: string;
+    logo_url: string | null;
+    phone: string | null;
+    email: string | null;
+    license_number: string | null;
+  }): ProposalInput {
+    return {
+      header: {
+        companyName: company.name,
+        companyAddress: "",
+        companyPhone: company.phone ?? "",
+        companyEmail: company.email ?? "",
+        customerName: "SAMPLE CUSTOMER",
+        billingAddress: "123 Sample Street",
+        serviceAddress: "123 Sample Street",
+        technicianName: "Sample Technician",
+        logoUrl: company.logo_url,
+        licenseNumber: company.license_number ?? "",
+      },
+      projectTitle: "Sample Project — Preview Only",
+      date: new Date(),
+      scopeSections: [
+        {
+          title: "Sample Work Area",
+          bullets: [
+            "Sample task describing the work to be performed",
+            "Test and verify proper operation upon completion",
+          ],
+        },
+      ],
+      total: 1825,
+      unpricedCount: 0,
+    };
+  }
+
+  /** GET /admin/companies/:companyId/proposal-template — stored blocks, or the default. */
+  static async getProposalTemplate(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const company = await prisma.companies.findUnique({
+      where: { id: companyId },
+      select: { proposal_template: true },
+    });
+    if (!company) return fail(res, 404, "Company not found");
+    res.json({
+      success: true,
+      data: {
+        // `isDefault` lets the UI say "you are on the standard proposal" rather than implying
+        // the company has already customised it.
+        isDefault: company.proposal_template == null,
+        blocks: blocksOrDefault(company.proposal_template),
+      },
+    });
+  }
+
+  /**
+   * PUT /admin/companies/:companyId/proposal-template — save the edited blocks.
+   * Validated here so a broken format can never reach a technician's download; the renderer
+   * also falls back defensively, but a save is the right place to refuse it with a reason.
+   */
+  static async putProposalTemplate(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const company = await prisma.companies.findUnique({ where: { id: companyId } });
+    if (!company) return fail(res, 404, "Company not found");
+    const blocks = req.body?.blocks;
+    const problems = validateProposalBlocks(blocks);
+    if (problems.length > 0)
+      return fail(res, 422, `Proposal format is not valid: ${problems.slice(0, 4).join("; ")}`);
+    await prisma.companies.update({
+      where: { id: companyId },
+      data: { proposal_template: blocks as Prisma.InputJsonValue },
+    });
+    logger.info("Proposal format saved", { companyId, blocks: (blocks as unknown[]).length });
+    res.json({ success: true, data: { isDefault: false, blocks } });
+  }
+
+  /** DELETE /admin/companies/:companyId/proposal-template — back to the standard proposal. */
+  static async deleteProposalTemplate(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const company = await prisma.companies.findUnique({ where: { id: companyId } });
+    if (!company) return fail(res, 404, "Company not found");
+    await prisma.companies.update({
+      where: { id: companyId },
+      // DbNull writes a real SQL NULL; JsonNull would store the JSON value `null`,
+      // which reads back as "customised" rather than "on the standard proposal".
+      data: { proposal_template: Prisma.DbNull },
+    });
+    logger.info("Proposal format reset to the standard proposal", { companyId });
+    res.json({ success: true, data: { isDefault: true, blocks: DEFAULT_PROPOSAL_BLOCKS } });
+  }
+
+  /**
+   * POST /admin/companies/:companyId/proposal-template/import — multipart "file" (.docx or
+   * .pdf). Returns the parsed blocks and any warnings WITHOUT saving: the admin reviews and
+   * corrects them in the editor first, which is the whole point of an LLM-assisted import.
+   */
+  static async importProposalTemplate(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const company = await prisma.companies.findUnique({ where: { id: companyId } });
+    if (!company) return fail(res, 404, "Company not found");
+    const file = (req as Request & { file?: Express.Multer.File }).file;
+    if (!file) return fail(res, 400, "A .docx or .pdf proposal document is required");
+    try {
+      const { blocks, warnings } = await importProposalDocument(file.buffer, file.originalname);
+      logger.info("Proposal document imported", {
+        companyId,
+        filename: file.originalname,
+        blocks: blocks.length,
+        warnings: warnings.length,
+      });
+      res.json({ success: true, data: { blocks, warnings, saved: false } });
+    } catch (err) {
+      if (err instanceof ProposalImportError) return fail(res, 422, err.message);
+      logger.error("Proposal import failed", {
+        companyId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return fail(res, 502, "Could not read that document — try a different file");
+    }
+  }
+
+  /**
+   * POST /admin/companies/:companyId/proposal-template/preview — render blocks to a PDF.
+   * Takes blocks from the body so the editor can preview UNSAVED edits; falls back to the
+   * stored format when the body has none.
+   */
+  static async previewProposalTemplate(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const company = await prisma.companies.findUnique({ where: { id: companyId } });
+    if (!company) return fail(res, 404, "Company not found");
+    const submitted = req.body?.blocks;
+    if (submitted !== undefined) {
+      const problems = validateProposalBlocks(submitted);
+      if (problems.length > 0)
+        return fail(res, 422, `Cannot preview: ${problems.slice(0, 4).join("; ")}`);
+    }
+    const blocks = submitted ?? company.proposal_template;
+    try {
+      const buffer = await renderTemplatedProposalPdf(
+        AdminController.previewInput(company),
+        blocks
+      );
+      res
+        .setHeader("Content-Type", "application/pdf")
+        .setHeader("Content-Disposition", 'inline; filename="proposal-preview.pdf"')
+        .send(buffer);
+    } catch (err) {
+      logger.error("Proposal preview render failed", {
+        companyId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return fail(res, 500, "Could not render a preview of this format");
+    }
   }
 }

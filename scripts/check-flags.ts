@@ -37,7 +37,6 @@ const line = (overrides: Partial<QuoteLineItem>): QuoteLineItem =>
     manuallyEdited: false,
     ambiguousAction: null,
     sourcePricebookId: 1,
-    priceConfirmed: false,
     isLabor: false,
     laborRateId: null,
     sortOrder: 0,
@@ -61,16 +60,13 @@ expect(
 
 // Fallback-priced line: blocks until confirmed (US6), labeled as fallback (US8).
 const fromHd = line({ pricebookCode: "HD-312528973", sourcePricebookId: null });
-expect("fallback price blocks completion", flagsFor(fromHd), ["fallback_price"]);
+// Owner decision 2026-08-24 (overrides pricebook PRD US6): a fallback price is an ordinary
+// price — the "Home Depot — online fallback" source label is the disclosure, nothing blocks.
+expect("fallback price carries no flags", flagsFor(fromHd), []);
 expect(
   "fallback price shows the HD label",
   toLineItemDto(fromHd).priceSource,
   "Home Depot — online fallback"
-);
-expect(
-  "confirm clears the fallback flag",
-  flagsFor(line({ pricebookCode: "HD-312528973", sourcePricebookId: null, priceConfirmed: true })),
-  []
 );
 
 // Manually entered price: blank source (US8's exception), only the informational flag.

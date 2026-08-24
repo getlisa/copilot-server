@@ -47,6 +47,10 @@ model companies {
   license_number   String?            @db.VarChar(100)
   /// Per-company proposal email body with {{placeholders}}; null = built-in default.
   proposal_email_template String?
+  /// Per-company proposal DOCUMENT format: an ordered ProposalBlock[] (see
+  /// copilot/estimating/proposalTemplate.ts) driving both the emailed PDF and the .docx
+  /// download. Null = the built-in hardcoded proposal, unchanged.
+  proposal_template       Json?
   website          String?            @db.VarChar(300)
   footer_terms     String?
   company_configs  company_configs?
@@ -412,9 +416,6 @@ model QuoteLineItem {
   /// Which of the company's named pricebooks priced this line (pricebook-config PRD US8).
   /// Null when the price came from Home Depot fallback, a manual edit, or nowhere yet.
   sourcePricebookId Int?   @map("source_pricebook_id")
-  /// Technician pressed Confirm on a fallback-sourced price. Clears the blocking
-  /// fallback_price flag without touching the price itself.
-  priceConfirmed  Boolean  @default(false) @map("price_confirmed")
   /// Labor line (labor PRD): quantity = hours, unit = "hr", unitPrice = hourly rate.
   /// Configured labor type this line was priced from. Null on a labor line = ad-hoc
   /// technician-stated rate (zero types configured / unmatched type / no valid rate).
