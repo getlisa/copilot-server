@@ -9,8 +9,10 @@ import { validateDocxTemplate } from "../../copilot/estimating/templates";
 /**
  * Internal per-company configuration API (pricebook-config PRD + labor PRD): pricebooks,
  * branding, templates, Home Depot fallback toggle, labor rates, and conversation cleanup.
- * All routes sit behind adminAuth (X-Admin-Token) — this is the Clara-team backend
- * mechanism; there is no technician-facing path to any of it.
+ * These routes are UNAUTHENTICATED, protected only by the non-obvious mount path in
+ * server.ts (owner decision; the adminAuth/X-Admin-Token middleware was removed). Anyone
+ * holding the URL can change any client's pricing, labor rates and templates — add real auth
+ * before this is reachable by anyone outside the team.
  */
 
 const fail = (res: Response, status: number, message: string) =>
