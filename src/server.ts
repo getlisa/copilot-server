@@ -8,6 +8,7 @@ import { voiceRoute } from "./api/routes/voice.route";
 import { estimateRoute } from "./api/routes/estimate.route";
 import { quoteRoute } from "./api/routes/quote.route";
 import { companyRoute } from "./api/routes/company.route";
+import { adminRoute } from "./api/routes/admin.route";
 import logger from "./lib/logger";
 
 dotenv.config();
@@ -78,6 +79,11 @@ app.use("/api/v1/voice", voiceRoute);
 app.use("/api/v1/copilot", estimateRoute); // DEMO-ONLY estimate-cost mode
 app.use("/api/v1/quotes", quoteRoute); // Estimating Agent (chat-as-quote, Draft → Completed)
 app.use("/api/v1/companies", companyRoute); // Hidden company registration (URL-only access)
+// Internal Clara-team config console. Deliberately unauthenticated with a non-obvious
+// path, same pattern as the hidden company registration above — access is by knowing
+// the URL. ponytail: obscurity-only by explicit owner decision; add real auth if this
+// ever holds more than internal config.
+app.use("/api/v1/op-x7k2", adminRoute);
 
 // Health check
 app.get("/health", (req, res) => {

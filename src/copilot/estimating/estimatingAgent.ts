@@ -1,10 +1,10 @@
 import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { callStructured, EstimateTurn } from "../estimate/estimateService";
-import { matchPricebook } from "./pricebookMatch";
 import { ESTIMATED_PRICE_CODE } from "./quoteDto";
 import { packAwareQuantity, unitsCompatible } from "./packMath";
-import { enqueueResolve, pricebookRowsFor } from "./homeDepotCatalog";
+import { enqueueResolve } from "./homeDepotCatalog";
+import { loadCompanyPricing } from "./companyPricing";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
 
 /**
@@ -27,12 +27,19 @@ import { QuoteLineItem, PricebookItem } from "@prisma/client";
 interface AgentOp {
   type:
     | "add_item"
+    | "add_labor"
     | "update_item"
     | "remove_item"
     | "ambiguous_reference"
     | "kb_proposal";
   itemId: string | null;
   description: string | null;
+  /**
+   * add_labor only: the configured labor type this line belongs to, exactly as named in
+   * CONFIGURED LABOR TYPES. Null = ad-hoc labor priced at a technician-stated rate
+   * (zero types configured, or the named type matched nothing).
+   */
+  laborTypeName: string | null;
   /**
    * Terse, catalog-shaped name for the PART behind this line — the thing pricing matches on.
    * `description` stays human-readable for the quote; this is what a supplier would call it.
@@ -96,6 +103,11 @@ interface AgentOutput {
   reply: string;
   isFollowUpQuestion: boolean;
   questions: AgentQuestion[] | null;
+  /**
+   * True on the turn where the agent makes THE end-of-materials labor-hours ask (labor PRD
+   * US2). Persisted onto the quote so the ask fires at most once, ever.
+   */
+  askedLaborHours: boolean;
 }
 
 const nullable = (t: string) => ({ type: [t, "null"] });
@@ -132,6 +144,7 @@ const TURN_JSON_SCHEMA = {
               type: "string",
               enum: [
                 "add_item",
+                "add_labor",
                 "update_item",
                 "remove_item",
                 "ambiguous_reference",
@@ -140,6 +153,7 @@ const TURN_JSON_SCHEMA = {
             },
             itemId: nullable("string"),
             description: nullable("string"),
+            laborTypeName: nullable("string"),
             searchTerm: nullable("string"),
             optionGroup: nullable("string"),
             quantity: nullable("number"),
@@ -158,6 +172,7 @@ const TURN_JSON_SCHEMA = {
             "type",
             "itemId",
             "description",
+            "laborTypeName",
             "searchTerm",
             "optionGroup",
             "quantity",
@@ -189,6 +204,7 @@ const TURN_JSON_SCHEMA = {
           required: ["question", "options"],
         },
       },
+      askedLaborHours: { type: "boolean" },
     },
     required: [
       "operations",
@@ -199,6 +215,7 @@ const TURN_JSON_SCHEMA = {
       "reply",
       "isFollowUpQuestion",
       "questions",
+      "askedLaborHours",
     ],
   },
 };
@@ -219,6 +236,8 @@ Rules:
 - CURRENT LINE ITEMS may include product details for priced lines (brand, price, rating, link). If the technician asks for a product link, price, brand or rating, answer from those details with NO operations. Reproduce a link EXACTLY as given, character for character — never shorten, rewrite or guess a URL, and never invent one for a line that has none. If a line has no product details, say it isn't priced from the catalog yet rather than guessing.
 - EVERY add_item and kb_proposal MUST carry a searchTerm: the terse, catalog-shaped name of the PART, as a supplier would list it. description stays readable for the customer; searchTerm is what pricing matches on, so it decides whether the line gets a price at all.
   - Name the product and its rating/size ONLY. No verbs, no scope, no conditionals, no "as needed", no "if required", no "and miscellaneous".
+  - Specs are for PICKING THE PART a supplier sells: size, amperage, gauge, voltage, material, capacity. Field-adjustable SETTINGS are not specs — a flow switch's retard delay in seconds, a breaker's trip dial, a thermostat's setpoint are configured after purchase and never distinguish a catalog row. Never ask the technician for a setting value, and never put one in a searchTerm or description (real failure: asking "retard: 30/60/90/120 sec?" for a switch whose retard is adjustable — no answer could change the part or the price).
+  - Keep the technician's OWN words for the product itself: pricing matches the company's pricebook wording, and a substituted trade synonym or an added material qualifier they never said ("glue" rewritten to "CPVC/PVC solvent cement") misses the row their book actually has. Add specs they stated; never add qualifiers they didn't.
   - Include the spec that identifies it: amperage, gauge, size, voltage, capacity.
   - Inherit the spec from job context: accessories take the size of what they attach to — a connector for a 1/2 in EMT run → "1/2 in EMT set screw connector", a cover for a 4 in square box → "4 in square box flat cover".
   - "Branch circuit wiring repair/replacement"                     → searchTerm "12 AWG THHN wire"
@@ -229,8 +248,19 @@ Rules:
   - "Conduit for EV charger circuit"                               → searchTerm "3/4 in EMT conduit"
   - If a line is genuinely pure labor, diagnosis, or testing with no material to buy, set searchTerm null — it is not a purchasable part and must not be priced as one. Set isLabor true on exactly those lines, and on nothing else: the quote's markup percentage is applied to materials only, so a labor line marked isLabor false gets marked up as if it were a part. Every line naming something purchasable is isLabor false.
   - Same for workmanship/consumables allowances that name no product: "Terminations and feeder makeup" → searchTerm null. No supplier lists "makeup"; price it as a technician-stated allowance or fold it into labor instead.
-  - A labor line still needs a price no catalog can supply: NEVER add a labor line without a technician-stated price. If they haven't given their rate, ask via the questions array (like a missing quantity — options with common rates, e.g. "$95/hr" / "$125/hr" / "$150/hr", the UI adds an "Other" box), then emit the line with unitPrice from their answer: rate per HR with hours as quantity, or a flat price with quantity 1. Never invent a labor rate. unitPrice stays null on every material line — materials are priced downstream.
-- LABOR IS PART OF EVERY SCOPED JOB. This rule applies when YOU scope a described job (the CLARIFY/PROPOSE/CONFIRM flow below); it does NOT apply when the technician is simply dictating specific materials or the request genuinely has no work to perform (a parts-only/supply quote) — never inject labor into a list they are building themselves. A job you scope for install/repair/replacement work is INCOMPLETE without at least one labor line — the technician never mentions labor themselves; asking is your job. When you propose an itemized list, always include the labor line(s): hours as quantity, the technician's hourly rate as unitPrice. If rate or hours are unknown, ask for BOTH in the questions array. SCALE the hour options to the scope instead of defaulting small — a small repair is 2-8 hr, a panel/service change 16-32 hr, an industrial motor/feeder job 80-200 hr, a whole-house rewire 60-120 hr — and put a realistic mid value among the options, not as "Other". Never emit the final add_items for a scoped job without its labor line — with ONE exception: the technician explicitly declining labor ("no labor line", "materials only", "labor is separate") is their call. Honor it, don't re-ask, and don't sneak labor back in on a later turn; a declined labor line stays out until they ask for it.
+  - Pure-labor/diagnostic lines are handled by the LABOR CHARGES rules below, never as materials. unitPrice stays null on every material line — materials are priced downstream.
+- LABOR CHARGES: labor is captured with the add_labor op — quantity = hours, laborTypeName = the configured type it belongs to, unitPrice = an hourly rate ONLY when the technician stated one themselves. The context lists this client's CONFIGURED LABOR TYPES and whether THE LABOR ASK was already made.
+  - Capture immediately when the technician states labor hours unprompted, at any point. The hours must be an EXPLICIT number — never infer one from a vague statement ("probably a couple hours" is not capturable; ask for the number).
+  - THE LABOR ASK: when the technician has finished describing the job's materials and has not mentioned labor, ask about labor hours — set askedLaborHours true on that turn. The context tells you if the ask was already made: NEVER repeat it. If they decline or ignore it, move on; labor is fully optional, a quote with no labor is fine, and nothing ever blocks on it.
+  - Exactly ONE configured type: ask only for hours — never which type. Emit add_labor with that type's name; leave unitPrice null (the server prices it). If that type's rate is unusable, the server can't price it — the context marks such a type "(no valid rate)": then ask the technician for an hourly rate and put it in unitPrice.
+  - MULTIPLE configured types: recite the configured type names and ask which apply — the technician may name MORE THAN ONE, each with its own hours. Emit one add_labor per named type. This is a closed set: match their answer to the configured names only, no fuzzy guessing.
+  - Named type matches NO configured name: say that labor type doesn't exist for their company and ask for an hourly rate to use for the job; emit add_labor with laborTypeName null and unitPrice = their stated rate.
+  - ZERO configured types: still make the labor ask, and ask for BOTH the hours and the hourly rate in the same exchange. Emit add_labor (laborTypeName null, unitPrice = their rate) only once you have both.
+  - BOTH PIECES FIRST: never emit add_labor without hours, and never without either a configured type or a technician-stated rate. Hours alone or a type alone is not yet a line item — ask for what's missing.
+  - Corrections vs additions on an existing labor line: "actually make it 3 hours" REPLACES (update_item with quantity 3); "add 2 more hours" ADDS ON TOP (update_item with the summed total). Same distinction as material quantities.
+  - Labor lines never carry a searchTerm, and hours must be greater than zero.
+  - SCALE the hour options you offer to the scope instead of defaulting small — a small repair is 2-8 hr, a panel/service change 16-32 hr, an industrial motor/feeder job 80-200 hr, a whole-house rewire 60-120 hr — and put a realistic mid value among the options, not as "Other".
+  - A technician explicitly declining labor ("no labor line", "materials only", "labor is separate") is their call: honor it, don't re-ask, and don't sneak labor back in on a later turn.
 - Units: keep what the technician said (ft, EA, etc.), else null.
 - ALTERNATIVE OPTIONS: when the technician quotes a job as alternatives the customer picks between ("price it both ways", "Option A conduit only / Option B full feed", "give them three options"), set optionGroup on EVERY line that belongs to an option — a short customer-facing name like "Option A – Trench and Raceway Only" — and keep it null on base-scope lines common to all choices. Lines in different option groups are mutually exclusive: they are totaled per group and NEVER added together, so a line that belongs in both options must be added to each group separately. Never fold alternative scopes into ungrouped lines — that silently bills the customer for both.
 - Wire, cable, and conduit quantities are LENGTHS in feet — runs × run length — never a count of conductors or runs. "4 conductors over an 85 ft run" → quantity 340, unit ft. A count can't be priced against per-foot goods and leaves the line unpriced.
@@ -257,12 +287,20 @@ interface KbEntryLite {
   unit: string | null;
 }
 
+interface LaborRateLite {
+  id: number;
+  name: string;
+  hourlyRate: number;
+}
+
 function buildTurnContext(
   items: QuoteLineItem[],
   kbEntries: KbEntryLite[],
   utterance: string,
   /** Pricebook rows keyed by code, so priced lines can expose product link/brand/rating. */
-  catalog?: Map<string, PricebookItem>
+  catalog?: Map<string, PricebookItem>,
+  laborRates: LaborRateLite[] = [],
+  laborAsked = false
 ): string {
   // Product provenance is included so the agent can answer "what's the link / brand / price"
   // from context instead of guessing or web-searching. Keyed off the line's pricebookCode.
@@ -283,6 +321,7 @@ function buildTurnContext(
               : "";
             return (
               `- id=${i.id} | ${i.description} | qty=${i.quantity ?? "MISSING"}${i.unit ? " " + i.unit : ""}` +
+              `${i.isLabor ? ` | LABOR line${i.unitPrice != null ? ` @ $${Number(i.unitPrice)}/hr` : ""}` : ""}` +
               `${i.agentSuggested ? " | agent-suggested, unconfirmed" : ""}` +
               `${i.ambiguousAction ? " | pending ambiguous reference" : ""}${product}`
             );
@@ -297,11 +336,22 @@ function buildTurnContext(
               `- kbEntryId=${k.id} | problem: ${k.problem} | material: ${k.materialDescription} | default qty: ${k.defaultQuantity}${k.unit ? " " + k.unit : ""}`
           )
           .join("\n");
+  const laborLines =
+    laborRates.length === 0
+      ? "(none configured — ask for BOTH hours and an hourly rate when capturing labor)"
+      : laborRates
+          .map((r) => `- ${r.name} — $${r.hourlyRate}/hr`)
+          .join("\n");
   return `CURRENT LINE ITEMS:
 ${itemLines}
 
 KNOWLEDGE BASE ENTRIES (problem → material):
 ${kbLines}
+
+CONFIGURED LABOR TYPES for this client:
+${laborLines}
+
+THE LABOR ASK was already made for this quote: ${laborAsked ? "YES — never ask again" : "no"}.
 
 TECHNICIAN SAID:
 ${utterance}`;
@@ -322,14 +372,21 @@ export async function runEstimatingTurn(opts: {
   /** Presigned URLs of photos attached to this turn (vision input). */
   imageUrls?: string[];
 }): Promise<AgentTurnResult> {
-  const [items, kbEntries, pricebook] = await Promise.all([
+  const [items, kbEntries, pricing, laborRates, quoteRow] = await Promise.all([
     prisma.quoteLineItem.findMany({
       where: { quoteId: opts.quoteId },
       orderBy: { sortOrder: "asc" },
     }),
     prisma.kbEntry.findMany({ where: { companyId: opts.companyId } }),
-    pricebookRowsFor(opts.companyId),
+    loadCompanyPricing(opts.companyId),
+    prisma.laborRate.findMany({ where: { companyId: opts.companyId } }),
+    prisma.quote.findUnique({ where: { id: opts.quoteId }, select: { laborAsked: true } }),
   ]);
+  const laborRatesLite: LaborRateLite[] = laborRates.map((r) => ({
+    id: r.id,
+    name: r.name,
+    hourlyRate: Number(r.hourlyRate),
+  }));
 
   // Self-heal: lines whose pricing failed on an earlier turn retry here — one search per
   // item, individually, capped at MAX_RESOLVE_ATTEMPTS total tries per term by the attempt
@@ -339,20 +396,32 @@ export async function runEstimatingTurn(opts: {
   // The stored searchTerm is the catalog-shaped part name and is what pricing matches on;
   // description is customer prose and only stands in for lines created before the column
   // existed. The resolver also canonicalizes a failed term once before giving up.
-  for (const line of items) {
-    // An estimated price counts as unpriced for this purpose: it came from a web search, not
-    // the catalog, so it must keep trying for a real product price rather than settling.
-    if (
-      (line.unitPrice == null || line.pricebookCode === ESTIMATED_PRICE_CODE) &&
-      !line.manuallyEdited &&
-      !line.ambiguousAction
-    ) {
-      enqueueResolve(line.searchTerm ?? line.description, opts.companyId, line.description, [line.id]);
+  // Home Depot fallback is per-client and off by default (pricebook-config PRD US5): with
+  // it off, an unpriced line simply stays unmatched — no live lookup ever runs.
+  if (pricing.fallbackEnabled) {
+    for (const line of items) {
+      // An estimated price counts as unpriced for this purpose: it came from a web search, not
+      // the catalog, so it must keep trying for a real product price rather than settling.
+      if (
+        (line.unitPrice == null || line.pricebookCode === ESTIMATED_PRICE_CODE) &&
+        !line.manuallyEdited &&
+        !line.isLabor && // labor is never priced from a catalog
+        !line.ambiguousAction
+      ) {
+        enqueueResolve(line.searchTerm ?? line.description, opts.companyId, line.description, [line.id]);
+      }
     }
   }
 
-  const catalog = new Map(pricebook.map((p) => [p.code, p]));
-  const turnContext = buildTurnContext(items, kbEntries, opts.utterance, catalog);
+  const catalog = new Map(pricing.rawRows.map((p) => [p.code, p]));
+  const turnContext = buildTurnContext(
+    items,
+    kbEntries,
+    opts.utterance,
+    catalog,
+    laborRatesLite,
+    quoteRow?.laborAsked === true
+  );
   const { raw } = await callStructured({
     system: SYSTEM_PROMPT + MARKUP_PROMPT + CUSTOMER_PROMPT,
     userContent: opts.imageUrls?.length
@@ -375,30 +444,9 @@ export async function runEstimatingTurn(opts: {
     };
   }
 
-  const matchable = pricebook.map((p) => ({
-    id: p.id,
-    code: p.code,
-    description: p.description,
-    unit: p.unit,
-    unitPrice: Number(p.unitPrice),
-    synonyms: p.synonyms,
-    // Distinguishes the Home Depot cache from the company's own curated rows — see priceFields.
-    source: p.source,
-    // How many pieces the supplier sells at once. Carried through so a line's quantity can be
-    // rounded up to whole packs — see packMath.
-    packageQuantity: p.packageQuantity == null ? null : Number(p.packageQuantity),
-  }));
-  const byCode = new Map(matchable.map((p) => [p.code, p]));
   const validIds = new Set(items.map((i) => i.id));
   let nextSort =
     items.length > 0 ? Math.max(...items.map((i) => i.sortOrder)) + 1 : 0;
-
-  // Home Depot is the price source for every material line. Rows already resolved from it
-  // (source = HOME_DEPOT) are the cache: a hit there means the item was priced on some earlier
-  // turn, so no API call is spent. MANUAL rows are the company's own curated book and act as
-  // an immediate value while a first-time resolve runs in the background.
-  const hdItems = matchable.filter((p) => p.source === "HOME_DEPOT");
-  const manualItems = matchable.filter((p) => p.source !== "HOME_DEPOT");
 
   /**
    * `searchTerm` is the catalog-shaped part name and is tried FIRST; `description` is prose
@@ -406,7 +454,9 @@ export async function runEstimatingTurn(opts: {
    * quotes were unmatchable scope text). A null searchTerm on a labor/diagnostic line is a
    * deliberate signal that there is nothing to buy — no lookup, no price.
    *
-   * Order: cached Home Depot row → (enqueue live Home Depot) → company book → blank.
+   * Order (pricebook-config PRD): the client's own books (priority order, higher price wins
+   * a collision) → Home Depot cache/live ONLY when the client's fallback toggle is on. A
+   * book hit is final: Home Depot never overrides the client's own price.
    */
   const priceFields = (
     description: string,
@@ -415,23 +465,25 @@ export async function runEstimatingTurn(opts: {
   ) => {
     const term = searchTerm?.trim() || null;
     const blank = {
-      pricebookCode: null,
-      unitPrice: null,
-      unit: null,
-      packageQuantity: null,
-      resolveTerm: null,
+      pricebookCode: null as string | null,
+      unitPrice: null as number | null,
+      unit: null as string | null,
+      packageQuantity: null as number | null,
+      sourcePricebookId: null as number | null,
+      resolveTerm: null as string | null,
     };
 
     // 0. An explicit KB code is a curated, exact identity mapping. It outranks any fuzzy
     //    match, and its line must not be re-resolved — the backfill would otherwise overwrite
     //    a human-chosen code with whatever the catalog returned for a generated searchTerm.
-    const curated = explicitCode ? byCode.get(explicitCode) : undefined;
+    const curated = explicitCode ? pricing.byCode.get(explicitCode) : undefined;
     if (curated) {
       return {
         pricebookCode: curated.code,
         unitPrice: curated.unitPrice,
         unit: curated.unit,
         packageQuantity: curated.packageQuantity,
+        sourcePricebookId: curated.sourcePricebookId,
         resolveTerm: null,
       };
     }
@@ -442,38 +494,23 @@ export async function runEstimatingTurn(opts: {
     // product link, asserting that the labour line WAS that breaker.
     if (!term) return blank;
 
-    const find = (items: typeof matchable) => matchPricebook(term, items);
-
-    // 1. Already resolved from Home Depot for this company → reuse it, spend nothing.
-    const cached = find(hdItems);
-    if (cached) {
+    // 1. Client books first (collision rule inside), then the HD cache when fallback is on.
+    const hit = pricing.match(term);
+    if (hit) {
       return {
-        pricebookCode: cached.code,
-        unitPrice: cached.unitPrice,
-        unit: cached.unit,
-        packageQuantity: cached.packageQuantity,
+        pricebookCode: hit.code,
+        unitPrice: hit.unitPrice,
+        unit: hit.unit,
+        packageQuantity: hit.packageQuantity,
+        sourcePricebookId: hit.sourcePricebookId,
         resolveTerm: null,
       };
     }
 
-    // 2. Not cached → the caller resolves from Home Depot AFTER the row exists, so the
-    //    backfill can target it by id. Returning the term rather than enqueueing here is what
-    //    makes that possible; enqueueing inline had no id to aim at and matched on text.
-    // 3. Meanwhile show the company's own price if the book has it, so a line the book covers
-    //    is never blank while the resolve runs.
-    const own = find(manualItems);
-    if (own) {
-      return {
-        pricebookCode: own.code,
-        unitPrice: own.unitPrice,
-        unit: own.unit,
-        packageQuantity: own.packageQuantity,
-        resolveTerm: term,
-      };
-    }
-
-    // 4. Nothing anywhere — stay unpriced (the `unmatched` flag) rather than guess.
-    return { ...blank, resolveTerm: term };
+    // 2. Nothing anywhere. With fallback on, the caller starts a live Home Depot resolve
+    //    AFTER the row exists so the backfill can target it by id; with fallback off the
+    //    line simply stays unpriced (the `unmatched` flag) — no lookup of any kind.
+    return { ...blank, resolveTerm: pricing.fallbackEnabled ? term : null };
   };
 
   /** Start a Home Depot resolve for a row that now has an id the backfill can target. */
@@ -524,6 +561,7 @@ export async function runEstimatingTurn(opts: {
               unitPrice: null,
               unit: null,
               packageQuantity: null,
+              sourcePricebookId: null,
               resolveTerm: priced.resolveTerm,
             };
           }
@@ -546,12 +584,51 @@ export async function runEstimatingTurn(opts: {
               unit: addUnit,
               unitPrice: priced.unitPrice,
               pricebookCode: priced.pricebookCode,
+              sourcePricebookId: priced.sourcePricebookId,
               optionGroup: op.optionGroup?.trim() || null,
               isLabor: op.isLabor === true,
               sortOrder: nextSort++,
             },
           });
           resolveFor(priced, created);
+          break;
+        }
+        case "add_labor": {
+          // Both pieces must be known before a labor line exists (labor PRD US4/US5):
+          // hours > 0, and either a configured type or a technician-stated rate.
+          const hours = op.quantity;
+          if (hours == null || !(hours > 0)) break;
+          const typeName = op.laborTypeName?.trim() || null;
+          const configured = typeName
+            ? laborRatesLite.find((r) => r.name.toLowerCase() === typeName.toLowerCase())
+            : laborRatesLite.length === 1 && op.unitPrice == null
+            ? laborRatesLite[0]
+            : null;
+          const rate = configured ? configured.hourlyRate : op.unitPrice;
+          if (rate == null || rate < 0) break; // no configured type and no stated rate → not yet a line
+          const laborLine = await prisma.quoteLineItem.create({
+            data: {
+              quoteId: opts.quoteId,
+              description: op.description ?? configured?.name ?? "Labor",
+              quantity: hours,
+              unit: "hr",
+              unitPrice: rate,
+              isLabor: true,
+              laborRateId: configured?.id ?? null,
+              // An ad-hoc technician-stated rate is an ordinary priced line (US5), not a
+              // manual override of configured data — manuallyEdited stays false either way.
+              optionGroup: op.optionGroup?.trim() || null,
+              sortOrder: nextSort++,
+            },
+          });
+          // Audit trail (labor PRD): every labor line creation is logged with its values.
+          logger.info("Labor line created", {
+            quoteId: opts.quoteId,
+            lineItemId: laborLine.id,
+            laborType: configured?.name ?? "(ad-hoc rate)",
+            hours,
+            hourlyRate: rate,
+          });
           break;
         }
         case "kb_proposal": {
@@ -571,6 +648,7 @@ export async function runEstimatingTurn(opts: {
               unitPrice: null,
               unit: null,
               packageQuantity: null,
+              sourcePricebookId: null,
               resolveTerm: priced.resolveTerm,
             };
           }
@@ -586,6 +664,7 @@ export async function runEstimatingTurn(opts: {
               unit: kbUnit,
               unitPrice: priced.unitPrice,
               pricebookCode: priced.pricebookCode,
+              sourcePricebookId: priced.sourcePricebookId,
               optionGroup: op.optionGroup?.trim() || null,
               isLabor: op.isLabor === true,
               agentSuggested: true,
@@ -599,13 +678,28 @@ export async function runEstimatingTurn(opts: {
           if (!op.itemId || !validIds.has(op.itemId)) break;
           const existing = items.find((i) => i.id === op.itemId)!;
           const data: Record<string, unknown> = {};
-          if (op.quantity != null) data.quantity = op.quantity;
+          if (op.quantity != null) {
+            // Labor hours must be greater than zero — the labor PRD's one sanity check.
+            if (existing.isLabor && !(op.quantity > 0)) break;
+            data.quantity = op.quantity;
+          }
           if (op.unit != null) data.unit = op.unit;
           if (op.unitPrice != null) {
             data.unitPrice = op.unitPrice;
+            // Overriding a labor line's RATE away from its configured value is what the
+            // manually-edited flag is for (labor PRD US7); hours edits never set it.
             data.manuallyEdited = true;
+            data.sourcePricebookId = null; // technician's own number — no book is the source
           }
           if (op.isLabor != null) data.isLabor = op.isLabor;
+          // Audit trail (labor PRD): hours corrections/additions log prior and new values.
+          if (existing.isLabor && op.quantity != null)
+            logger.info("Labor line hours updated", {
+              quoteId: opts.quoteId,
+              lineItemId: existing.id,
+              priorHours: existing.quantity == null ? null : Number(existing.quantity),
+              newHours: op.quantity,
+            });
           let repriced: ReturnType<typeof priceFields> | null = null;
           if (op.description != null && op.description !== existing.description) {
             data.description = op.description;
@@ -624,6 +718,7 @@ export async function runEstimatingTurn(opts: {
               ) {
                 data.pricebookCode = priced.pricebookCode;
                 data.unitPrice = priced.unitPrice;
+                data.sourcePricebookId = priced.sourcePricebookId;
                 if (priced.unit && op.unit == null) data.unit = priced.unit;
               }
             }
@@ -715,6 +810,15 @@ export async function runEstimatingTurn(opts: {
   }
   if (Object.keys(customerData).length > 0) {
     await prisma.quote.update({ where: { id: opts.quoteId }, data: customerData });
+  }
+
+  // The end-of-materials labor ask fires at most once per quote (labor PRD US2): record
+  // that it happened so every later turn's context says "never ask again".
+  if (output.askedLaborHours === true && quoteRow?.laborAsked !== true) {
+    await prisma.quote.update({
+      where: { id: opts.quoteId },
+      data: { laborAsked: true },
+    });
   }
 
   return {

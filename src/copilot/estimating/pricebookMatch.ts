@@ -74,6 +74,12 @@ const UNIT_CANON: Record<string, string> = {
 function canonicalizeUnits(text: string): string {
   return (
     text
+      // Fire-protection vocabulary: "waterflow switch" and "flow switch" are the same device.
+      // Measured consequence (2026-08-24): the model's searchTerm said "waterflow", the
+      // company's base row said "FLOW SWITCH", its corrosion-resistant rows said "WATERFLOW" —
+      // exact-word scoring priced a \$1,115.86 CR variant over the \$474.93 row the technician
+      // named verbatim. Both sides normalize, so the spelling can never decide the match.
+      .replace(/\bwater\s*flow\b/gi, "flow")
       // Aught gauge sizes FIRST: "4/0 AWG" must reduce to the bare "4/0" Home Depot titles
       // use. Left to the number-unit rule below, the "0 AWG" tail alone matched and produced
       // the token "4/0awg", which no retail title contains — every aught-size conductor
@@ -186,24 +192,62 @@ const ACCESSORY_NOUNS = new Set([
   "clamp", "connector", "strap", "cover", "bracket", "cap", "bushing", "coupling", "plate",
 ]);
 
+/**
+ * Negation: "FLOW SWITCH NO RETARD" contains the token "retard", so token overlap scored it a
+ * perfect hit for the query "flow switch with retard" — the technician asked for a retard and
+ * was priced the one product explicitly WITHOUT one (\$426.86, real quote 2026-08-24). A word
+ * preceded by no/without/w/o is the OPPOSITE of a hit: it is collected here and enforced as a
+ * hard gate in both directions ("without retard" must not match a "W/ RETARD" row either).
+ * "no-hub coupling"-style product names survive because both sides negate the same word.
+ */
+const NEGATION_RE = /\b(?:no|without|w\/o)[\s-]+([a-z0-9]+)/g;
+
+function negatedTokens(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of canonicalizeUnits(text).toLowerCase().matchAll(NEGATION_RE)) out.add(m[1]);
+  return out;
+}
+
+/** Remove negation phrases so the negated word neither scores nor becomes the head noun. */
+function stripNegations(text: string): string {
+  return canonicalizeUnits(text).toLowerCase().replace(NEGATION_RE, " ");
+}
+
 /** Best pricebook match for a free-text description, or null if nothing is close enough. */
 export function matchPricebook<T extends MatchablePricebookItem>(
   query: string,
   items: T[]
 ): T | null {
-  const qTokens = tokenize(query);
+  // EXACT PASS FIRST: a query that IS a row's code ("VSRF0100", "09804FC/B") is a direct
+  // lookup, not a fuzzy question — tokenization mangles part numbers with separators, and no
+  // gate or score should second-guess a technician quoting the catalog's own identifier.
+  const exact = query.trim().toUpperCase();
+  if (exact) {
+    const byCode = items.filter((i) => i.code.toUpperCase() === exact);
+    if (byCode.length === 1) return byCode[0];
+  }
+
+  const qNegated = negatedTokens(query);
+  const qTokens = tokenize(stripNegations(query));
   if (qTokens.length === 0) return null;
   const required = specTokens(qTokens);
   const noun = productNoun(qTokens);
 
   let best: T | null = null;
   let bestScore = 0;
+  let bestHaySize = Infinity;
 
   for (const item of items) {
+    const hayNegated = negatedTokens(item.description);
     const hay = tokenize(
-      `${item.description} ${item.synonyms.join(" ")} ${item.code}`
+      `${stripNegations(item.description)} ${item.synonyms.join(" ")} ${item.code}`
     );
     const haySet = new Set(hay.flatMap(variants));
+
+    // HARD CONSTRAINT: a word one side negates and the other side asks for positively makes
+    // the products opposites — "with retard" vs "NO RETARD" — however well the rest scores.
+    if ([...hayNegated].some((t) => !qNegated.has(t) && qTokens.some((q) => variants(q).includes(t)))) continue;
+    if ([...qNegated].some((t) => !hayNegated.has(t) && haySet.has(t))) continue;
 
     // HARD CONSTRAINT: every measurement in the query must be present. A row missing one is
     // a different product, however well the remaining words score. Rejecting it leaves the
@@ -214,7 +258,7 @@ export function matchPricebook<T extends MatchablePricebookItem>(
     if (noun && !variants(noun).some((v) => haySet.has(v))) continue;
     // HARD CONSTRAINT, reversed: a row whose OWN head noun is an accessory word must not
     // price a query that never asked for that accessory — see ACCESSORY_NOUNS.
-    const hayNoun = productNoun(tokenize(item.description));
+    const hayNoun = productNoun(tokenize(stripNegations(item.description)));
     if (
       hayNoun &&
       ACCESSORY_NOUNS.has(hayNoun) &&
@@ -233,8 +277,15 @@ export function matchPricebook<T extends MatchablePricebookItem>(
         hit += 0.75;
     }
     const score = hit / qTokens.length;
-    if (score > bestScore) {
+    // Tie-break: the row with the FEWEST tokens wins an equal score. Every query word matched
+    // both rows, so the shorter description carries less specificity the technician never
+    // asked for — "FLOW SWITCH RETARD & GLUE" must beat '2-1/2" CORROSION RESISTANT WATERFLOW
+    // ALARM SWITCH W/ RETARD' for the query "flow switch with retard". Before this, a tie
+    // went to whichever row happened to scan first (DB order), which priced that CR variant.
+    const descSize = tokenize(item.description).length;
+    if (score > bestScore || (score === bestScore && best && descSize < bestHaySize)) {
       bestScore = score;
+      bestHaySize = descSize;
       best = item;
     }
   }
