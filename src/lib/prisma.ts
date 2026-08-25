@@ -36,9 +36,9 @@ export const prisma =
       process.env.NODE_ENV === "development"
         ? ["query", "info", "warn", "error"]
         : ["error"],
-    datasources: {
-      db: datasourceUrl ? { url: datasourceUrl } : undefined,
-    },
+    // No DATABASE_URL (e.g. the Docker build running checks): omit the override entirely —
+    // `db: undefined` fails constructor validation at import time, before any query runs.
+    ...(datasourceUrl ? { datasources: { db: { url: datasourceUrl } } } : {}),
   });
 
 if (process.env.NODE_ENV !== "production") {
