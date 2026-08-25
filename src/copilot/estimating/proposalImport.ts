@@ -361,5 +361,13 @@ export function assembleImportedBlocks(
       content: parts,
     });
   }
+  // Extraction cannot read a logo or photos out of a .docx or PDF, so an imported template
+  // would silently lose the letterhead and the job-photos section — every import starts with
+  // the logo block and ends with the photos block unless the classifier already placed them.
+  // Photos render nothing when a quote has none, and the admin can hide or delete either.
+  if (!blocks.some((b) => b.dynamic === "logo"))
+    blocks.unshift({ id: "logo", visible: true, dynamic: "logo", style: { align: "left" } });
+  if (!blocks.some((b) => b.dynamic === "photos"))
+    blocks.push({ id: "photos", heading: "Project Photos", visible: true, dynamic: "photos" });
   return blocks;
 }

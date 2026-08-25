@@ -18,6 +18,8 @@ export interface QuotePdfInput {
   thumbnail?: { buffer: Buffer; mimeType?: string };
   /** Customer's digital autograph; when present it is drawn in the signature block. */
   signature?: { buffer: Buffer; mimeType?: string; signerName?: string; signedAt?: Date };
+  /** Job photos appended after Terms (the proposal flow's chat-attached photos). */
+  photos?: { data: Buffer; width: number; height: number }[];
 }
 
 // Palette / geometry
@@ -119,7 +121,8 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
 
         const titleY = y + rowPad;
         doc.font("Helvetica").fontSize(9.5).fillColor(INK);
-        const title = `${li.code} - ${li.description}`;
+        // Proposal-flow lines may have no pricebook code; the estimate flow always emits one.
+        const title = [li.code, li.description].filter(Boolean).join(" - ");
         const titleH = doc.heightOfString(title, { width: ITEM_W });
         doc.text(title, COL.item + 6, titleY, { width: ITEM_W });
 
@@ -205,6 +208,23 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
         ? quote.customerNotes.map((n) => `• ${n}`).join("\n")
         : "Should comply with all company policies.";
       section("Terms and Conditions", terms);
+
+      // ---- Photos (proposal flow only; the estimate flow passes none) ----
+      if (input.photos?.length) {
+        if (y > 720) { doc.addPage(); y = MARGIN; }
+        doc.font("Helvetica-Bold").fontSize(11).fillColor(INK).text("Project Photos", MARGIN, y);
+        y = doc.y + 6;
+        for (const p of input.photos) {
+          const h = Math.min(p.height, 260);
+          if (y + h > 780) { doc.addPage(); y = MARGIN; }
+          try {
+            doc.image(p.data, MARGIN, y, { fit: [Math.min(p.width, CONTENT_W), h] });
+            y += h + 10;
+          } catch {
+            /* unreadable image — skip it */
+          }
+        }
+      }
 
       // ---- Footer ----
       doc.font("Helvetica-Bold").fontSize(8).fillColor(MUTED)

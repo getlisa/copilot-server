@@ -8,6 +8,8 @@ import type { EstimateQuote, FollowUpQuestion } from "../../copilot/estimate/est
 import { streamEstimateGraph, ESTIMATE_NODES } from "../../copilot/estimate/graph/graph";
 import { buildQuotePdf } from "../../copilot/estimate/pdf/quotePdf";
 import { loadQuoteHeader, loadSuggestedCustomerEmail } from "../../copilot/estimate/pdf/quoteHeader";
+import { loadPhotos } from "../../copilot/estimating/proposalDocx";
+import prisma from "../../lib/prisma";
 import { buildEstimateEmail } from "../../copilot/estimate/email/estimateEmailTemplate";
 import { uploadBufferToS3, getPresignedUrlForKey, getObjectBufferFromS3 } from "../../lib/s3";
 import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
@@ -21,6 +23,28 @@ const PDF_URL_TTL =
 /** Content-Disposition that makes a download serve with this filename. */
 function pdfContentDisposition(filename: string): string {
   return `attachment; filename="${filename}"`;
+}
+
+/**
+ * Chat-attached photos for a conversation, sized for the PDF's Project Photos section.
+ * The identified-equipment photo is excluded — it already prints as the line thumbnail.
+ * Photos are additive: any failure returns [] rather than blocking the estimate.
+ */
+async function loadConversationPhotos(
+  conversationId: string,
+  excludeKey?: string | null
+): Promise<{ data: Buffer; width: number; height: number }[]> {
+  try {
+    const rows = await prisma.imageFile.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: "asc" },
+      select: { s3Key: true, mimeType: true },
+    });
+    const wanted = rows.filter((r) => r.s3Key !== excludeKey);
+    return wanted.length ? await loadPhotos(wanted) : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Public base URL of this API (env override, else derived from forwarded headers). */
@@ -417,6 +441,7 @@ export class EstimateController {
         estimateNumber,
         date: new Date(),
         thumbnail,
+        photos: await loadConversationPhotos(conversationId, quote.equipmentImageKey),
       });
 
       const filename = `Estimate-${estimateNumber}-PREVIEW.pdf`;
@@ -497,6 +522,7 @@ export class EstimateController {
         date: signedAt,
         thumbnail,
         signature: { buffer: signature, mimeType: signatureMimeType, signerName, signedAt },
+        photos: await loadConversationPhotos(conversationId, quote.equipmentImageKey),
       });
 
       const key = `estimates/${conversationId}/${messageId}.pdf`;

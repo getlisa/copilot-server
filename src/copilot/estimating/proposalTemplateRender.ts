@@ -5,15 +5,19 @@ import {
   LevelFormat,
   Packer,
   Paragraph,
+  Table,
+  TableCell,
+  TableRow,
   TextRun,
+  WidthType,
 } from "docx";
 import PDFDocument from "pdfkit";
 import {
   amountInWords,
   loadLogo,
   loadPhotos,
-  STATIC_ASSUMPTIONS,
   type ProposalInput,
+  type ProposalLineItem,
 } from "./proposalDocx";
 import {
   blocksOrDefault,
@@ -31,15 +35,33 @@ import {
  * always carry the same content in the same order — the reason the format is stored as blocks
  * rather than as an uploaded binary.
  *
- * Only companies WITH a stored template come through here; everyone else keeps the original
- * builders in proposalDocx/proposalPdf untouched, so existing output cannot regress.
+ * EVERY company renders through here (stored template or the default blocks alike) since the
+ * estimate-layout default shipped (2026-08-25); the legacy proposalDocx/proposalPdf builders
+ * remain only as internals this module borrows.
  */
 
 const money = (v: number) =>
   `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+/** Rate / Qty / Total cells for one table line, shared by both renderers. */
+const lineCells = (l: ProposalLineItem) => ({
+  item: [l.code, l.description].filter(Boolean).join(" - "),
+  rate: l.unitPrice != null ? money(l.unitPrice) : "—",
+  qty: l.quantity != null ? `${l.quantity}${l.unit ? ` ${l.unit}` : ""}` : "",
+  total: l.totalPrice != null ? money(l.totalPrice) : "—",
+});
+
+const UNPRICED_NOTE = (n: number) =>
+  `NOTE: ${n} line item(s) are not yet priced and are NOT included in the totals below. ` +
+  `This proposal is incomplete until they are priced or removed.`;
+
+const OPTIONS_NOTE =
+  "Only one option will be selected and performed; option totals are alternatives and are " +
+  "never combined with each other.";
+
 const tokensOf = (input: ProposalInput): TemplateTokens => ({
   companyName: input.header.companyName ?? "",
+  companyAddress: input.header.companyAddress ?? "",
   technicianName: input.header.technicianName ?? "",
   licenseNumber: input.header.licenseNumber ?? "",
   companyPhone: input.header.companyPhone ?? "",
@@ -123,7 +145,7 @@ async function docxDynamic(
   block: ProposalBlock,
   input: ProposalInput,
   style: BlockStyle
-): Promise<Paragraph[]> {
+): Promise<(Paragraph | Table)[]> {
   const { header } = input;
   const centered = (children: TextRun[]) =>
     new Paragraph({ alignment: AlignmentType.CENTER, children });
@@ -180,6 +202,61 @@ async function docxDynamic(
           (b) => new Paragraph({ bullet: { level: 0 }, children: [new TextRun({ text: b })] })
         ),
       ]);
+    case "lineItems": {
+      const lines = input.lineItems ?? [];
+      if (!lines.length) return [];
+      const out: (Paragraph | Table)[] = [];
+      if (input.unpricedCount)
+        out.push(
+          new Paragraph({
+            spacing: { after: 150 },
+            children: [new TextRun({ text: UNPRICED_NOTE(input.unpricedCount), bold: true, color: "C00000" })],
+          })
+        );
+      const cell = (text: string, opts: { bold?: boolean; right?: boolean } = {}) =>
+        new TableCell({
+          margins: { top: 60, bottom: 60, left: 80, right: 80 },
+          children: [
+            new Paragraph({
+              alignment: opts.right ? AlignmentType.RIGHT : AlignmentType.LEFT,
+              children: [new TextRun({ text, bold: opts.bold, size: 20, ...(style.fontFamily ? { font: style.fontFamily } : {}) })],
+            }),
+          ],
+        });
+      const itemRow = (l: ProposalLineItem) => {
+        const c = lineCells(l);
+        return new TableRow({
+          children: [cell(c.item), cell(c.rate, { right: true }), cell(c.qty, { right: true }), cell(c.total, { right: true })],
+        });
+      };
+      const totalRow = (label: string, amount: number) =>
+        new TableRow({
+          children: [cell(label, { bold: true }), cell(""), cell(""), cell(money(amount), { bold: true, right: true })],
+        });
+      // Option-group lines never sum into the base total (mutually exclusive alternatives) —
+      // base lines and Total first, then each option's lines under its own alternative row.
+      const rows = [
+        new TableRow({
+          tableHeader: true,
+          children: [cell("Line Item", { bold: true }), cell("Rate", { bold: true, right: true }), cell("Qty", { bold: true, right: true }), cell("Total", { bold: true, right: true })],
+        }),
+        ...lines.filter((l) => !l.optionGroup).map(itemRow),
+        totalRow("Total", input.total),
+      ];
+      for (const opt of input.optionTotals ?? []) {
+        rows.push(...lines.filter((l) => l.optionGroup === opt.name).map(itemRow));
+        rows.push(totalRow(`Option — ${opt.name} (alternative), base + option ${money(opt.combinedTotal)}`, opt.total));
+      }
+      out.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }));
+      if (input.optionTotals?.length)
+        out.push(
+          new Paragraph({
+            spacing: { before: 100 },
+            children: [new TextRun({ text: OPTIONS_NOTE, italics: true, size: 18 })],
+          })
+        );
+      return out;
+    }
     case "costSummary": {
       const out: Paragraph[] = [];
       if (input.unpricedCount)
@@ -188,10 +265,7 @@ async function docxDynamic(
             spacing: { before: 300 },
             children: [
               new TextRun({
-                text:
-                  `NOTE: ${input.unpricedCount} line item(s) are not yet priced and are NOT ` +
-                  `included in the totals below. This proposal is incomplete until they are ` +
-                  `priced or removed.`,
+                text: UNPRICED_NOTE(input.unpricedCount),
                 bold: true,
                 color: "C00000",
               }),
@@ -300,7 +374,7 @@ export async function renderTemplatedProposalDocx(
 ): Promise<Buffer> {
   const blocks = blocksOrDefault(stored);
   const tokens = tokensOf(input);
-  const children: Paragraph[] = [];
+  const children: (Paragraph | Table)[] = [];
   for (const block of blocks) {
     if (!block.visible) continue;
     const style = block.style ?? {};
@@ -457,13 +531,52 @@ export async function renderTemplatedProposalPdf(
             });
             return input.scopeSections.length > 0;
           }
+          case "lineItems": {
+            const lines = input.lineItems ?? [];
+            if (!lines.length) return false;
+            if (input.unpricedCount) {
+              write(UNPRICED_NOTE(input.unpricedCount), { bold: true, color: "C00000" });
+              doc.moveDown(0.3);
+            }
+            const colRate = 70, colQty = 55, colTotal = 75;
+            const itemW = CONTENT_W - colRate - colQty - colTotal;
+            const xRate = MARGIN + itemW, xQty = xRate + colRate, xTotal = xQty + colQty;
+            const row = (item: string, rate: string, qty: string, total: string, bold = false) => {
+              doc.font(bold ? "Helvetica-Bold" : pdfFont(style)).fontSize(9).fillColor(INK);
+              const h = Math.max(doc.heightOfString(item, { width: itemW - 8 }), 10) + 8;
+              if (doc.y + h > PAGE_H - MARGIN) doc.addPage();
+              const y = doc.y;
+              doc.text(item, MARGIN, y + 3, { width: itemW - 8 });
+              doc.text(rate, xRate, y + 3, { width: colRate - 8, align: "right" });
+              doc.text(qty, xQty, y + 3, { width: colQty - 8, align: "right" });
+              doc.text(total, xTotal, y + 3, { width: colTotal - 8, align: "right" });
+              doc.moveTo(MARGIN, y + h).lineTo(PAGE_W - MARGIN, y + h).strokeColor("#dddddd").lineWidth(0.5).stroke();
+              doc.y = y + h;
+              doc.x = MARGIN;
+            };
+            row("Line Item", "Rate", "Qty", "Total", true);
+            for (const l of lines.filter((i) => !i.optionGroup)) {
+              const c = lineCells(l);
+              row(c.item, c.rate, c.qty, c.total);
+            }
+            row("Total", "", "", money(input.total), true);
+            for (const opt of input.optionTotals ?? []) {
+              for (const l of lines.filter((i) => i.optionGroup === opt.name)) {
+                const c = lineCells(l);
+                row(c.item, c.rate, c.qty, c.total);
+              }
+              row(`Option — ${opt.name} (alternative), base + option ${money(opt.combinedTotal)}`, "", "", money(opt.total), true);
+            }
+            if (input.optionTotals?.length) {
+              doc.moveDown(0.3);
+              write(OPTIONS_NOTE, { italic: true, fontSize: 8, color: "666666" });
+            }
+            doc.moveDown(0.5);
+            return true;
+          }
           case "costSummary": {
             if (input.unpricedCount)
-              write(
-                `NOTE: ${input.unpricedCount} line item(s) are not yet priced and are NOT included ` +
-                  `in the totals below. This proposal is incomplete until they are priced or removed.`,
-                { bold: true, color: "C00000" }
-              );
+              write(UNPRICED_NOTE(input.unpricedCount), { bold: true, color: "C00000" });
             if (input.optionTotals?.length) {
               write(
                 `BASE SCOPE TOTAL: ${amountInWords(input.total)} (${money(input.total)})`,
@@ -527,6 +640,8 @@ export async function renderTemplatedProposalPdf(
               ? photos.length > 0
               : probe === "scopeOfWork"
               ? input.scopeSections.length > 0
+              : probe === "lineItems"
+              ? (input.lineItems?.length ?? 0) > 0
               : true;
           if (!hasContent) continue;
           if (block.heading) heading(block.heading);
@@ -544,6 +659,3 @@ export async function renderTemplatedProposalPdf(
     }
   });
 }
-
-/** Kept exported so the sync check can assert the default still mirrors the built-in lists. */
-export { STATIC_ASSUMPTIONS };

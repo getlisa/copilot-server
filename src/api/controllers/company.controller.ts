@@ -66,6 +66,16 @@ export class CompanyController {
     }
 
     const addressLine = str(b.address);
+    // Service-location address, separate from the billing/mailing address above. Stored
+    // whole-or-not-at-all; blank means "same as billing" (quoteHeader falls back).
+    const serviceAddress = {
+      line1: str(b.serviceAddress),
+      city: str(b.serviceCity),
+      state: str(b.serviceState),
+      postal_code: str(b.servicePostalCode),
+      country: str(b.serviceCountry),
+    };
+    const hasServiceAddress = Object.values(serviceAddress).some(Boolean);
     const hashedPassword = await bcrypt.hash(password, 10);
     const { company, user } = await prisma.$transaction(async (tx) => {
       const company = await tx.companies.create({
@@ -80,6 +90,7 @@ export class CompanyController {
           postal_code: str(b.postalCode),
           country: str(b.country),
           ...(addressLine ? { address: { line1: addressLine } } : {}),
+          ...(hasServiceAddress ? { service_address: serviceAddress } : {}),
         },
       });
       const user = await tx.users.create({

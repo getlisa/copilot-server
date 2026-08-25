@@ -16,12 +16,11 @@ import {
   type PricebookNameIndex,
 } from "../../copilot/estimating/quoteDto";
 import { renderQuoteDocument } from "../../copilot/estimating/templates";
-import { buildProposalDocx, type ProposalInput } from "../../copilot/estimating/proposalDocx";
-import { buildProposalPdf } from "../../copilot/estimating/proposalPdf";
+import { type ProposalInput } from "../../copilot/estimating/proposalDocx";
 import {
-  renderTemplatedProposalDocx,
-  renderTemplatedProposalPdf,
-} from "../../copilot/estimating/proposalTemplateRender";
+  renderProposalDocx,
+  renderProposalPdf,
+} from "../../copilot/estimating/proposalEstimate";
 import { generateProposalNarrative } from "../../copilot/estimating/proposalNarrative";
 import { scrubAddressFromTitle } from "../../copilot/estimating/scrubAddress";
 import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating/proposalEmail";
@@ -236,10 +235,32 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     ...(quote.customerAddress ? { billingAddress: quote.customerAddress } : {}),
     ...(quote.customerPhone ? { customerPhone: quote.customerPhone } : {}),
   };
+  // The company's own proposal format (null → the default estimate document) and their terms.
+  const company = await prisma.companies.findUnique({
+    where: { id: quote.companyId },
+    select: { proposal_template: true, footer_terms: true },
+  });
   const input: ProposalInput = {
     header: mergedHeader,
     projectTitle,
     date: new Date(),
+    // The document's line table. DTO prices already carry the markup, so the document shows
+    // exactly what the review screen shows.
+    lineItems: dto.lineItems.map((i) => ({
+      code: i.pricebookCode,
+      description: i.description,
+      quantity: i.quantity,
+      unit: i.unit,
+      unitPrice: i.unitPrice,
+      totalPrice: i.totalPrice,
+      optionGroup: i.optionGroup,
+      isLabor: i.isLabor,
+      priceSource: i.priceSource,
+      unmatched: i.flags.includes("unmatched"),
+    })),
+    terms: company?.footer_terms
+      ? company.footer_terms.split(/\r?\n+/).map((l) => l.trim()).filter(Boolean)
+      : undefined,
     scopeSections: narrative?.scopeSections ?? [
       {
         title: "Scope of Work",
@@ -258,12 +279,6 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     unpricedCount,
     photos,
   };
-  // The company's own proposal format, when they have one. Null → the built-in proposal,
-  // rendered by the original builders, unchanged.
-  const company = await prisma.companies.findUnique({
-    where: { id: quote.companyId },
-    select: { proposal_template: true },
-  });
   const proposalTemplate = company?.proposal_template ?? null;
   return { header: mergedHeader, dto, projectTitle, input, unpricedCount, proposalTemplate };
 }
@@ -1000,9 +1015,7 @@ export class QuoteController {
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
     const { input, proposalTemplate } = await buildProposalParts(quote);
-    const buffer = proposalTemplate
-      ? await renderTemplatedProposalDocx(input, proposalTemplate)
-      : await buildProposalDocx(input);
+    const buffer = await renderProposalDocx(input, proposalTemplate);
     const stamp = new Date().toISOString().slice(0, 10);
     res
       .setHeader(
@@ -1020,9 +1033,7 @@ export class QuoteController {
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
     if (!quote) return fail(res, 404, "Quote not found");
     const { input, proposalTemplate } = await buildProposalParts(quote);
-    const buffer = proposalTemplate
-      ? await renderTemplatedProposalPdf(input, proposalTemplate)
-      : await buildProposalPdf(input);
+    const buffer = await renderProposalPdf(input, proposalTemplate);
     const stamp = new Date().toISOString().slice(0, 10);
     res
       .setHeader("Content-Type", "application/pdf")
@@ -1075,11 +1086,9 @@ export class QuoteController {
     if (!quote) return fail(res, 404, "Quote not found");
 
     const { header, input, proposalTemplate } = await buildProposalParts(quote);
-    // Unpriced lines no longer block sending — the attached PDF prints a visible
-    // "NOT included in the total" note for them (proposalPdf.ts), which is the guard.
-    const buffer = proposalTemplate
-      ? await renderTemplatedProposalPdf(input, proposalTemplate)
-      : await buildProposalPdf(input);
+    // Unpriced lines no longer block sending — the attached PDF prints them as visible
+    // PENDING rows (estimate layout) or a red note (templated layout), which is the guard.
+    const buffer = await renderProposalPdf(input, proposalTemplate);
     await sendEmail({
       to,
       from: SENDGRID_FROM_EMAIL,

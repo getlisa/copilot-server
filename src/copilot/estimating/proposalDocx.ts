@@ -32,8 +32,30 @@ export interface ProposalOptionTotal {
   combinedTotal: number;
 }
 
+/** One row of the templated lineItems table. Prices are the marked-up display prices. */
+export interface ProposalLineItem {
+  code?: string | null;
+  description: string;
+  quantity?: number | null;
+  unit?: string | null;
+  unitPrice?: number | null;
+  totalPrice?: number | null;
+  /** Set when the line belongs to a mutually-exclusive option group. */
+  optionGroup?: string | null;
+  /** Labor lines print under the labor subtotal in the estimate-style document. */
+  isLabor?: boolean;
+  /** Where the price came from (pricebook name / HD fallback), shown as the row's sub-line. */
+  priceSource?: string | null;
+  /** No price found yet — the estimate layout prints these as "PENDING" rows at $0.00. */
+  unmatched?: boolean;
+}
+
 export interface ProposalInput {
   header: QuoteHeader;
+  /** Itemized lines for templates with a lineItems table block; absent = block prints nothing. */
+  lineItems?: ProposalLineItem[];
+  /** Company terms & conditions lines (companies.footer_terms), for the estimate layout. */
+  terms?: string[];
   projectTitle: string;
   date: Date;
   /** Numbered DETAILED SCOPE OF WORK sections describing the work to be performed. */

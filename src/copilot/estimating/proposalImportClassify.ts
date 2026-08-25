@@ -66,7 +66,8 @@ DYNAMIC = a place where THIS QUOTE's data is filled in. Do not keep the sample t
 (The document's TITLE — "Bid Proposal", "Estimate", "Quotation" — is STATIC text: keep the company's own title wording as a static block.)
 - projectBlock — project name, customer name/address/phone, contractor, date lines
 - scopeOfWork — the itemised description of the work to be performed on this job
-- costSummary — prices, totals, subtotals, cost-in-words, the amount table
+- lineItems — a table of line items with rates/quantities/amounts per row
+- costSummary — prose prices, totals, subtotals, cost-in-words (not a per-line table)
 - preparedBy — the "prepared by" name/signature block
 - photos — a photos/attachments section
 

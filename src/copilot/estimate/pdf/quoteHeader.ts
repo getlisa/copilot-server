@@ -102,14 +102,15 @@ export async function loadQuoteHeader(conversation: {
         ? await prisma.users.findUnique({ where: { id: BigInt(techId as any) } })
         : null;
 
+    let companyBilling = "";
     if (company) {
       header.companyName = company.name || header.companyName;
-      const compAddr =
+      companyBilling =
         formatJsonAddress(company.address) ||
         [company.city, company.state, company.postal_code, company.country]
           .filter((v) => v && String(v).trim())
           .join(", ");
-      if (compAddr) header.companyAddress = compAddr;
+      if (companyBilling) header.companyAddress = companyBilling;
       header.logoUrl = company.logo_url ?? null;
       header.licenseNumber = company.license_number ?? "";
       header.companyPhone = company.phone ?? "";
@@ -125,6 +126,14 @@ export async function loadQuoteHeader(conversation: {
       header.customerName = job.job_target_name || header.customerName;
       header.serviceAddress = job.address || "";
       header.billingAddress = job.address || "";
+    }
+    // Registration's billing/service addresses back-fill the document's address blocks when
+    // the job carries none (job-less conversations, sparse CRM rows). Job data always wins —
+    // it names the actual site. A blank registered service address means "same as billing".
+    if (company) {
+      const serviceAddr = formatJsonAddress(company.service_address);
+      if (!header.billingAddress) header.billingAddress = companyBilling;
+      if (!header.serviceAddress) header.serviceAddress = serviceAddr || header.billingAddress;
     }
   } catch (err) {
     logger.warn("loadQuoteHeader failed; using defaults", {

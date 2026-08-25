@@ -111,19 +111,35 @@ async function main() {
     { heading: "EXCLUSIONS", dynamic: null, paragraphIndexes: [0, 1, 2, 3] },
     { heading: null, dynamic: "costSummary", paragraphIndexes: [] },
   ]);
+  // An imported document can never carry its logo or photos through extraction, so the logo
+  // block is prepended and the photos block appended — both there by default on every import.
+  eq("every import starts with the company logo block", assembled[0]?.dynamic, "logo");
+  eq("every import ends with the photos block", assembled[assembled.length - 1]?.dynamic, "photos");
+  const alreadyPlaced = assembleImportedBlocks([], [
+    { heading: null, dynamic: "logo", paragraphIndexes: [] },
+    { heading: "PHOTOS", dynamic: "photos", paragraphIndexes: [] },
+  ]);
+  eq(
+    "a logo/photos block the classifier already placed is not doubled",
+    [
+      alreadyPlaced.filter((b) => b.dynamic === "logo").length,
+      alreadyPlaced.filter((b) => b.dynamic === "photos").length,
+    ],
+    [1, 1]
+  );
   // The bug: the classifier lists the heading paragraph in the block's own indexes, printing
   // the title twice — once as the heading, once as body text.
   eq(
     "a heading paragraph re-listed as content is dropped",
-    assembled[0]?.content?.[0]?.text,
+    assembled[1]?.content?.[0]?.text,
     "The following are excluded:"
   );
-  eq("the heading itself is kept on the block", assembled[0]?.heading, "EXCLUSIONS");
+  eq("the heading itself is kept on the block", assembled[1]?.heading, "EXCLUSIONS");
   ok(
     "later text merely MENTIONING the heading words is kept",
-    assembled[0]?.content?.some((part) => part.text?.includes("Exclusions apply"))
+    assembled[1]?.content?.some((part) => part.text?.includes("Exclusions apply"))
   );
-  eq("a dynamic block passes through", assembled[1]?.dynamic, "costSummary");
+  eq("a dynamic block passes through", assembled[2]?.dynamic, "costSummary");
 
   // Garbage in must fail loudly, not produce an empty template.
   let threw = false;

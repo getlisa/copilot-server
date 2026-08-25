@@ -111,12 +111,23 @@ Zero-risk to the app — it connects as `app_user`, not `postgres`.
 | Connection string auth fails with correct password | Password has `: # ? ] *` etc. — URL-encode it (step 4) |
 | Which DB is prod? | NOT the Supabase URLs in local `.env` — prod is the Aurora us-east-1 instance |
 
-## Pending migration: per-client pricebooks, templates, labor rates (2026-08-18)
+## Pending migration: company service address (2026-08-25)
 
-Schema for the pricebook-template-config PRD + labor-charges PRD. All idempotent; run via
-step 4 above. New nullable columns and new tables are safe to apply before OR after the code
-deploy (old code ignores them); the `NOT NULL DEFAULT` columns are also safe — Postgres 11+
-fills them without a table rewrite.
+Registration now captures a billing AND a service address; `companies.address` stays the
+billing/mailing address, the new JSONB column holds the service location. Additive and
+idempotent; run via step 4 above. MUST be applied before deploying the code that ships it —
+Prisma selects all scalar columns, so every `companies` read fails while the column is absent.
+
+```sql
+ALTER TABLE public.companies ADD COLUMN IF NOT EXISTS service_address JSONB;
+```
+
+## APPLIED 2026-08-25: per-client pricebooks, templates, labor rates (2026-08-18)
+
+Run against prod on 2026-08-25 and verified (all expected columns/tables present). Kept for
+reference. **Do NOT re-run the `hd_fallback_enabled` UPDATE below once any client has
+deliberately opted out** — it cannot tell an opt-out from the old default and would silently
+switch them back on. Everything else is idempotent and safe to re-run.
 
 ```sql
 CREATE TABLE IF NOT EXISTS public.pricebooks (
@@ -174,6 +185,11 @@ UPDATE public.company_configs       SET hd_fallback_enabled = true WHERE hd_fall
 ALTER TABLE public.companies        ADD COLUMN IF NOT EXISTS website VARCHAR(300);
 ALTER TABLE public.companies        ADD COLUMN IF NOT EXISTS footer_terms TEXT;
 ALTER TABLE public.companies        ADD COLUMN IF NOT EXISTS proposal_template JSONB;
+-- Belt-and-braces (2026-08-25): these two are in schema.prisma but were absent from this
+-- block; they may already exist in prod from an earlier hand-run migration — IF NOT EXISTS
+-- makes them free either way. The verification step below proves the final state.
+ALTER TABLE public.companies        ADD COLUMN IF NOT EXISTS proposal_email_template TEXT;
+ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS search_term TEXT;
 ALTER TABLE public.quotes           ADD COLUMN IF NOT EXISTS template_id INT;
 ALTER TABLE public.quotes           ADD COLUMN IF NOT EXISTS labor_asked BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS source_pricebook_id INT;
@@ -189,6 +205,32 @@ ALTER TABLE public.pricebooks      OWNER TO app_user;
 ALTER TABLE public.labor_rates     OWNER TO app_user;
 ALTER TABLE public.quote_templates OWNER TO app_user;
 GRANT USAGE ON SEQUENCE public.pricebooks_id_seq, public.labor_rates_id_seq, public.quote_templates_id_seq TO app_user;
+```
+
+### Verify this migration (inside the container, after step 4)
+
+Prints any expected column or table that is still missing — empty output means done:
+
+```bash
+node -e "
+const{PrismaClient}=require('@prisma/client');const p=new PrismaClient();
+const cols={companies:['website','footer_terms','proposal_template','proposal_email_template','service_address'],
+ company_configs:['hd_fallback_enabled'],
+ quotes:['template_id','labor_asked'],
+ quote_line_items:['source_pricebook_id','labor_rate_id','search_term','is_labor'],
+ pricebook_items:['pricebook_id']};
+const tables=['pricebooks','labor_rates','quote_templates'];
+(async()=>{
+ for(const[t,cs]of Object.entries(cols)){
+  const r=await p.\$queryRawUnsafe(\"select column_name from information_schema.columns where table_name='\"+t+\"'\");
+  const have=new Set(r.map(x=>x.column_name));
+  cs.filter(c=>!have.has(c)).forEach(c=>console.log('MISSING column',t+'.'+c));
+ }
+ const r=await p.\$queryRawUnsafe(\"select table_name from information_schema.tables where table_schema='public'\");
+ const have=new Set(r.map(x=>x.table_name));
+ tables.filter(t=>!have.has(t)).forEach(t=>console.log('MISSING table',t));
+ console.log('verification done');process.exit(0)})();
+"
 ```
 
 ## Table ownership (optional cleanup)

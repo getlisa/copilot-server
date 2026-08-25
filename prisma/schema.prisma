@@ -42,6 +42,9 @@ model companies {
   created_at       DateTime           @default(now()) @db.Timestamp(6)
   updated_at       DateTime           @default(now()) @db.Timestamp(6)
   address          Json?              @default("{}")
+  /// Service-location address from registration ({line1, city, state, postal_code, country}).
+  /// `address` is the billing/mailing address; documents fall back to these when a job has none.
+  service_address  Json?
   phone            String?            @db.VarChar(20)
   email            String?            @db.VarChar(200)
   license_number   String?            @db.VarChar(100)

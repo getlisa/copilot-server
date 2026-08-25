@@ -10,7 +10,7 @@ import {
   blocksOrDefault,
   validateProposalBlocks,
 } from "../../copilot/estimating/proposalTemplate";
-import { renderTemplatedProposalPdf } from "../../copilot/estimating/proposalTemplateRender";
+import { renderProposalPdf } from "../../copilot/estimating/proposalEstimate";
 import { importProposalDocument } from "../../copilot/estimating/proposalImportClassify";
 import { ProposalImportError } from "../../copilot/estimating/proposalImport";
 import type { ProposalInput } from "../../copilot/estimating/proposalDocx";
@@ -661,6 +661,12 @@ export class AdminController {
       },
       projectTitle: "Sample Project — Preview Only",
       date: new Date(),
+      // Sample rows so the editor's preview shows the lineItems table the default ships with.
+      lineItems: [
+        { code: "LB-020", description: "Minimum Service Call", quantity: 1, unit: "CALL", unitPrice: 175, totalPrice: 175, priceSource: "Labor Rates" },
+        { code: "SMP-001", description: "Sample material line item", quantity: 2, unit: "EA", unitPrice: 25, totalPrice: 50, priceSource: "Company pricebook" },
+        { description: "Sample labor line", quantity: 0.5, unit: "HR", unitPrice: 75, totalPrice: 37.5, isLabor: true },
+      ],
       scopeSections: [
         {
           title: "Sample Work Area",
@@ -670,7 +676,7 @@ export class AdminController {
           ],
         },
       ],
-      total: 1825,
+      total: 262.5,
       unpricedCount: 0,
     };
   }
@@ -782,10 +788,9 @@ export class AdminController {
     }
     const blocks = submitted ?? company.proposal_template;
     try {
-      const buffer = await renderTemplatedProposalPdf(
-        AdminController.previewInput(company),
-        blocks
-      );
+      // The dispatcher previews what technicians actually get: no stored/edited blocks →
+      // the job feature's estimate document; edited blocks → the templated layout.
+      const buffer = await renderProposalPdf(AdminController.previewInput(company), blocks);
       res
         .setHeader("Content-Type", "application/pdf")
         .setHeader("Content-Disposition", 'inline; filename="proposal-preview.pdf"')

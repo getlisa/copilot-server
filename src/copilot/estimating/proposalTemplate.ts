@@ -13,9 +13,9 @@
  * can reorder, hide and restyle them, but cannot restructure a pricing table into something
  * that misstates a price.
  *
- * Companies with no stored template keep using the original hardcoded builders, so their
- * output is unchanged byte-for-byte. DEFAULT_PROPOSAL_BLOCKS mirrors that hardcoded proposal
- * and is what the admin editor starts from.
+ * Companies with no stored template render DEFAULT_PROPOSAL_BLOCKS — the estimate layout the
+ * platform's job feature shows (owner decision 2026-08-25). The admin editor starts from the
+ * same default.
  */
 
 /** Content that comes from the quote, never authored by the company. */
@@ -28,6 +28,8 @@ export type DynamicBlockType =
   | "projectBlock"
   /** Numbered DETAILED SCOPE OF WORK sections from the narrative. */
   | "scopeOfWork"
+  /** Itemized table of the quote's lines with rate/qty/total and the totals rows. */
+  | "lineItems"
   /** Unpriced warning, base/option totals, cost-in-words. */
   | "costSummary"
   /** Company name + technician name. */
@@ -40,6 +42,7 @@ export const DYNAMIC_BLOCK_TYPES: DynamicBlockType[] = [
   "contactLine",
   "projectBlock",
   "scopeOfWork",
+  "lineItems",
   "costSummary",
   "preparedBy",
   "photos",
@@ -97,6 +100,7 @@ export interface ProposalBlock {
  */
 export interface TemplateTokens {
   companyName: string;
+  companyAddress: string;
   technicianName: string;
   licenseNumber: string;
   companyPhone: string;
@@ -110,158 +114,52 @@ export function fillTokens(text: string, tokens: TemplateTokens): string {
 }
 
 /**
- * The current hardcoded proposal, expressed as blocks. A company's stored template starts as
- * a copy of this, so "customize our proposal" begins from exactly what they get today rather
- * than from a blank page.
+ * The default proposal EVERY company starts from: the estimate layout the platform's job
+ * feature already shows (owner decision 2026-08-25) — company header, customer/project info,
+ * the itemized line table with totals, signature line, service summary, terms. The old
+ * "Bid Proposal" legalese default is gone; a company that wants those sections adds them as
+ * static blocks (all the block types it used still exist).
  *
- * Kept in sync with proposalDocx.ts by check-proposal-template.ts, which asserts the static
- * lists here still match the STATIC_* constants the default builder uses.
+ * Label + token paragraphs (label: "Phone:", text: "{{companyPhone}}") vanish entirely when
+ * the token fills empty — the tokenLineIsEmpty rule — so a company without an email prints
+ * no dangling "Email:" label.
  */
 export const DEFAULT_PROPOSAL_BLOCKS: ProposalBlock[] = [
-  // Split on purpose (2026-08-24): logo, contact line and title are independently ordered,
-  // hidden and styled. The title is STATIC — "Bid Proposal" is just wording, and a company
-  // may call theirs "Estimate"; the contact line stays dynamic because joining only the
-  // configured values ("phone | email", either alone, or nothing) is logic, not text.
-  { id: "logo", visible: true, dynamic: "logo" },
+  { id: "logo", visible: true, dynamic: "logo", style: { align: "left" } },
   {
-    id: "contact-line",
+    id: "company-header",
     visible: true,
-    dynamic: "contactLine",
-    style: { align: "center", fontSize: 9, color: "666666" },
-  },
-  {
-    id: "title",
-    visible: true,
-    style: { align: "center", bold: true, fontSize: 16 },
-    content: [{ format: "paragraph", text: "Bid Proposal" }],
+    content: [
+      { format: "paragraph", text: "{{companyName}}", style: { bold: true, fontSize: 12 } },
+      { format: "paragraph", text: "{{companyAddress}}" },
+      { format: "paragraph", label: "Phone:", text: "{{companyPhone}}" },
+      { format: "paragraph", label: "Email:", text: "{{companyEmail}}" },
+    ],
   },
   { id: "project", visible: true, dynamic: "projectBlock" },
+  { id: "line-items", visible: true, dynamic: "lineItems" },
   {
-    id: "general-scope",
-    heading: "GENERAL SCOPE",
+    id: "signature",
+    visible: true,
+    content: [
+      { format: "paragraph", text: "Customer Signature: ____________________________" },
+    ],
+  },
+  { id: "service-summary", heading: "Service Summary", visible: true, dynamic: "scopeOfWork" },
+  {
+    id: "terms",
+    heading: "Terms and Conditions",
     visible: true,
     content: [
       {
         format: "paragraph",
         text:
-          '{{companyName}} ("Contractor") shall furnish all labor, materials, equipment, and ' +
-          "supervision necessary to complete the work described herein in accordance with all " +
-          "applicable code requirements, and all state and local codes and regulations.",
+          "All work to be performed in a professional and workmanlike manner. This estimate " +
+          "is valid for 30 days from the date of issuance.",
       },
     ],
   },
-  {
-    id: "scope-of-work",
-    heading: "DETAILED SCOPE OF WORK",
-    visible: true,
-    dynamic: "scopeOfWork",
-  },
-  {
-    id: "exclusions",
-    heading: "EXCLUSIONS",
-    visible: true,
-    content: [
-      {
-        format: "paragraph",
-        text: "The following items are specifically EXCLUDED from this scope of work:",
-      },
-      {
-        format: "numbered",
-        items: [
-          "Patching or repair of walls, ceilings, or finishes of any kind",
-          "Painting or finishing of any kind",
-          "Any additional work not included in this bid — such work will be quoted separately upon discovery",
-          "Moving of materials or obstructions impeding the work — work area must be clear and accessible prior to Contractor commencing work",
-        ],
-      },
-    ],
-  },
-  {
-    id: "general-conditions",
-    heading: "GENERAL CONDITIONS",
-    visible: true,
-    content: [
-      {
-        format: "bullets",
-        label: "Coordination:",
-        items: [
-          "Contractor will coordinate work schedule with the customer to minimize disruption",
-          "Contractor will provide advance notice before any work requiring power outages",
-        ],
-      },
-      {
-        format: "bullets",
-        label: "Code Compliance:",
-        items: [
-          "All work shall comply with the current National Electrical Code (NEC)",
-          "All work shall comply with applicable state electrical code requirements",
-          "All work shall comply with local jurisdiction amendments and requirements",
-        ],
-      },
-    ],
-  },
-  {
-    id: "assumptions",
-    heading: "ASSUMPTIONS",
-    visible: true,
-    content: [
-      {
-        format: "paragraph",
-        text: "This scope of work is based on the following assumptions:",
-      },
-      {
-        format: "numbered",
-        items: [
-          "Work area is accessible and clear of materials or obstructions prior to Contractor's arrival",
-          "Site conditions are as represented during initial assessment",
-          "Work will be performed during normal business hours (Monday–Friday, 7:00 AM – 5:00 PM)",
-          "This proposal assumes no bonding requirements. If bonds are required, the cost will be added to the contract price.",
-        ],
-      },
-    ],
-  },
-  { id: "cost", visible: true, dynamic: "costSummary" },
-  {
-    id: "payment-terms",
-    visible: true,
-    content: [
-      {
-        format: "paragraph",
-        label: "PAYMENT TERMS:",
-        text: "Payment due in full upon project completion.",
-      },
-    ],
-  },
-  {
-    id: "validity",
-    visible: true,
-    style: { italic: true, fontSize: 8, color: "666666" },
-    content: [
-      {
-        format: "paragraph",
-        text:
-          "*Due to potential fluctuations in material costs, this bid is valid for 45 days from " +
-          "the date of issuance. If not accepted within this period, a revised proposal may be " +
-          "required to reflect current market conditions.",
-      },
-    ],
-  },
-    // Static on purpose, unlike the other generated sections: everything it shows is
-  // expressible as tokens, and making it "their text" is what lets an admin reword it
-  // (bug report 2026-08-24). A paragraph whose tokens all fill to empty is skipped at
-  // render time, so a company without a licence number prints no dangling label.
-  {
-    id: "prepared-by",
-    heading: "PREPARED BY:",
-    visible: true,
-    content: [
-      { format: "paragraph", text: "{{companyName}}", style: { bold: true } },
-      { format: "paragraph", text: "{{companyPhone}}" },
-      { format: "paragraph", text: "{{companyEmail}}" },
-      { format: "paragraph", label: "Contractor License:", text: "{{licenseNumber}}" },
-    ],
-  },
-  { id: "photos", heading: "PROJECT PHOTOS", visible: true, dynamic: "photos" },
+  { id: "photos", heading: "Project Photos", visible: true, dynamic: "photos" },
 ];
 
 /**

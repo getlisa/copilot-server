@@ -462,6 +462,21 @@ export class ConversationController {
         },
       });
 
+      // Persist the image_files rows. The document builders (estimate PDF photos, proposal
+      // photos) find chat-attached images ONLY through this table — a message attachment
+      // alone is invisible to them (bug: chat-uploaded photo missing from the document).
+      await prisma.imageFile.createMany({
+        data: uploads.map((u) => ({
+          id: u.imageFile.id,
+          conversationId,
+          messageId,
+          s3Key: u.imageFile.s3Key,
+          mimeType: u.imageFile.mimeType,
+          sizeBytes: u.imageFile.sizeBytes,
+          filename: u.imageFile.filename,
+        })),
+      });
+
       let responseMessage: Message = message;
 
       const summaryEntries = await Promise.all(
