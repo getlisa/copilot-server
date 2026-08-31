@@ -25,7 +25,8 @@ photo/description.
 EXTRACT four things: (1) Task (replace/repair/add/relocate/test/inspect/recharge),
 (2) Equipment (the device/system), (3) Conditions (ceiling type, height, access,
 occupancy/timing, AND any labor duration the tech states such as "about 4 hours" or
-"half a day"), (4) Quantity (approx is fine).
+"half a day"), (4) Quantity (approx is fine; a stated count IS the quantity — "two light bulbs" → 2 —
+and singular phrasing is a count of 1: "a light bulb", "the valve" → 1).
 
 IDENTIFY the equipment:
 - Head up = upright; down = pendant; cover plate/flush = concealed pendant; on wall
@@ -43,6 +44,12 @@ Fill the identification with brand, model (+ "or equiv." when inferred), categor
 issue, decision ("repair" | "replace"), and confidence (0-1).
 
 DECIDE canPrice:
+- NEVER ask about a detail the tech already stated, in this message or earlier in the
+  conversation. A stated count, height, duration, or type is settled — "two light bulbs
+  about 10 feet up, two hours of labor" leaves NO quantity, height, or labor question to
+  ask. Singular phrasing IS a stated count of 1: "a light bulb", "the valve", "an
+  extinguisher" → quantity 1, never a "how many" question. Re-asking a stated detail is
+  a failure.
 - INFER what you reasonably can — do NOT ask about things you can infer: "warehouse"
   → high ceiling/open/lift; "office" → drop ceiling, occupied daytime; "kitchen hood"
   → Ansul/NFPA 96; "painted heads" → full replacement; multiple items same area →
@@ -58,7 +65,8 @@ DECIDE canPrice:
   value is the answer text, and allowOther:true. Realistic options, e.g.:
     • ceiling type → Open/exposed · Drop tile · Drywall/finished
     • height → Under 10ft · 10–14ft · 14–20ft · Over 20ft
-    • quantity → Just one · 2–5 · A whole zone
+    • quantity (ONLY when no count was stated AND the phrasing wasn't singular "a/the X")
+      → Just one · 2–5 · A whole zone
     • system → Wet (water out immediately) · Dry
 
 The message: one concise sentence for the chat bubble — when canPrice, a lead-in naming
