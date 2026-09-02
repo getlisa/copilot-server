@@ -15,6 +15,14 @@ import { importProposalDocument } from "../../copilot/estimating/proposalImportC
 import { ProposalImportError } from "../../copilot/estimating/proposalImport";
 import type { ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { validateDocxTemplate } from "../../copilot/estimating/templates";
+import {
+  isQboConfigured,
+  qboAuthUrl,
+  qboConnected,
+  qboConnectionFor,
+  companyIdFromState,
+  connectQbo,
+} from "../../lib/qbo";
 
 /**
  * Internal per-company configuration API (pricebook-config PRD + labor PRD): pricebooks,
@@ -802,5 +810,62 @@ export class AdminController {
       });
       return fail(res, 500, "Could not render a preview of this format");
     }
+  }
+
+  // ---------- QuickBooks Online ----------
+
+  /** GET /admin/companies/:companyId/qbo — connection status. */
+  static async qboStatus(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const conn = await qboConnectionFor(companyId);
+    res.json({
+      success: true,
+      data: {
+        configured: isQboConfigured(),
+        hasCredentials: !!conn,
+        connected: qboConnected(conn),
+        realmId: conn?.realmId ?? null,
+        environment: conn?.environment ?? "production",
+      },
+    });
+  }
+
+  /** GET /admin/companies/:companyId/qbo/connect — browser entry: 302 to Intuit's consent page. */
+  static async qboConnect(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    if (!isQboConfigured()) return fail(res, 503, "QBO_REDIRECT_URI is not set on the server");
+    const conn = await qboConnectionFor(companyId);
+    if (!conn)
+      return fail(
+        res,
+        409,
+        "No QuickBooks app keys saved for this company — the company admin enters them in Settings → Connections first"
+      );
+    res.redirect(qboAuthUrl(conn));
+  }
+
+  /** GET /admin/qbo/callback — Intuit's redirect target; must match QBO_REDIRECT_URI. */
+  static async qboCallback(req: Request, res: Response) {
+    const { code, state, realmId, error } = req.query as Record<string, string | undefined>;
+    if (error) return fail(res, 400, `Intuit returned: ${error}`);
+    // companyId comes only from the signed state — a forged/expired callback dies here.
+    const companyId = state ? companyIdFromState(state) : null;
+    if (!companyId || !code || !realmId)
+      return fail(res, 400, "Invalid or expired callback — restart from the connect URL");
+    await connectQbo(companyId, code, realmId);
+    logger.info("QBO connected", { companyId, realmId });
+    res.send(
+      `<html><body style="font-family:sans-serif"><h3>QuickBooks connected for company ${companyId}.</h3><p>You can close this tab.</p></body></html>`
+    );
+  }
+
+  /** DELETE /admin/companies/:companyId/qbo — forget the connection (reconnecting overwrites). */
+  static async qboDisconnect(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    await prisma.qboConnection.deleteMany({ where: { companyId } });
+    res.json({ success: true, data: { connected: false } });
   }
 }

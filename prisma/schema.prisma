@@ -77,6 +77,10 @@ model company_configs {
   /// for every client, so this switch exists to opt a client OUT, not in. Turned off, that
   /// client's quotes price only from their own book(s).
   hd_fallback_enabled    Boolean   @default(true)
+  /// Company default markup %, applied as the starting markupPercent of NEW quotes only
+  /// (QBO PRD US7 — knowingly reverses the earlier per-quote-only markup decision).
+  /// Per-quote markup stays editable; existing quotes are never touched by a change here.
+  default_markup_percent Decimal   @default(0) @db.Decimal(5, 2)
   companies              companies @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@schema("public")
@@ -357,6 +361,35 @@ model crm_entity_links {
   @@schema("public")
 }
 
+/// QuickBooks Online connection, one per company. Deliberately NOT a crm_connections row:
+/// that table is owned by the platform backend, is capped at one connection per company,
+/// and extending its provider enum would break the other service's generated client on read.
+/// No FK/relation, matching Pricebook/LaborRate (runbook-managed DDL).
+///
+/// Two-phase row (QBO PRD US1): created when the admin saves the company's QuickBooks app
+/// keys in settings; the token fields stay null until the OAuth consent completes. Connected
+/// means encrypted_auth is non-null.
+model QboConnection {
+  id                   Int       @id @default(autoincrement())
+  companyId            Int       @unique @map("company_id")
+  /// The company's own Intuit app key (QBO PRD US1). Public identifier, not a secret.
+  clientId             String    @map("client_id")
+  /// AES-256-GCM sealed Client Secret — sealed/opened in lib/qbo.ts.
+  encryptedClientSecret String   @map("encrypted_client_secret")
+  /// "production" | "sandbox" — selects the QBO API base per connection.
+  environment          String    @default("production")
+  /// The QBO company id Intuit hands back on the OAuth callback. Null until consented.
+  realmId              String?   @map("realm_id")
+  /// AES-256-GCM blob of { accessToken, refreshToken }. Null until consented.
+  encryptedAuth        String?   @map("encrypted_auth")
+  accessTokenExpiresAt DateTime? @map("access_token_expires_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@map("qbo_connections")
+  @@schema("public")
+}
+
 /// Estimating Agent: one chat = one quote, lifecycle DRAFT -> COMPLETED.
 model Quote {
   id             String          @id @default(uuid())
@@ -379,6 +412,12 @@ model Quote {
   templateId     Int?            @map("template_id")
   /// The end-of-materials labor-hours ask fires at most once per quote (labor PRD US2).
   laborAsked     Boolean         @default(false) @map("labor_asked")
+  /// QBO Estimate id once posted (companies with a QboConnection). Posted at completion;
+  /// re-completing after a reopen UPDATES this same estimate in place (QBO PRD US6).
+  qboEstimateId  String?         @map("qbo_estimate_id")
+  /// Which option group the customer chose, answered at completion time (QBO PRD US3).
+  /// Null = not asked / no options. Cleared on reopen so re-completion asks again.
+  chosenOptionGroup String?      @map("chosen_option_group")
   createdAt      DateTime        @default(now()) @map("created_at")
   updatedAt      DateTime        @updatedAt @map("updated_at")
   completedAt    DateTime?       @map("completed_at")
@@ -423,6 +462,10 @@ model QuoteLineItem {
   /// Configured labor type this line was priced from. Null on a labor line = ad-hoc
   /// technician-stated rate (zero types configured / unmatched type / no valid rate).
   laborRateId     Int?     @map("labor_rate_id")
+  /// QBO item this line bills against, picked in the per-line dropdown (QBO PRD US5).
+  /// Null = auto: match the company's QBO item list by name at post time, create if missing.
+  qboItemId       String?  @map("qbo_item_id")
+  qboItemName     String?  @map("qbo_item_name")
   sortOrder       Int      @map("sort_order")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")

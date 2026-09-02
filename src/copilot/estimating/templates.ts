@@ -136,6 +136,7 @@ export function validateDocxTemplate(templateBuffer: Buffer): string | null {
     customerPhone: null,
     total: 0,
     optionTotals: [],
+    chosenOptionGroup: null,
     blockingFlagCount: 0,
   };
   const branding: InvoiceBranding = {

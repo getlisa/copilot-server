@@ -12,6 +12,11 @@ import { CompanyController } from "../controllers/company.controller";
 const companyRoute = Router();
 
 companyRoute.post("/", imageUpload.single("logo"), CompanyController.create);
+companyRoute.get("/connections", authMiddleware, CompanyController.getConnections);
+companyRoute.put("/connections/qbo", authMiddleware, CompanyController.saveQboCredentials);
+companyRoute.get("/connections/qbo/items", authMiddleware, CompanyController.listQboItems);
+companyRoute.get("/markup", authMiddleware, CompanyController.getDefaultMarkup);
+companyRoute.put("/markup", authMiddleware, CompanyController.putDefaultMarkup);
 companyRoute.get(
   "/proposal-email-template",
   authMiddleware,

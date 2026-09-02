@@ -61,6 +61,12 @@ adminRoute.post(
   AdminController.previewProposalTemplate
 );
 
+// QuickBooks Online: connect opens Intuit's consent page; callback must match QBO_REDIRECT_URI.
+adminRoute.get("/companies/:companyId/qbo", AdminController.qboStatus);
+adminRoute.get("/companies/:companyId/qbo/connect", AdminController.qboConnect);
+adminRoute.get("/qbo/callback", AdminController.qboCallback);
+adminRoute.delete("/companies/:companyId/qbo", AdminController.qboDisconnect);
+
 adminRoute.get("/companies/:companyId/conversations", AdminController.listConversations);
 adminRoute.delete("/companies/:companyId/conversations", AdminController.deleteConversations);
 

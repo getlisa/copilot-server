@@ -5,6 +5,14 @@ import { DEFAULT_PROPOSAL_EMAIL_TEMPLATE } from "../../copilot/estimating/propos
 import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { uploadBufferToS3, publicUrlForKey } from "../../lib/s3";
+import {
+  isQboConfigured,
+  qboAuthUrl,
+  qboConnectionFor,
+  qboConnected,
+  qboItems,
+  saveQboCredentials,
+} from "../../lib/qbo";
 
 /**
  * Company registration (hidden page — reachable only by direct URL, no auth).
@@ -121,6 +129,128 @@ export class CompanyController {
         adminEmail: user.email,
       },
     });
+  }
+
+  /**
+   * GET /api/v1/companies/connections — integration status for the caller's company,
+   * for the profile page's Connections section (QBO PRD US1). `connectUrl` is minted fresh
+   * on every read (the signed state inside expires in 15 minutes), so the client re-fetches
+   * at click time instead of caching it. Present whenever app keys exist — connecting again
+   * deliberately replaces the old connection.
+   */
+  static async getConnections(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const conn = await qboConnectionFor(companyId);
+    res.json({
+      success: true,
+      data: {
+        qbo: {
+          configured: isQboConfigured(),
+          hasCredentials: !!conn,
+          connected: qboConnected(conn),
+          realmId: conn?.realmId ?? null,
+          environment: conn?.environment ?? "production",
+          connectUrl: isQboConfigured() && conn ? qboAuthUrl(conn) : null,
+        },
+        // ponytail: ZenTrades is a display-only row in the UI for now; add a real entry
+        // here when that integration exists.
+      },
+    });
+  }
+
+  /**
+   * PUT /api/v1/companies/connections/qbo — save the company's QuickBooks app keys from the
+   * Connections form (QBO PRD US1). Body: { clientId, clientSecret, environment? }. Replacing
+   * keys clears any tokens issued under the old app, so the OAuth consent is redone next.
+   */
+  static async saveQboCredentials(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    if (!isQboConfigured())
+      return res.status(503).json({
+        success: false,
+        error: { status: 503, message: "QBO_REDIRECT_URI is not set on the server" },
+      });
+    const clientId = str(req.body?.clientId);
+    const clientSecret = str(req.body?.clientSecret);
+    if (!clientId || !clientSecret)
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "Both the Client ID and Client Secret are required" },
+      });
+    const environment = req.body?.environment === "sandbox" ? "sandbox" : "production";
+    await saveQboCredentials(companyId, clientId, clientSecret, environment);
+    logger.info("QBO app keys saved", { companyId, environment });
+    return CompanyController.getConnections(req, res);
+  }
+
+  /**
+   * GET /api/v1/companies/connections/qbo/items — the connected QBO account's item list, for
+   * the per-line item dropdown (QBO PRD US5). 409 until the company is connected.
+   */
+  static async listQboItems(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const conn = await qboConnectionFor(companyId);
+    if (!qboConnected(conn))
+      return res.status(409).json({
+        success: false,
+        error: { status: 409, message: "QuickBooks is not connected for this company" },
+      });
+    res.json({ success: true, data: await qboItems(conn) });
+  }
+
+  /**
+   * GET/PUT /api/v1/companies/markup — the company default markup percentage (QBO PRD US7).
+   * Applied as the starting markup of NEW quotes only; existing quotes keep their own.
+   */
+  static async getDefaultMarkup(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const config = await prisma.company_configs.findUnique({
+      where: { company_id: companyId },
+      select: { default_markup_percent: true },
+    });
+    res.json({
+      success: true,
+      data: { defaultMarkupPercent: Number(config?.default_markup_percent ?? 0) },
+    });
+  }
+
+  static async putDefaultMarkup(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const n = Number(req.body?.defaultMarkupPercent);
+    if (!Number.isFinite(n) || n < 0 || n > 999)
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "defaultMarkupPercent must be a number between 0 and 999" },
+      });
+    const value = Math.round(n * 100) / 100;
+    await prisma.company_configs.upsert({
+      where: { company_id: companyId },
+      // checklists is constrained to an ARRAY of {label, description} — [] is the empty state.
+      create: { company_id: companyId, checklists: [], default_markup_percent: value },
+      update: { default_markup_percent: value },
+    });
+    logger.info("Default markup updated", { companyId, value });
+    res.json({ success: true, data: { defaultMarkupPercent: value } });
   }
 
   /** GET /api/v1/companies/proposal-email-template — the caller's company's template. */
