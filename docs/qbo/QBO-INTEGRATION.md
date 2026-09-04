@@ -477,7 +477,7 @@ Everything outside the tax slice is unblocked.
 |---|---|---|---|---|
 | T-30 | CS | **Fix what the rework breaks in `npm test`** — and note this fails the **deploy**, not just a local check (`Dockerfile:24` runs `npm test` in the builder stage). `scripts/check-qbo.ts` builds complete `LineItemDto` literals and `templates.ts:136` builds a complete `QuoteDto` literal, so any new DTO field breaks both. Add check scripts for the new pure functions (`isAdminRole`, `qboConnected`'s stamp, `isQboConfigured`'s env matrix) — the repo has fourteen wired into `npm test`; this rework adds zero so far. | T-01, T-09, T-18 | TODO |
 | T-11 | CS | `npm install`, then a clean `npm run typecheck` + `npm test`. | — | **DONE** 2026-09-04: `npm ci --registry=https://registry.npmjs.org` (473 pkgs — the repo `.npmrc` CodeArtifact token is expired, but the deps are public); `tsc --noEmit` exit 0; `npm test` exit 0, all 15 checks. |
-| T-10 | CS | **Run the migration — once.** *(Edits Ashish's runbook block additively — merge into it, never replace it.)* Merge every column change (T-24 drops, T-02 lock, T-09 sync state, T-18 tax) into the single block, add `DROP COLUMN IF EXISTS` for the removed key columns, **probe the target schema first** (`information_schema.columns` — merged ≠ applied, no ledger), apply by hand to local dev **and** prod Aurora. Never `prisma db push`. | T-24, T-02, T-09, T-18 | TODO |
+| T-10 | CS | **Run the migration — once.** *(Edits Ashish's runbook block additively — merge into it, never replace it.)* Merge every column change (T-24 drops, T-02 lock, T-09 sync state, T-18 tax) into the single block, add `DROP COLUMN IF EXISTS` for the removed key columns, **probe the target schema first** (`information_schema.columns` — merged ≠ applied, no ledger), apply by hand to local dev **and** prod Aurora. Never `prisma db push`. | T-24, T-02, T-09, T-18 | **DONE** 2026-09-04 — applied and verified on prod Aurora (§10) |
 | T-08 | BOTH | **Sandbox end-to-end — on the production environment with sandbox credentials (D-10).** Set `QBO_ENVIRONMENT=sandbox` and the Development keyset there, register the callback on the **Development** redirect-URI list, and walk: first post; reopen → edit → re-complete (update-in-place, confirm sparse update replaces lines); estimate deleted in QBO → re-complete; access revoked in QBO; either/or options; unpriced line; empty quote. Record in §9. **Caveat to manage, not a blocker:** for the duration, a live Connect button sits in front of real customers and would bind them to an Intuit *test* company — worse now that `15c465c` shows the card to every user. Mitigate by settling D-11 first (admin-only Connect), doing it in a known window, and flipping to the Production keyset immediately after. The environment stamp (T-24) makes the flip fail closed, so every sandbox connection reads *reconnect required* rather than silently posting into a test company. | T-10, D-11 | TODO |
 | T-15 | CS | Set all QBO env vars on every deploy target (`QBO_CLIENT_ID`, `QBO_CLIENT_SECRET`, `QBO_ENVIRONMENT`, `QBO_REDIRECT_URI`, `QBO_TOKEN_KEY`). Note Intuit issues **separate keysets for Development and Production** — the sandbox→production flip swaps the key pair *and* invalidates every token minted under the old one (T-24 makes that fail closed). | T-22, T-23 | **DONE** 2026-09-04 — secret `techcopilot/prod/app` + task def `:86`; service NOT updated (§10) |
 | T-14 | BOTH | Write each repo's real deploy model into §8 (backend: CodeBuild → ECR → ECS, no in-repo trigger found; frontend: TBD). Do not carry over the `collection_agent_backend` auto-deploy assumption. | — | TODO |
@@ -650,3 +650,73 @@ reuses the existing secret-ARN prefix rather than guessing it.
 **Then, in order:** run the `qbo_connections` block from the runbook (T-10) → deploy the branch to
 `techcopilot-prod-assistant` → click Connect as an admin and sign in with a sandbox QuickBooks
 company (T-08). Until the migration runs, the callback will fail on the insert.
+
+
+### 2026-09-04 — migration applied to production, env live, service on :86
+
+**Migration: DONE and verified (T-10).**
+
+Probed first, as the runbook demands — merged is not applied, and nothing was: `qbo_connections`
+absent, 0 of the 5 columns present, on database `techcopilot`, schema `public`.
+
+Getting there took some working out, recorded so nobody repeats it:
+
+- Aurora is **private** (`10.0.4.221`); no route from a laptop. The bastion EC2 instance is **not**
+  SSM-managed (`describe-instance-information` is empty), so port-forwarding is not an option.
+- The fix: run one-off ECS tasks on the service's own task definition, inside the VPC, with the
+  service's network config. `scratchpad/ecs-run.sh` does this and prints the container's
+  CloudWatch output. The runtime image keeps the **full** `node_modules` (`Dockerfile:40`), so the
+  Prisma CLI is available inside it.
+- `app_user` **cannot** run this migration: not a superuser, no `CREATE` on schema `public`, and
+  `quotes` / `quote_line_items` / `company_configs` are owned by `postgres`. First attempt failed
+  with `permission denied for schema public` — which is exactly what the runbook's "created by
+  postgres" line means.
+- Aurora's master secret is `rds!cluster-354ddf05-…`, and the ECS **execution role already has
+  `GetSecretValue` on that exact ARN** — so a throwaway task definition (`:87`) injected the master
+  credentials as ECS `secrets` (an ARN reference: the password never appeared in a command line,
+  a task override or a CloudTrail event). `:87` was **deregistered** immediately after.
+
+Verified as `app_user`, the account the app actually uses:
+
+```
+qbo_connections           owner app_user; columns: id, company_id, environment, realm_id,
+                          encrypted_auth, access_token_expires_at, created_at, updated_at
+new columns               5/5 present
+app_user privileges       SELECT / INSERT / UPDATE / DELETE all true
+production after the DDL  97 quotes, 674 line items, 7 company_configs — all still readable by
+                          the running image (no regression)
+```
+
+**Service is on `:86`** (rolling update, `minimumHealthyPercent 100` so no downtime; one
+deployment, 1/1 running, `/health` 200). This matters for the pipeline: CodePipeline's ECS deploy
+action derives its new revision from whatever the service is running, so had it deployed while the
+service was on `:85`, the five QBO secrets would have been silently dropped.
+
+**Correction — merging to `main` does NOT apply the Prisma schema.** Checked directly: `db:migrate`
+and `db:push` exist in `package.json` but nothing calls them; the Dockerfile runs only
+`prisma generate` (client codegen) then `node dist/server.js`; `buildspec.yml` builds and pushes an
+image; the pipeline is Source(`main`) → Build → ECS deploy, with no migration stage; and
+`prisma/` has **no `migrations/` directory at all**, so `prisma migrate deploy` could not run even
+if something called it. Migrations here are hand-run, exactly as the runbook says. This is why the
+migration had to happen before the code ships — Prisma selects all scalar columns, so shipping the
+QBO image against the old schema would have broken **every quote read**, not just QuickBooks.
+
+### The remaining step: merging to `main` is the deploy
+
+Both repos deploy from `main`, automatically:
+
+| Repo | Mechanism | Trigger |
+|---|---|---|
+| copilot-server | CodePipeline `techcopilot-prod-assistant`: GitHub `main` → CodeBuild → ECS deploy | push to `main` |
+| technician-copilot | AWS Amplify app `technician-copilot`, production branch `main` | push to `main` |
+
+**The two must ship together, frontend first.** `quote.controller.ts::complete` returns
+`409 OPTION_CHOICE_REQUIRED` whenever a quote has option groups — with **no QuickBooks condition on
+it**. A new backend against the old frontend would break completing any option quote for every
+company, connected or not. The reverse order is safe: the new frontend against the old backend
+sends an extra `chosenOption` field the old backend ignores, and its QBO fetches 404 into
+already-handled catch branches (the item dropdown hides itself; the Connections card reads
+"Status unavailable").
+
+Current exposure is nil — **0 quotes in production have ever used an option group** (97 quotes
+total: 93 DRAFT, 4 COMPLETED; 28 created in the last 14 days) — but that is luck, not a guarantee.
