@@ -720,3 +720,22 @@ already-handled catch branches (the item dropdown hides itself; the Connections 
 
 Current exposure is nil — **0 quotes in production have ever used an option group** (97 quotes
 total: 93 DRAFT, 4 COMPLETED; 28 created in the last 14 days) — but that is luck, not a guarantee.
+
+### 2026-09-04 — shipped to `main`
+
+| Repo | PR | Merge |
+|---|---|---|
+| technician-copilot | [#4](https://github.com/getlisa/technician-copilot/pull/4) | merged `cf7fe08` → Amplify job 57 |
+| copilot-server | [#4](https://github.com/getlisa/copilot-server/pull/4) | held until the frontend is live (ordering below) |
+
+`origin/main` on technician-copilot had moved (`487cbbf fix: access token`, Ashish), which
+conflicted in `quotesService.complete`: main switched it to `authFetch` (silent token refresh for
+copilot-server calls, which bypass the axios interceptor), the QBO branch added `chosenOption`.
+Resolved by keeping both — `authFetch` is a drop-in for `fetch`. `connectionsService` was also
+switched to `authFetch`: its endpoints are new on this branch and had the exact bug `487cbbf`
+fixed, so an expired access token would have failed the Connections card and the item list until
+the user logged out and back in.
+
+**Ordering (frontend first) is not cosmetic.** `complete` returns `409 OPTION_CHOICE_REQUIRED` for
+any quote with option groups and has no QuickBooks condition on it, so the new backend against the
+old frontend breaks completing option quotes for every company. The reverse is safe.
