@@ -40,6 +40,13 @@ import type { LineItemDto, QuoteOptionTotal } from "../copilot/estimating/quoteD
 const QBO_CLIENT_ID = process.env.QBO_CLIENT_ID ?? "";
 const QBO_CLIENT_SECRET = process.env.QBO_CLIENT_SECRET ?? "";
 const QBO_REDIRECT_URI = process.env.QBO_REDIRECT_URI ?? "";
+/**
+ * Where to send the browser after the OAuth callback finishes — the app's Connections page.
+ * Intuit hands the user to the API, which is not somewhere a person should be left standing.
+ * Empty falls back to a plain confirmation page, so a missing value degrades instead of
+ * redirecting nowhere. ALLOW_ORIGIN cannot serve here: it is "*".
+ */
+export const QBO_APP_RETURN_URL = process.env.QBO_APP_RETURN_URL ?? "";
 /** Which Intuit keyset this server runs against. Sandbox keys only work on sandbox companies. */
 export const QBO_ENVIRONMENT: "sandbox" | "production" =
   process.env.QBO_ENVIRONMENT === "sandbox" ? "sandbox" : "production";

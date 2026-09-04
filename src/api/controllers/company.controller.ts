@@ -16,6 +16,7 @@ import {
   disconnectQbo,
   companyIdFromState,
   QBO_ENVIRONMENT,
+  QBO_APP_RETURN_URL,
 } from "../../lib/qbo";
 
 /**
@@ -214,29 +215,41 @@ export class CompanyController {
    */
   static async qboCallback(req: Request, res: Response) {
     const { code, state, realmId, error } = req.query as Record<string, string | undefined>;
-    const done = (message: string) =>
-      res.send(
+    /**
+     * Hand the browser back to the app's Connections page with the outcome, rather than leaving
+     * the user parked on an API response. The page turns `?qbo=` into a toast and strips it.
+     * Without QBO_APP_RETURN_URL configured, fall back to a confirmation page — a missing env
+     * var should not strand the user mid-redirect.
+     */
+    const done = (outcome: "connected" | "error", message: string) => {
+      if (QBO_APP_RETURN_URL) {
+        const target = new URL(QBO_APP_RETURN_URL);
+        target.searchParams.set("qbo", outcome);
+        return res.redirect(target.toString());
+      }
+      return res.send(
         `<html><body style="font-family:system-ui;padding:2rem"><h3>${message}</h3><p>You can close this tab.</p></body></html>`
       );
+    };
     if (error) {
       logger.warn("QBO callback returned an error", { error });
-      return done(`QuickBooks returned: ${error}`);
+      return done("error", `QuickBooks returned: ${error}`);
     }
     const companyId = state ? companyIdFromState(state) : null;
     if (!companyId || !code || !realmId) {
       logger.warn("QBO callback rejected", { hasCode: !!code, hasRealm: !!realmId, hasState: !!state });
-      return done("That QuickBooks link was invalid or expired — start again from Connections.");
+      return done("error", "That QuickBooks link was invalid or expired — start again from Connections.");
     }
     try {
       await connectQbo(companyId, code, realmId);
       logger.info("QBO connected", { companyId, realmId, environment: QBO_ENVIRONMENT });
-      return done("QuickBooks connected.");
+      return done("connected", "QuickBooks connected.");
     } catch (e) {
       logger.error("QBO connect failed", {
         companyId,
         error: e instanceof Error ? e.message : String(e),
       });
-      return done("Could not finish connecting to QuickBooks. Please try again.");
+      return done("error", "Could not finish connecting to QuickBooks. Please try again.");
     }
   }
 
