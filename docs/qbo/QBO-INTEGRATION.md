@@ -739,3 +739,39 @@ the user logged out and back in.
 **Ordering (frontend first) is not cosmetic.** `complete` returns `409 OPTION_CHOICE_REQUIRED` for
 any quote with option groups and has no QuickBooks condition on it, so the new backend against the
 old frontend breaks completing option quotes for every company. The reverse is safe.
+
+### 2026-09-04 — live in production, verified
+
+Both merged; both deployed.
+
+| | Result |
+|---|---|
+| technician-copilot | PR #4 → `cf7fe08`, Amplify job 57 **SUCCEED**; `tech.justclara.ai/profile` 200 |
+| copilot-server | PR #4 → `d945764`, pipeline `9c929e3f` **Succeeded**; ECS on `techcopilot-prod-assistant:88`, 1/1 |
+
+The deployed revision `:88` was derived from `:86`, so all five QBO secrets carried over — which is
+exactly why the service was moved onto `:86` beforehand. Note the Docker build runs `npm test`
+(`Dockerfile:24`), so `check:qboauth` is a hard gate on every deploy from here on.
+
+Verified against the live service:
+
+```
+/health                                      200
+/api/v1/companies/connections                401  route exists, auth required
+/api/v1/companies/connections/qbo/items      401  same
+/api/v1/companies/connections/qbo/callback   200  "That QuickBooks link was invalid or expired"
+                                                  — a callback with no signed state is refused
+/api/v1/op-x7k2/companies/:id/qbo/connect    404  DELETED — the G15 hole is closed in production
+/api/v1/op-x7k2/companies/:id/qbo            200  {"configured":true, "connected":false,
+                                                   "reconnectRequired":false, "realmId":null,
+                                                   "tokenEnvironment":null,
+                                                   "serverEnvironment":"sandbox"}
+```
+
+`configured: true` is the useful one: `isQboConfigured()` requires `QBO_CLIENT_ID`,
+`QBO_CLIENT_SECRET`, `QBO_REDIRECT_URI` **and** `QBO_TOKEN_KEY` to all be present, so the
+application itself confirms every variable arrived and is readable.
+
+**Still unproven, and only a browser can prove it:** whether the redirect URI is registered on the
+Intuit app. Intuit validates it only after the user signs in. The next action is a human clicking
+Connect as an admin and approving with a sandbox QuickBooks company (T-08).
