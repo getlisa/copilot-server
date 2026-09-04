@@ -823,3 +823,114 @@ Live now: ECS `:93`, `/health` 200, Amplify job 59 SUCCEED.
 **Next on T-08:** complete a quote for company 9 and confirm the estimate appears in the sandbox
 QuickBooks with the right customer, items and total — then the reopen → re-complete update-in-place
 path, the deleted-in-QBO path, and the option-choice gate.
+
+---
+
+## 11. Sales tax architecture — design and slicing (2026-09-04)
+
+Spec: `~/clara/tax_architecture_for_estimates.md`. Wireframe: 6 mobile screens (estimate default
+view with automatic tax → Advanced Tax Settings → per-line detail), supplied 2026-09-04.
+Full six-way investigation + critic behind this section:
+`~/.claude/projects/-Users-bharath/1a91df37-24de-4e32-9ec6-c2e03622df04/subagents/workflows/wf_5f8e8ee9-802/journal.jsonl`
+
+### 11.1 The finding that reshapes the plan
+
+**`QuoteDto.total` must NOT change meaning.** Every plan assumed `total` could go from "pre-tax
+scope total" to "tax-inclusive grand total", guarded by a zero-rate identity check. That guard
+cannot do the job: with `quotes.tax_rate` defaulting to 0 every number is bit-identical, so it goes
+silent on the only day that matters — the day an admin types 8.25. What changes meaning that day,
+with no code edit and nothing able to fail:
+
+| Consumer | Why it breaks |
+|---|---|
+| `{total}` in **client-uploaded .docx templates** (`templates.ts:93`) | advertised to admins as a hardcoded placeholder list (`AdminConfig.tsx:456-459`); meaning changes under templates already uploaded |
+| a second **"Net Amount"** row printed from the same value (`proposalEstimate.ts:280`, `quotePdf.ts:174`) | silently becomes tax-inclusive under an unchanged label |
+| **amount-in-words** contract sums (`proposalPdf.ts:138,154`, `proposalTemplateRender.ts:281,327,582,603`) | a customer signs the wrong number |
+| `materialsServicesSubtotal` (`proposalEstimate.ts:83`, `input.total - laborSubtotal`) | absorbs the **entire tax** into the materials line |
+| the not-selected option note (`lib/qbo.ts:400`) | the only place an alternative's price reaches QuickBooks |
+
+**Decision required (D-12).** Recommendation: leave `total` meaning exactly what it means today and
+add `subtotal`, `taxTotal`, `grandTotal` alongside it, then migrate each renderer deliberately.
+Slower, but it converts a silent money bug into a visible compile/label change.
+
+### 11.2 The test gate is weaker than this document has been claiming
+
+`tsconfig.json` sets `"exclude": ["node_modules","dist","scripts"]`, and `tsx` does no
+typechecking. **Verified by probe:** a deliberate `const x: number = "str"` appended to
+`scripts/check-qbo-auth.ts` produced **zero** `tsc --noEmit` errors.
+
+Consequences, all confirmed:
+
+- Adding required fields to `LineItemDto` / `QuoteDto` / `MatchableRow` does **not** fail the build
+  via the complete-object literals in `scripts/check-qbo.ts`, `check-collision.ts`,
+  `check-template.ts`, `check-option-totals.ts`. Those literals go stale in silence and **new tax
+  assertions land as false greens** — asserting against `undefined`.
+- The genuine compile gates are in `src/`: `templates.ts:125-140` (a complete typed `QuoteDto`
+  literal) and the `ProposalInput` / `ProposalEmailInput` types.
+- `scripts/check-proposal-template.ts:237-254` is the one script that **does** break the deploy: it
+  pins `mapEstimateQuote`'s money seam at runtime and fails on `NaN` the moment
+  `proposalEstimate.ts:83` switches to `input.subtotal` while `subtotal` stays optional.
+- `npm test` omits **`check:options`** — the only guard on the option partition this work edits, and
+  it deep-equals `optionTotals` with `JSON.stringify`, so added fields break it silently and unrun.
+
+**Fix before any tax code: → T-33, T-34** (typecheck `scripts/`, wire `check:options`).
+
+### 11.3 Decisions required before implementation
+
+| ID | Decision | Recommendation |
+|---|---|---|
+| D-12 | Does `total` become tax-inclusive, or do we add `subtotal`/`taxTotal`/`grandTotal` beside it? | **Add beside it** (§11.1) |
+| D-13 | Do line tax defaults resolve from the **quote's stamp** or **live org config** at read time? Under "live", an org rate change moves the totals of all 93 existing drafts; spec §9 forbids that for estimates. | **Stamp on the quote** — display, rate and the three per-type flags, at create, beside `templateId`/`markupPercent` |
+| D-14 | "Taxable by default" + rate 0 is inert for CLARA's totals but **not** for the QuickBooks payload: `taxable:true, rate:0` would start declaring every line taxable to QBO, which then computes its own tax and diverges from our $0. Must "not configured" be distinct from "deliberately 0%"? | **Yes** — send no `TaxCodeRef` until a company has actually configured tax |
+| D-15 | `reprice.ts:6-11` states as doctrine that config changes propagate to open drafts immediately; spec §9 says org/price-book changes never modify an existing estimate. After this ships a config change moves a draft's **price** but not its **tax**. | Defensible, but record it — it is the "why did my total change but not my tax" support call |
+| D-16 | A legacy COMPLETED quote, backfilled to 0% and later reopened after the org sets 8.25%: re-snapshot, or stay at zero forever? `reopen` deliberately never touches line items, and `qboEstimateId` makes re-completion an in-place QBO update. | — |
+| D-17 | The estimating **agent** has a closed six-op schema with no tax field and a prompt that never mentions tax. "Don't tax the labor on this one" gets a friendly confirmation and zero operations. Route it to Advanced Tax Settings, or add an op? | Route with a prompt line first |
+| D-18 | The older Job Copilot estimate schema makes the **LLM** emit `taxOther` (`estimateQuoteSchema.ts:61`, strict, required). After this ships there are **two tax engines** rendering into the same PDF/docx/email. | Pick one — CLARA's computed tax — and stop the model emitting it |
+| D-19 | A per-line **custom rate** ("Custom 5.00%" in the wireframe) may have no faithful QuickBooks representation — QBO works in whole tax codes, not arbitrary per-line percentages. | Needs the T-28 probe before promising it |
+| D-20 | Wireframe Screen 1 leads with the totals block; the shipped screen leads with a **Markup %** input the wireframe does not show. Do both percentage controls coexist? | — |
+
+### 11.4 Slicing — smallest useful first
+
+Each slice ships on its own. Deliberately ordered so nothing has to be redone.
+
+| # | Slice | Delivers alone | Needs |
+|---|---|---|---|
+| **1** | **Make the customer document truthful.** `quotePdf.ts:117,149` and `proposalEstimate.ts:212` print a green ✓ in a "Taxed" column from `isLabor`, while `taxOther` is hardcoded to `0` — the document tells the customer a line is taxed and charges nothing. Hide the column while no tax exists. | No signed document makes a false tax claim | nothing — no column, no decision, no frontend, no QBO |
+| **2** | **Org defaults + quote stamp + totals math**, with **no line-level columns**. `company_configs` and `quotes` gain display / rate / three per-type flags; the DTO gains `subtotal`/`taxTotal`/`grandTotal`; every renderer gains the three-row block; `GET/PUT /companies/tax` + a card beside `DefaultMarkupCard`; Screen 1's totals block and inline rate pencil. Because the **quote** carries the rate and flags, spec §9 holds for lines added later too — which is why no line columns are needed yet. | The headline promise: a technician configures nothing and the estimate shows correct tax. Inert until an admin sets a non-zero rate. | D-12, D-13, D-14, T-33, T-34 |
+| **3** | **Per-line Taxable toggle** — spec §4's "primary tax interaction". One nullable column (`override_taxable`), the switch in `LineItemCard`, the PATCH field, and only now the QBO per-line `TaxCodeRef` plus `Item.Taxable` on auto-created items (G14). | The common exception in one tap, and QuickBooks receiving a taxability that matches the document | slice 2, D-14 |
+| **4** | **Advanced Tax Settings** — `override_tax_rate`, Screens 3/4/5, the "Custom / 5.00%" state, Remove Override, Apply to all items, and a label fallback for mixed rates ("Sales Tax (8.25%)" is only truthful when one rate is in force). | Per-line rate exceptions | slice 3, D-19 |
+| **5** | **Price-book item type + price basis.** Last, deliberately: nothing in the wireframe needs it, it is the only slice that changes the meaning of prices already stored in every client's book, and it is the sole source of the inclusive→pre-tax rounding loss. | Books whose prices already include tax; a real Materials/Other split | slice 2 |
+| **6** | **QuickBooks ingestion** — paginated reads (G9), an income-account picker with a deterministic fallback (G10), the tax-code list as a **pre-fill for the org rate only**, customer typeahead (T-29). | A bookkeeper-acceptable revenue account on every auto-created item; no silently duplicated customers; an admin who imports the rate instead of typing it | slice 3 for `Item.Taxable` |
+
+### 11.5 Contradictions to settle before code (from the critic)
+
+One decision each, then one owner:
+
+- **One `ItemType`.** Two areas both export a type named `ItemType` and both make it the type of
+  `MatchableRow.itemType` (`companyPricing.ts:20-36`) — one a Postgres enum, one a string union.
+  Recommendation: a lowercase string union in `quoteDto.ts` is the single definition; map at the
+  Prisma boundary if a DB enum is ever wanted.
+- **Rate precision, one name.** `Decimal(6,3)` vs `Decimal(6,4)`, `tax_rate` vs `tax_rate_percent`.
+  If both land, the create-time stamp truncates 9.0625% to 9.063% for the life of that estimate —
+  exactly the quiet money bug the snapshot exists to prevent. Pick `Decimal(6,4)`.
+- **Which way item type derives.** One plan has a price-book match *set* `isLabor`; the other keeps
+  `isLabor` authoritative. `isLabor` is simultaneously the markup boundary (`quoteDto.ts:213`), the
+  labor-reprice selector, the QBO auto item name and the proposal `kind` — so letting a book row
+  move it means **a tax feature silently re-prices materials**. Keep `isLabor` authoritative.
+- **Inclusive-price arithmetic.** One plan strips tax from an inclusive price on basis alone; the
+  other takes an inclusive price on a *non-taxable* line as-is. Same row, $120.00 vs $129.90, and
+  each has a check script pinning its own number. Settle the helper, then write one script.
+- **Line-column nullability.** Nullable (null = "added before tax shipped", which triggers the
+  `isLabor` fallback) vs `NOT NULL DEFAULT 'MATERIALS'` — the latter would type all 674 existing
+  lines, including every labor line, as materials.
+
+### 11.6 New tasks
+
+| ID | Repo | Task | Status |
+|---|---|---|---|
+| T-33 | CS | Typecheck `scripts/` (own tsconfig, or drop the exclude) and add it to `npm test`. Without it every tax assertion in a check script can pass against `undefined`. | TODO |
+| T-34 | CS | Wire `check:options` into `npm test` **before** adding fields to `QuoteOptionTotal`; hand-update every `scripts/` literal in the same commit as any DTO change. | TODO |
+| T-35 | CS | Runbook hygiene: rename the applied QBO block to the file's own `## APPLIED <date>` convention, and establish the state of the "company service address" block. Three blocks headed "Pending" makes "run the pending SQL" ambiguous against prod Aurora. | TODO |
+| T-36 | CS | `addItem` returns `toLineItemDto(item, catalog, markup)` with no tax context (`quote.controller.ts:669`), so a just-added line renders untaxed against a quote showing 8.25% until the next refetch. | TODO |
+| T-37 | CS | `admin.controller.ts:103-105` reads `companies` and `company_configs` with no `select`, so Prisma requests every scalar column and the console 500s the moment a new schema ships against an unmigrated DB. Migration must precede the image, again. | TODO |
+| T-38 | BOTH | Frozen state for Screens 3-5: `QuoteInvoiceTab` already threads `frozen`, and the server rejects writes on COMPLETED quotes — the wireframe describes no read-only variant. | TODO |
