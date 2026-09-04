@@ -148,3 +148,39 @@ export async function authMiddleware(req: RequestWithUser, res: Response, next: 
     });
   }
 }
+
+/**
+ * Company-admin roles. The DB enum is user_role { service_manager | admin | technician }, and a
+ * service manager is an admin for settings purposes (product decision 2026-09-04) — the frontend
+ * previously recognised only 'admin', which is why the Connections card was briefly made visible
+ * to everyone instead.
+ */
+export const ADMIN_ROLES = ["admin", "service_manager"] as const;
+
+export const isAdminRole = (role: string | undefined | null): boolean =>
+  !!role && (ADMIN_ROLES as readonly string[]).includes(role);
+
+/**
+ * Gate for company-wide settings WRITES: QuickBooks connect/disconnect and the default markup.
+ * Deliberately not applied to reads a technician needs — notably the QBO item list, which the
+ * quote screen fetches for every viewer to populate the per-line item dropdown.
+ *
+ * This is not decoration. With Clara owning the Intuit app, starting a connection mints an OAuth
+ * consent URL that needs no per-company credentials, so an ungated connect endpoint would let any
+ * technician bind their OWN QuickBooks account to the company and receive every completed quote.
+ * Must be mounted AFTER authMiddleware.
+ */
+export function requireAdmin(req: RequestWithUser, res: Response, next: NextFunction) {
+  if (!isAdminRole(req.user?.role)) {
+    logger.warn("Admin-only endpoint refused", {
+      path: req.path,
+      role: req.user?.role,
+      companyId: req.user?.companyId,
+    });
+    return res.status(403).json({
+      data: null,
+      error: { status: 403, message: "This setting can only be changed by a company admin" },
+    });
+  }
+  next();
+}

@@ -120,13 +120,20 @@ Deliberately NOT crm_connections: that table belongs to the platform backend, is
 one connection per company, and extending its provider enum breaks that service's client.
 
 ```sql
--- Two-phase connection row (QBO PRD US1): app keys saved first, token fields filled by the
--- OAuth callback. Connected = encrypted_auth non-null.
+-- Per-company QuickBooks OAuth tokens. Clara owns the Intuit app, so the app keys live in server
+-- env (QBO_CLIENT_ID / QBO_CLIENT_SECRET) and NOT in this table; the row is created by the OAuth
+-- callback. Connected = encrypted_auth non-null AND environment matches the server's
+-- QBO_ENVIRONMENT (Intuit issues separate Development/Production keysets, so tokens do not
+-- survive an environment flip — a mismatch means "reconnect", not a silent 401).
+--
+-- Revised 2026-09-04: client_id / encrypted_client_secret were in the earlier draft of this block
+-- (per-company Intuit apps, now deferred — see the header of src/lib/qbo.ts). If an earlier
+-- version of this block was ALREADY run anywhere, CREATE TABLE IF NOT EXISTS is a no-op there and
+-- the old NOT NULL client_id would reject every callback insert, so the DROPs below are required,
+-- not defensive dressing.
 CREATE TABLE IF NOT EXISTS public.qbo_connections (
   id                      SERIAL PRIMARY KEY,
   company_id              INT NOT NULL,
-  client_id               TEXT NOT NULL,
-  encrypted_client_secret TEXT NOT NULL,
   environment             TEXT NOT NULL DEFAULT 'production',
   realm_id                TEXT,
   encrypted_auth          TEXT,
@@ -134,6 +141,8 @@ CREATE TABLE IF NOT EXISTS public.qbo_connections (
   created_at              TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at              TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE public.qbo_connections DROP COLUMN IF EXISTS client_id;
+ALTER TABLE public.qbo_connections DROP COLUMN IF EXISTS encrypted_client_secret;
 CREATE UNIQUE INDEX IF NOT EXISTS qbo_connections_company_id_key ON public.qbo_connections (company_id);
 ALTER TABLE public.quotes ADD COLUMN IF NOT EXISTS qbo_estimate_id TEXT;
 -- Completion-time option choice (QBO PRD US3); cleared on reopen.

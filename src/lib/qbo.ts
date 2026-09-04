@@ -9,9 +9,20 @@ import type { LineItemDto, QuoteOptionTotal } from "../copilot/estimating/quoteD
 /**
  * QuickBooks Online: post a quote into the client's QBO account as an Estimate (QBO PRD).
  *
- * Connection is per company and two-phase (US1): the admin enters the company's own Intuit
- * app keys (Client ID + Secret) in the settings Connections form, then completes QuickBooks'
- * OAuth consent — the account password never touches CLARA. Connected = tokens present.
+ * Clara owns ONE Intuit app. Its Client ID / Secret / environment come from server env
+ * (QBO_CLIENT_ID, QBO_CLIENT_SECRET, QBO_ENVIRONMENT); only the OAuth TOKENS are per company.
+ * The admin clicks Connect, completes QuickBooks' consent, and that is the whole setup — the
+ * QuickBooks account password never touches CLARA. Connected = tokens present AND minted by the
+ * environment this server currently runs (see `environment` below).
+ *
+ * DEFERRED, NOT CANCELLED — per-company Intuit app keys (PRD US1 as originally written, and the
+ * shape this file had before 2026-09-04). Each client would create their own Intuit developer
+ * app and paste a Client ID + Secret into Settings → Connections, stored encrypted per company
+ * in `qbo_connections.client_id` / `.encrypted_client_secret`. Product decision (2026-09-04):
+ * clients do not bring their own keys, so that path is deferred. To revive it: restore those two
+ * columns, take clientId/secret from the row instead of the env constants below, and re-enable
+ * the commented-out key form in technician-copilot's ConnectionsCard. Recorded on the PRD:
+ * https://justclara.atlassian.net/wiki/spaces/EA/pages/115572739/ (footer comment 116260866).
  *
  * Posting triggers at quote COMPLETION (US2), never on proposal email. A quote has at most
  * one QBO estimate: re-completing after a reopen updates that same estimate in place (US6);
@@ -20,32 +31,59 @@ import type { LineItemDto, QuoteOptionTotal } from "../copilot/estimating/quoteD
  * Lines bill against the company's real QBO items (US5): the technician's per-line pick when
  * set, otherwise an exact name match against the item list, otherwise a newly created item.
  *
- * The only server-level config is QBO_REDIRECT_URI (Clara's callback URL, registered on each
- * client's Intuit app).
+ * Server config: QBO_CLIENT_ID, QBO_CLIENT_SECRET, QBO_ENVIRONMENT, QBO_REDIRECT_URI and
+ * QBO_TOKEN_KEY. The redirect URI must match what is registered on Clara's Intuit app
+ * character-for-character, and Intuit keeps a SEPARATE redirect list per keyset (Development
+ * vs Production), so it has to be registered on both.
  */
 
+const QBO_CLIENT_ID = process.env.QBO_CLIENT_ID ?? "";
+const QBO_CLIENT_SECRET = process.env.QBO_CLIENT_SECRET ?? "";
 const QBO_REDIRECT_URI = process.env.QBO_REDIRECT_URI ?? "";
+/** Which Intuit keyset this server runs against. Sandbox keys only work on sandbox companies. */
+export const QBO_ENVIRONMENT: "sandbox" | "production" =
+  process.env.QBO_ENVIRONMENT === "sandbox" ? "sandbox" : "production";
 const AUTH_URL = "https://appcenter.intuit.com/connect/oauth2";
 const TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
 
-const apiBase = (conn: QboConnection) =>
-  conn.environment === "sandbox"
+const apiBase = () =>
+  QBO_ENVIRONMENT === "sandbox"
     ? "https://sandbox-quickbooks.api.intuit.com"
     : "https://quickbooks.api.intuit.com";
 
-/** Server-level readiness: only the callback URL — app keys are per company (US1). */
-export const isQboConfigured = () => Boolean(QBO_REDIRECT_URI);
+/**
+ * Server-level readiness. The token key is included deliberately: without it `seal()` throws,
+ * and a connection that only fails AFTER the client has granted consent at Intuit is the worst
+ * possible place to discover a missing env var.
+ */
+export const isQboConfigured = () =>
+  Boolean(QBO_CLIENT_ID && QBO_CLIENT_SECRET && QBO_REDIRECT_URI && process.env.QBO_TOKEN_KEY);
 
+/**
+ * Connected means: tokens present AND minted by the keyset this server is running now. Sandbox
+ * tokens are worthless against production (and vice versa), so after an environment flip every
+ * stale row reads "not connected" and the company is asked to reconnect — which is a clear
+ * prompt instead of an opaque 401 on the next quote completion.
+ */
 export const qboConnected = (conn: QboConnection | null): conn is QboConnection =>
-  !!conn?.encryptedAuth;
+  !!conn?.encryptedAuth && conn.environment === QBO_ENVIRONMENT;
+
+/** Tokens exist, but from the other keyset — the UI shows "reconnect required", not "connect". */
+export const qboReconnectRequired = (conn: QboConnection | null): boolean =>
+  !!conn?.encryptedAuth && conn.environment !== QBO_ENVIRONMENT;
 
 // ---------- encryption at rest ----------
-// App secrets and OAuth tokens grant write access to a client's accounting system. The key
-// derives from JWT_ACCESS_SECRET to avoid provisioning another secret. ponytail: rotating
-// JWT_ACCESS_SECRET orphans stored secrets/tokens (companies re-enter keys and reconnect);
-// add a dedicated QBO_TOKEN_KEY if secret rotation ever becomes routine.
+// OAuth tokens grant write access to a client's accounting system. The key comes from its own
+// env var and NOT from JWT_ACCESS_SECRET: .env.example documents that secret as owned by the
+// platform API ("must match the platform API's secret"), so a rotation by another team would
+// silently orphan every stored token. Any string works — it is hashed to 32 bytes.
+// No fallback on purpose: sealing under a foreign service's secret is worse than failing loudly.
 
-const key = () => createHash("sha256").update(`qbo:${jwtConfig.accessSecret}`).digest();
+const key = () => {
+  const secret = process.env.QBO_TOKEN_KEY;
+  if (!secret) throw new Error("QBO_TOKEN_KEY is not set — cannot seal or open QuickBooks tokens");
+  return createHash("sha256").update(`qbo:${secret}`).digest();
+};
 
 function seal(plaintext: string): string {
   const iv = randomBytes(12);
@@ -66,36 +104,18 @@ interface AuthTokens {
   refreshToken: string;
 }
 
-// ---------- credentials (US1) ----------
-
-/**
- * Save (or replace) the company's Intuit app keys. Replacing keys clears any tokens issued
- * under the old app — they would be invalid anyway — so the row drops back to "not connected"
- * until the OAuth consent is redone.
- */
-export async function saveQboCredentials(
-  companyId: number,
-  clientId: string,
-  clientSecret: string,
-  environment: "production" | "sandbox"
-) {
-  const data = {
-    clientId,
-    encryptedClientSecret: seal(clientSecret),
-    environment,
-    realmId: null,
-    encryptedAuth: null,
-    accessTokenExpiresAt: null,
-  };
-  await prisma.qboConnection.upsert({
-    where: { companyId },
-    create: { companyId, ...data },
-    update: data,
-  });
-}
+// ---------- connection ----------
 
 export const qboConnectionFor = (companyId: number) =>
   prisma.qboConnection.findUnique({ where: { companyId } });
+
+/**
+ * Forget a company's connection (QBO PRD US10 / D5 self-serve disconnect). Nothing is revoked at
+ * Intuit — reconnecting simply overwrites the row. Deliberately does NOT clear Quote.qboEstimateId:
+ * those estimates still exist in the QuickBooks company they were posted to.
+ */
+export const disconnectQbo = (companyId: number) =>
+  prisma.qboConnection.deleteMany({ where: { companyId } });
 
 // ---------- OAuth ----------
 
@@ -104,10 +124,10 @@ export const qboConnectionFor = (companyId: number) =>
  * so an unsigned state would let anyone link their QBO account to an arbitrary company by
  * forging the redirect.
  */
-export function qboAuthUrl(conn: QboConnection): string {
-  const state = jwt.sign({ qbo: conn.companyId }, jwtConfig.accessSecret, { expiresIn: "15m" });
+export function qboAuthUrl(companyId: number): string {
+  const state = jwt.sign({ qbo: companyId }, jwtConfig.accessSecret, { expiresIn: "15m" });
   const params = new URLSearchParams({
-    client_id: conn.clientId,
+    client_id: QBO_CLIENT_ID,
     response_type: "code",
     scope: "com.intuit.quickbooks.accounting",
     redirect_uri: QBO_REDIRECT_URI,
@@ -131,8 +151,8 @@ interface TokenResponse {
   expires_in: number;
 }
 
-async function tokenRequest(conn: QboConnection, body: Record<string, string>): Promise<TokenResponse> {
-  const basic = Buffer.from(`${conn.clientId}:${unseal(conn.encryptedClientSecret)}`).toString("base64");
+async function tokenRequest(body: Record<string, string>): Promise<TokenResponse> {
+  const basic = Buffer.from(`${QBO_CLIENT_ID}:${QBO_CLIENT_SECRET}`).toString("base64");
   const res = await fetch(TOKEN_URL, {
     method: "POST",
     headers: {
@@ -148,22 +168,29 @@ async function tokenRequest(conn: QboConnection, body: Record<string, string>): 
 
 const expiry = (seconds: number) => new Date(Date.now() + seconds * 1000);
 
-/** OAuth callback: exchange the code and store tokens on the company's credentials row. */
+/**
+ * OAuth callback: exchange the code for tokens and store them against the company. Upsert, not
+ * update: with Clara-owned keys there is no pre-existing row to attach to — the first successful
+ * consent CREATES the connection — and a reconnect after an environment flip must overwrite the
+ * stale one. `environment` is stamped here so `qboConnected()` can spot tokens from the other
+ * keyset later.
+ */
 export async function connectQbo(companyId: number, code: string, realmId: string) {
-  const conn = await qboConnectionFor(companyId);
-  if (!conn) throw new Error("No QuickBooks app keys saved for this company");
-  const t = await tokenRequest(conn, {
+  const t = await tokenRequest({
     grant_type: "authorization_code",
     code,
     redirect_uri: QBO_REDIRECT_URI,
   });
-  await prisma.qboConnection.update({
-    where: { id: conn.id },
-    data: {
-      realmId,
-      encryptedAuth: seal(JSON.stringify({ accessToken: t.access_token, refreshToken: t.refresh_token })),
-      accessTokenExpiresAt: expiry(t.expires_in),
-    },
+  const data = {
+    realmId,
+    environment: QBO_ENVIRONMENT,
+    encryptedAuth: seal(JSON.stringify({ accessToken: t.access_token, refreshToken: t.refresh_token })),
+    accessTokenExpiresAt: expiry(t.expires_in),
+  };
+  await prisma.qboConnection.upsert({
+    where: { companyId },
+    create: { companyId, ...data },
+    update: data,
   });
 }
 
@@ -176,14 +203,22 @@ async function accessTokenFor(conn: QboConnection): Promise<string> {
     throw new Error("QuickBooks is not connected — complete the sign-in from Settings → Connections");
   const auth = JSON.parse(unseal(conn.encryptedAuth)) as AuthTokens;
   if (conn.accessTokenExpiresAt.getTime() - Date.now() > 60_000) return auth.accessToken;
-  const t = await tokenRequest(conn, { grant_type: "refresh_token", refresh_token: auth.refreshToken });
+  const t = await tokenRequest({ grant_type: "refresh_token", refresh_token: auth.refreshToken });
+  const encryptedAuth = seal(
+    JSON.stringify({ accessToken: t.access_token, refreshToken: t.refresh_token })
+  );
+  const accessTokenExpiresAt = expiry(t.expires_in);
   await prisma.qboConnection.update({
     where: { id: conn.id },
-    data: {
-      encryptedAuth: seal(JSON.stringify({ accessToken: t.access_token, refreshToken: t.refresh_token })),
-      accessTokenExpiresAt: expiry(t.expires_in),
-    },
+    data: { encryptedAuth, accessTokenExpiresAt },
   });
+  // Write the new pair back onto the in-memory row too. One syncQuoteToQbo makes 4-8 sequential
+  // qboFetch calls, each of which calls this function with the SAME object; without this the
+  // second call still sees the old expiry and refreshes again — replaying a refresh token Intuit
+  // may already have rotated away. (The remaining half of that bug — two CONCURRENT syncs racing
+  // the same refresh — needs a DB claim column; see docs/qbo/QBO-INTEGRATION.md T-02.)
+  conn.encryptedAuth = encryptedAuth;
+  conn.accessTokenExpiresAt = accessTokenExpiresAt;
   return t.access_token;
 }
 
@@ -202,7 +237,7 @@ const isNotFound = (e: unknown) =>
 async function qboFetch(conn: QboConnection, path: string, init?: RequestInit): Promise<any> {
   const token = await accessTokenFor(conn);
   const sep = path.includes("?") ? "&" : "?";
-  const res = await fetch(`${apiBase(conn)}/v3/company/${conn.realmId}${path}${sep}minorversion=75`, {
+  const res = await fetch(`${apiBase()}/v3/company/${conn.realmId}${path}${sep}minorversion=75`, {
     ...init,
     headers: {
       Authorization: `Bearer ${token}`,

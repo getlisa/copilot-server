@@ -366,17 +366,18 @@ model crm_entity_links {
 /// and extending its provider enum would break the other service's generated client on read.
 /// No FK/relation, matching Pricebook/LaborRate (runbook-managed DDL).
 ///
-/// Two-phase row (QBO PRD US1): created when the admin saves the company's QuickBooks app
-/// keys in settings; the token fields stay null until the OAuth consent completes. Connected
-/// means encrypted_auth is non-null.
+/// Per-company OAuth TOKENS only. Clara owns the Intuit app, so the app keys live in server env
+/// (QBO_CLIENT_ID / QBO_CLIENT_SECRET) and no row exists until a consent succeeds — the callback
+/// creates it. Connected means encrypted_auth is non-null AND environment matches the server's.
+/// The deferred per-company-app-keys design (client_id / encrypted_client_secret columns) is
+/// documented at the top of src/lib/qbo.ts.
 model QboConnection {
   id                   Int       @id @default(autoincrement())
   companyId            Int       @unique @map("company_id")
-  /// The company's own Intuit app key (QBO PRD US1). Public identifier, not a secret.
-  clientId             String    @map("client_id")
-  /// AES-256-GCM sealed Client Secret — sealed/opened in lib/qbo.ts.
-  encryptedClientSecret String   @map("encrypted_client_secret")
-  /// "production" | "sandbox" — selects the QBO API base per connection.
+  /// Which Intuit keyset minted these tokens: "production" | "sandbox". NOT an admin choice and
+  /// NOT what selects the API base (the server env does that) — it is a stamp. Intuit issues
+  /// separate Development and Production keysets, so tokens do not survive an environment flip;
+  /// a mismatch here means "reconnect required" rather than an opaque 401 mid-quote.
   environment          String    @default("production")
   /// The QBO company id Intuit hands back on the OAuth callback. Null until consented.
   realmId              String?   @map("realm_id")

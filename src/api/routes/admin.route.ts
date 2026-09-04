@@ -61,10 +61,14 @@ adminRoute.post(
   AdminController.previewProposalTemplate
 );
 
-// QuickBooks Online: connect opens Intuit's consent page; callback must match QBO_REDIRECT_URI.
+// QuickBooks Online, console side: status and disconnect only.
+// The connect route is deliberately GONE. This router is mounted UNAUTHENTICATED, and with Clara
+// owning the Intuit app a connect handler here would mint a consent URL for any company id an
+// anonymous caller named — whoever approved would have their own QuickBooks bound to that company
+// and would receive its quotes. Connecting now happens only via the authenticated, admin-gated
+// POST /api/v1/companies/connections/qbo/connect, scoped to the caller's own company.
+// The OAuth callback moved with it (GET /api/v1/companies/connections/qbo/callback).
 adminRoute.get("/companies/:companyId/qbo", AdminController.qboStatus);
-adminRoute.get("/companies/:companyId/qbo/connect", AdminController.qboConnect);
-adminRoute.get("/qbo/callback", AdminController.qboCallback);
 adminRoute.delete("/companies/:companyId/qbo", AdminController.qboDisconnect);
 
 adminRoute.get("/companies/:companyId/conversations", AdminController.listConversations);

@@ -17,11 +17,11 @@ import type { ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { validateDocxTemplate } from "../../copilot/estimating/templates";
 import {
   isQboConfigured,
-  qboAuthUrl,
   qboConnected,
+  qboReconnectRequired,
   qboConnectionFor,
-  companyIdFromState,
-  connectQbo,
+  disconnectQbo,
+  QBO_ENVIRONMENT,
 } from "../../lib/qbo";
 
 /**
@@ -823,49 +823,28 @@ export class AdminController {
       success: true,
       data: {
         configured: isQboConfigured(),
-        hasCredentials: !!conn,
         connected: qboConnected(conn),
+        /** Tokens from the other Intuit keyset — the company must reconnect. */
+        reconnectRequired: qboReconnectRequired(conn),
         realmId: conn?.realmId ?? null,
-        environment: conn?.environment ?? "production",
+        /** Which keyset minted the stored tokens, vs what this server runs now. */
+        tokenEnvironment: conn?.environment ?? null,
+        serverEnvironment: QBO_ENVIRONMENT,
       },
     });
   }
 
-  /** GET /admin/companies/:companyId/qbo/connect — browser entry: 302 to Intuit's consent page. */
-  static async qboConnect(req: Request, res: Response) {
-    const companyId = companyIdOf(req, res);
-    if (!companyId) return;
-    if (!isQboConfigured()) return fail(res, 503, "QBO_REDIRECT_URI is not set on the server");
-    const conn = await qboConnectionFor(companyId);
-    if (!conn)
-      return fail(
-        res,
-        409,
-        "No QuickBooks app keys saved for this company — the company admin enters them in Settings → Connections first"
-      );
-    res.redirect(qboAuthUrl(conn));
-  }
-
-  /** GET /admin/qbo/callback — Intuit's redirect target; must match QBO_REDIRECT_URI. */
-  static async qboCallback(req: Request, res: Response) {
-    const { code, state, realmId, error } = req.query as Record<string, string | undefined>;
-    if (error) return fail(res, 400, `Intuit returned: ${error}`);
-    // companyId comes only from the signed state — a forged/expired callback dies here.
-    const companyId = state ? companyIdFromState(state) : null;
-    if (!companyId || !code || !realmId)
-      return fail(res, 400, "Invalid or expired callback — restart from the connect URL");
-    await connectQbo(companyId, code, realmId);
-    logger.info("QBO connected", { companyId, realmId });
-    res.send(
-      `<html><body style="font-family:sans-serif"><h3>QuickBooks connected for company ${companyId}.</h3><p>You can close this tab.</p></body></html>`
-    );
-  }
+  // DEFERRED/REMOVED (2026-09-04): qboConnect and qboCallback used to live here. This router is
+  // mounted without auth, so a connect handler that no longer needs per-company app keys would let
+  // anyone bind their own QuickBooks to any company id. Connecting is now authenticated and
+  // admin-only on the company routes; the callback moved with it.
 
   /** DELETE /admin/companies/:companyId/qbo — forget the connection (reconnecting overwrites). */
   static async qboDisconnect(req: Request, res: Response) {
     const companyId = companyIdOf(req, res);
     if (!companyId) return;
-    await prisma.qboConnection.deleteMany({ where: { companyId } });
+    await disconnectQbo(companyId);
+    logger.info("QBO disconnected from console", { companyId });
     res.json({ success: true, data: { connected: false } });
   }
 }

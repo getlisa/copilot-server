@@ -10,8 +10,12 @@ import {
   qboAuthUrl,
   qboConnectionFor,
   qboConnected,
+  qboReconnectRequired,
   qboItems,
-  saveQboCredentials,
+  connectQbo,
+  disconnectQbo,
+  companyIdFromState,
+  QBO_ENVIRONMENT,
 } from "../../lib/qbo";
 
 /**
@@ -132,11 +136,14 @@ export class CompanyController {
   }
 
   /**
-   * GET /api/v1/companies/connections — integration status for the caller's company,
-   * for the profile page's Connections section (QBO PRD US1). `connectUrl` is minted fresh
-   * on every read (the signed state inside expires in 15 minutes), so the client re-fetches
-   * at click time instead of caching it. Present whenever app keys exist — connecting again
-   * deliberately replaces the old connection.
+   * GET /api/v1/companies/connections — integration status for the caller's company.
+   * Readable by EVERY user of the company (product decision 2026-09-04): the Connections card
+   * lives on the profile page and shows everyone whether QuickBooks is hooked up. Acting on it
+   * — connect, disconnect — is admin-only and lives on separate routes.
+   *
+   * Deliberately carries NO auth URL. Minting one is a privileged action (see startQboConnect):
+   * returning it from a read that every technician can call would let any of them bind their own
+   * QuickBooks account to the company.
    */
   static async getConnections(req: RequestWithUser, res: Response) {
     const companyId = req.user?.companyId;
@@ -149,12 +156,14 @@ export class CompanyController {
       success: true,
       data: {
         qbo: {
+          /** Server has the Intuit app keys, callback URL and token key set. */
           configured: isQboConfigured(),
-          hasCredentials: !!conn,
           connected: qboConnected(conn),
+          /** Tokens exist but were minted by the other Intuit keyset — reconnect, don't connect. */
+          reconnectRequired: qboReconnectRequired(conn),
           realmId: conn?.realmId ?? null,
-          environment: conn?.environment ?? "production",
-          connectUrl: isQboConfigured() && conn ? qboAuthUrl(conn) : null,
+          /** The environment this SERVER runs against, not a per-company choice. */
+          environment: QBO_ENVIRONMENT,
         },
         // ponytail: ZenTrades is a display-only row in the UI for now; add a real entry
         // here when that integration exists.
@@ -163,11 +172,13 @@ export class CompanyController {
   }
 
   /**
-   * PUT /api/v1/companies/connections/qbo — save the company's QuickBooks app keys from the
-   * Connections form (QBO PRD US1). Body: { clientId, clientSecret, environment? }. Replacing
-   * keys clears any tokens issued under the old app, so the OAuth consent is redone next.
+   * POST /api/v1/companies/connections/qbo/connect — start the QuickBooks consent flow.
+   * Admin-only, and scoped to the CALLER'S company: the returned URL carries a 15-minute signed
+   * state naming that company, and whoever approves at Intuit has their QuickBooks bound to it.
+   * That is why this is a POST behind requireAdmin rather than a field on the status read.
+   * Minted fresh per click — the state expires — so the client must not cache it.
    */
-  static async saveQboCredentials(req: RequestWithUser, res: Response) {
+  static async startQboConnect(req: RequestWithUser, res: Response) {
     const companyId = req.user?.companyId;
     if (companyId == null)
       return res
@@ -176,20 +187,68 @@ export class CompanyController {
     if (!isQboConfigured())
       return res.status(503).json({
         success: false,
-        error: { status: 503, message: "QBO_REDIRECT_URI is not set on the server" },
+        error: { status: 503, message: "QuickBooks is not configured on this server" },
       });
-    const clientId = str(req.body?.clientId);
-    const clientSecret = str(req.body?.clientSecret);
-    if (!clientId || !clientSecret)
-      return res.status(400).json({
-        success: false,
-        error: { status: 400, message: "Both the Client ID and Client Secret are required" },
+    logger.info("QBO connect initiated", { companyId, environment: QBO_ENVIRONMENT });
+    res.json({ success: true, data: { authUrl: qboAuthUrl(companyId) } });
+  }
+
+  /**
+   * GET /api/v1/companies/connections/qbo/callback — Intuit's redirect target. Must match
+   * QBO_REDIRECT_URI character-for-character and be registered on the Intuit app (separately for
+   * the Development and Production keysets).
+   *
+   * Unauthenticated by necessity: Intuit sends the user's BROWSER here, with no bearer token.
+   * The company is taken only from the signed state, never from a query param, so a forged or
+   * expired callback cannot attach a QuickBooks account to someone else's company.
+   */
+  static async qboCallback(req: Request, res: Response) {
+    const { code, state, realmId, error } = req.query as Record<string, string | undefined>;
+    const done = (message: string) =>
+      res.send(
+        `<html><body style="font-family:system-ui;padding:2rem"><h3>${message}</h3><p>You can close this tab.</p></body></html>`
+      );
+    if (error) {
+      logger.warn("QBO callback returned an error", { error });
+      return done(`QuickBooks returned: ${error}`);
+    }
+    const companyId = state ? companyIdFromState(state) : null;
+    if (!companyId || !code || !realmId) {
+      logger.warn("QBO callback rejected", { hasCode: !!code, hasRealm: !!realmId, hasState: !!state });
+      return done("That QuickBooks link was invalid or expired — start again from Connections.");
+    }
+    try {
+      await connectQbo(companyId, code, realmId);
+      logger.info("QBO connected", { companyId, realmId, environment: QBO_ENVIRONMENT });
+      return done("QuickBooks connected.");
+    } catch (e) {
+      logger.error("QBO connect failed", {
+        companyId,
+        error: e instanceof Error ? e.message : String(e),
       });
-    const environment = req.body?.environment === "sandbox" ? "sandbox" : "production";
-    await saveQboCredentials(companyId, clientId, clientSecret, environment);
-    logger.info("QBO app keys saved", { companyId, environment });
+      return done("Could not finish connecting to QuickBooks. Please try again.");
+    }
+  }
+
+  /**
+   * DELETE /api/v1/companies/connections/qbo — forget this company's connection (US10 / D5).
+   * Admin-only. Reconnecting later simply creates a fresh row.
+   */
+  static async disconnectQboForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    await disconnectQbo(companyId);
+    logger.info("QBO disconnected", { companyId });
     return CompanyController.getConnections(req, res);
   }
+
+  // DEFERRED (D1, 2026-09-04): PUT /companies/connections/qbo used to accept a per-company
+  // Intuit Client ID + Secret here. Clara now owns the app and the keys come from server env,
+  // so the endpoint is gone along with lib/qbo.ts::saveQboCredentials. The deferred design is
+  // documented at the top of src/lib/qbo.ts; the frontend key form is commented out, not deleted.
 
   /**
    * GET /api/v1/companies/connections/qbo/items — the connected QBO account's item list, for
