@@ -775,3 +775,51 @@ application itself confirms every variable arrived and is readable.
 **Still unproven, and only a browser can prove it:** whether the redirect URI is registered on the
 Intuit app. Intuit validates it only after the user signs in. The next action is a human clicking
 Connect as an admin and approving with a sandbox QuickBooks company (T-08).
+
+### 2026-09-04 — first real connection, and the UI round-trip
+
+**T-08, first half: PROVEN.** A sandbox QuickBooks company connected end to end.
+
+```
+qbo_connections  id 2, company_id 9, environment sandbox,
+                 realm_id 9341455474664217, tokens present,
+                 access_token_expires_at 2026-09-04T12:47:17Z
+```
+
+That single row settles four things at once that no headless test could: the redirect URI **is**
+registered on the Intuit app, the consent completed, the authorization-code exchange succeeded, and
+`QBO_TOKEN_KEY` sealed the token pair (the row could not have been written otherwise).
+
+Three follow-ups shipped after it:
+
+1. **The callback now returns the user to the app.** Intuit hands the browser to the API, which
+   rendered a "you can close this tab" page — leaving the user parked on an API response. It now
+   302s to `QBO_APP_RETURN_URL` with `?qbo=connected|error`; the card turns that into a toast and
+   strips the parameter so a refresh does not replay it. Verified live: a callback with no state
+   returns `302 → https://field.justclara.ai/profile?qbo=error`.
+   `ALLOW_ORIGIN` could not be reused for the target — it is `*`.
+2. **Sandbox badge removed** and **"Completed quotes post to your QuickBooks as estimates" removed**
+   (the connected state now renders no descriptive line at all — the badge says it).
+3. From the round before: **`canManage` now comes from the server**, and non-admins see
+   "Only a company admin can connect QuickBooks" instead of an empty card.
+
+**Correction to an earlier entry:** the frontend is **`field.justclara.ai`** — it is Amplify's only
+domain association, and its bundle contains the QBO code. `tech.justclara.ai` is a *different,
+older* app with zero QBO code in it; the Intuit Host domain and Launch/Disconnect/Connect URLs
+must use `field.justclara.ai`, not `tech.justclara.ai` as previously written here.
+
+**A mistake worth not repeating.** Adding `QBO_APP_RETURN_URL` to the task definition, I derived
+the secret ARN with `valueFrom.rsplit(":", 2)[0]`, which strips only the two empty trailing fields
+and leaves the *previous* key glued on — producing
+`…app-qRY1HD:ALLOW_ORIGIN:QBO_APP_RETURN_URL::` and `ResourceInitializationError: unexpected ARN
+format with parameters`. Revision `:91` could not start. **Production never went down**:
+`minimumHealthyPercent 100` kept `:90` serving throughout, which is the whole point of that
+setting. Fixed by rebuilding from `:90` with `re.sub(r":[^:]*::$", "", valueFrom)` — the form
+`scratchpad/set-qbo-env.sh` already used — registering `:92`, and deregistering `:91`. The
+pipeline then built `:93` from `:92`.
+
+Live now: ECS `:93`, `/health` 200, Amplify job 59 SUCCEED.
+
+**Next on T-08:** complete a quote for company 9 and confirm the estimate appears in the sandbox
+QuickBooks with the right customer, items and total — then the reopen → re-complete update-in-place
+path, the deleted-in-QBO path, and the option-choice gate.
