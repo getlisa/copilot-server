@@ -36,7 +36,6 @@ buildProposalPdf({
     licenseNumber: "LIC-1",
   },
   projectTitle: "Check",
-  projectAddress: "2 Oak Ave",
   date: new Date("2026-01-01"),
   scopeSections: [{ title: "Scope", bullets: ["do the work"] }],
   total: 1825,

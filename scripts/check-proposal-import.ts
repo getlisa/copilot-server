@@ -137,7 +137,7 @@ async function main() {
   eq("the heading itself is kept on the block", assembled[1]?.heading, "EXCLUSIONS");
   ok(
     "later text merely MENTIONING the heading words is kept",
-    assembled[1]?.content?.some((part) => part.text?.includes("Exclusions apply"))
+    !!assembled[1]?.content?.some((part) => part.text?.includes("Exclusions apply"))
   );
   eq("a dynamic block passes through", assembled[2]?.dynamic, "costSummary");
 
