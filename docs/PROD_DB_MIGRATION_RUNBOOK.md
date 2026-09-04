@@ -111,6 +111,57 @@ Zero-risk to the app — it connects as `app_user`, not `postgres`.
 | Connection string auth fails with correct password | Password has `: # ? ] *` etc. — URL-encode it (step 4) |
 | Which DB is prod? | NOT the Supabase URLs in local `.env` — prod is the Aurora us-east-1 instance |
 
+## Pending migration: QuickBooks Online estimate posting (2026-09-02)
+
+One table for per-company QBO OAuth connections plus the posted-estimate id on quotes.
+Additive and idempotent; run via step 4 above, BEFORE deploying the code that ships it —
+Prisma selects all scalar columns, so every `quotes` read fails while the column is absent.
+Deliberately NOT crm_connections: that table belongs to the platform backend, is capped at
+one connection per company, and extending its provider enum breaks that service's client.
+
+```sql
+-- Per-company QuickBooks OAuth tokens. Clara owns the Intuit app, so the app keys live in server
+-- env (QBO_CLIENT_ID / QBO_CLIENT_SECRET) and NOT in this table; the row is created by the OAuth
+-- callback. Connected = encrypted_auth non-null AND environment matches the server's
+-- QBO_ENVIRONMENT (Intuit issues separate Development/Production keysets, so tokens do not
+-- survive an environment flip — a mismatch means "reconnect", not a silent 401).
+--
+-- Revised 2026-09-04: client_id / encrypted_client_secret were in the earlier draft of this block
+-- (per-company Intuit apps, now deferred — see the header of src/lib/qbo.ts). If an earlier
+-- version of this block was ALREADY run anywhere, CREATE TABLE IF NOT EXISTS is a no-op there and
+-- the old NOT NULL client_id would reject every callback insert, so the DROPs below are required,
+-- not defensive dressing.
+CREATE TABLE IF NOT EXISTS public.qbo_connections (
+  id                      SERIAL PRIMARY KEY,
+  company_id              INT NOT NULL,
+  environment             TEXT NOT NULL DEFAULT 'production',
+  realm_id                TEXT,
+  encrypted_auth          TEXT,
+  access_token_expires_at TIMESTAMP(3),
+  created_at              TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at              TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+ALTER TABLE public.qbo_connections DROP COLUMN IF EXISTS client_id;
+ALTER TABLE public.qbo_connections DROP COLUMN IF EXISTS encrypted_client_secret;
+CREATE UNIQUE INDEX IF NOT EXISTS qbo_connections_company_id_key ON public.qbo_connections (company_id);
+ALTER TABLE public.quotes ADD COLUMN IF NOT EXISTS qbo_estimate_id TEXT;
+-- Completion-time option choice (QBO PRD US3); cleared on reopen.
+ALTER TABLE public.quotes ADD COLUMN IF NOT EXISTS chosen_option_group TEXT;
+-- Per-line QBO item selection (QBO PRD US5); null = auto match/create by name at post time.
+ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS qbo_item_id TEXT;
+ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS qbo_item_name TEXT;
+-- Company default markup for NEW quotes (QBO PRD US7).
+ALTER TABLE public.company_configs ADD COLUMN IF NOT EXISTS default_markup_percent DECIMAL(5,2) NOT NULL DEFAULT 0;
+
+-- New table is created by postgres; hand it to app_user like the rest.
+ALTER TABLE public.qbo_connections OWNER TO app_user;
+GRANT USAGE ON SEQUENCE public.qbo_connections_id_seq TO app_user;
+```
+
+Also required on the LOCAL dev database (Supabase) — run the same block there by hand.
+Do NOT use `prisma db push` for it: the duplicate `DIRECT_URL` in local `.env` makes the
+Prisma CLI target prod.
+
 ## Pending migration: company service address (2026-08-25)
 
 Registration now captures a billing AND a service address; `companies.address` stays the

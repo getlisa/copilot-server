@@ -30,5 +30,6 @@ quoteRoute.get("/:quoteId/proposal-docx", QuoteController.downloadProposalDocx);
 quoteRoute.get("/:quoteId/proposal-pdf", QuoteController.downloadProposalPdf);
 quoteRoute.get("/:quoteId/email-draft", QuoteController.emailDraft);
 quoteRoute.post("/:quoteId/email", QuoteController.emailProposal);
+quoteRoute.post("/:quoteId/qbo", QuoteController.syncQbo);
 
 export { quoteRoute };

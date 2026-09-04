@@ -82,6 +82,11 @@ export interface LineItemDto {
   } | null;
   /** Alternative-option group ("Option A – …"); null = base scope. */
   optionGroup: string | null;
+  /** Catalog-shaped search term behind the line, used as the auto QBO item name (QBO US5). */
+  searchTerm: string | null;
+  /** QBO item this line bills against (QBO PRD US5). Null = auto match/create by name. */
+  qboItemId: string | null;
+  qboItemName: string | null;
   sortOrder: number;
 }
 
@@ -122,6 +127,11 @@ export interface QuoteDto {
   total: number;
   /** Present (non-empty) only when the quote carries alternative option groups. */
   optionTotals: QuoteOptionTotal[];
+  /**
+   * Which option group the customer chose, captured at completion (QBO PRD US3). Null while
+   * undecided or when the quote has no options. Cleared on reopen.
+   */
+  chosenOptionGroup: string | null;
   blockingFlagCount: number;
 }
 
@@ -296,6 +306,9 @@ export function toLineItemDto(
     flags: flagsFor(item),
     ambiguousAction: (item.ambiguousAction as LineItemDto["ambiguousAction"]) ?? null,
     optionGroup: item.optionGroup ?? null,
+    searchTerm: item.searchTerm ?? null,
+    qboItemId: item.qboItemId ?? null,
+    qboItemName: item.qboItemName ?? null,
     sortOrder: item.sortOrder,
   };
 }
@@ -338,6 +351,7 @@ export function toQuoteDto(
     customerPhone: quote.customerPhone ?? null,
     total: baseTotal,
     optionTotals,
+    chosenOptionGroup: quote.chosenOptionGroup ?? null,
     blockingFlagCount: dtos.filter((d) =>
       d.flags.some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
     ).length,

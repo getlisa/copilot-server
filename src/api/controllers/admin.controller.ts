@@ -15,6 +15,14 @@ import { importProposalDocument } from "../../copilot/estimating/proposalImportC
 import { ProposalImportError } from "../../copilot/estimating/proposalImport";
 import type { ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { validateDocxTemplate } from "../../copilot/estimating/templates";
+import {
+  isQboConfigured,
+  qboConnected,
+  qboReconnectRequired,
+  qboConnectionFor,
+  disconnectQbo,
+  QBO_ENVIRONMENT,
+} from "../../lib/qbo";
 
 /**
  * Internal per-company configuration API (pricebook-config PRD + labor PRD): pricebooks,
@@ -802,5 +810,41 @@ export class AdminController {
       });
       return fail(res, 500, "Could not render a preview of this format");
     }
+  }
+
+  // ---------- QuickBooks Online ----------
+
+  /** GET /admin/companies/:companyId/qbo — connection status. */
+  static async qboStatus(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const conn = await qboConnectionFor(companyId);
+    res.json({
+      success: true,
+      data: {
+        configured: isQboConfigured(),
+        connected: qboConnected(conn),
+        /** Tokens from the other Intuit keyset — the company must reconnect. */
+        reconnectRequired: qboReconnectRequired(conn),
+        realmId: conn?.realmId ?? null,
+        /** Which keyset minted the stored tokens, vs what this server runs now. */
+        tokenEnvironment: conn?.environment ?? null,
+        serverEnvironment: QBO_ENVIRONMENT,
+      },
+    });
+  }
+
+  // DEFERRED/REMOVED (2026-09-04): qboConnect and qboCallback used to live here. This router is
+  // mounted without auth, so a connect handler that no longer needs per-company app keys would let
+  // anyone bind their own QuickBooks to any company id. Connecting is now authenticated and
+  // admin-only on the company routes; the callback moved with it.
+
+  /** DELETE /admin/companies/:companyId/qbo — forget the connection (reconnecting overwrites). */
+  static async qboDisconnect(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    await disconnectQbo(companyId);
+    logger.info("QBO disconnected from console", { companyId });
+    res.json({ success: true, data: { connected: false } });
   }
 }

@@ -26,6 +26,7 @@ import { scrubAddressFromTitle } from "../../copilot/estimating/scrubAddress";
 import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating/proposalEmail";
 import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
 import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
+import { qboConnectionFor, qboConnected, syncQuoteToQbo } from "../../lib/qbo";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
@@ -334,16 +335,25 @@ export class QuoteController {
     });
     // Stamp the company's active template at creation (template-config PRD): a later
     // template reassignment only affects quotes created after it, never this one.
-    const activeTemplate = await prisma.quoteTemplate.findFirst({
-      where: { companyId: user.companyId, isActive: true },
-      select: { id: true },
-    });
+    const [activeTemplate, config] = await Promise.all([
+      prisma.quoteTemplate.findFirst({
+        where: { companyId: user.companyId, isActive: true },
+        select: { id: true },
+      }),
+      // Company default markup (QBO PRD US7): the STARTING value only — stamped here like the
+      // template, so changing the default never touches an existing quote.
+      prisma.company_configs.findUnique({
+        where: { company_id: user.companyId },
+        select: { default_markup_percent: true },
+      }),
+    ]);
     const quote = await prisma.quote.create({
       data: {
         conversationId: conversation.id,
         userId: user.userId,
         companyId: user.companyId,
         templateId: activeTemplate?.id ?? null,
+        markupPercent: config?.default_markup_percent ?? 0,
       },
       include: { lineItems: true },
     });
@@ -731,6 +741,12 @@ export class QuoteController {
       data.quantity = body.quantity;
     }
     if (body.unit !== undefined) data.unit = body.unit;
+    // Per-line QBO item pick (QBO PRD US5). Both set together from the dropdown; null clears
+    // back to auto (name match / create at post time).
+    if (body.qboItemId !== undefined) {
+      data.qboItemId = body.qboItemId == null ? null : String(body.qboItemId);
+      data.qboItemName = body.qboItemName == null ? null : String(body.qboItemName);
+    }
     // Manual price entry is used as-is, skips pricebook, and is flagged (US6).
     if (body.unitPrice !== undefined) {
       data.unitPrice = body.unitPrice == null ? null : toBase(body.unitPrice);
@@ -835,7 +851,13 @@ export class QuoteController {
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
 
-  /** POST /api/v1/quotes/:quoteId/complete — gated on unresolved blocking flags (US6/US9). */
+  /**
+   * POST /api/v1/quotes/:quoteId/complete — gated on unresolved blocking flags (US6/US9).
+   * Quotes with option groups must also carry the customer's choice (QBO PRD US3): the first
+   * attempt without one returns 409 + code OPTION_CHOICE_REQUIRED and the options, the client
+   * asks, and the retry carries body { chosenOption }. Completion then posts the estimate to
+   * QBO in the background (QBO PRD US2) — never blocking, never failing the completion.
+   */
   static async complete(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
@@ -848,15 +870,40 @@ export class QuoteController {
         409,
         `${dto.blockingFlagCount} line item(s) still need attention before this quote can be marked Completed`
       );
+    let chosenOption: string | null = quote.chosenOptionGroup;
+    if (dto.optionTotals.length > 0) {
+      const raw = req.body?.chosenOption;
+      const submitted = typeof raw === "string" && raw.trim() ? raw.trim() : null;
+      if (submitted) {
+        if (!dto.optionTotals.some((o) => o.name === submitted))
+          return fail(res, 400, `"${submitted}" is not one of this quote's options`);
+        chosenOption = submitted;
+      }
+      if (!chosenOption)
+        return res.status(409).json({
+          success: false,
+          error: {
+            status: 409,
+            code: "OPTION_CHOICE_REQUIRED",
+            message: "This quote offers alternatives — confirm which option the customer chose",
+            options: dto.optionTotals,
+          },
+        });
+    }
     const updated = await prisma.quote.update({
       where: { id: quote.id },
-      data: { status: "COMPLETED", completedAt: new Date() },
+      data: { status: "COMPLETED", completedAt: new Date(), chosenOptionGroup: chosenOption },
       include: { lineItems: true },
     });
+    QuoteController.postToQboInBackground(updated);
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });
   }
 
-  /** POST /api/v1/quotes/:quoteId/reopen — back to Draft; never touches line items (US9). */
+  /**
+   * POST /api/v1/quotes/:quoteId/reopen — back to Draft; never touches line items (US9).
+   * Clears the option choice so a re-completion asks again (QBO PRD US3/US6); the stored
+   * qboEstimateId survives, which is what makes re-completion an update instead of a new post.
+   */
   static async reopen(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
@@ -864,10 +911,43 @@ export class QuoteController {
     if (!quote) return fail(res, 404, "Quote not found");
     const updated = await prisma.quote.update({
       where: { id: quote.id },
-      data: { status: "DRAFT", completedAt: null },
+      data: { status: "DRAFT", completedAt: null, chosenOptionGroup: null },
       include: { lineItems: true },
     });
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });
+  }
+
+  /**
+   * Fire-and-forget QBO post/update after completion (QBO PRD US2/US6). A failure is logged
+   * and never surfaces to the completing technician — POST /:quoteId/qbo is the retry path.
+   */
+  private static postToQboInBackground(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
+    void (async () => {
+      const conn = await qboConnectionFor(quote.companyId);
+      if (!qboConnected(conn)) return;
+      const [dto, conversation] = await Promise.all([
+        quoteDtoWithProducts(quote),
+        prisma.conversation.findUnique({
+          where: { id: quote.conversationId },
+          select: { jobId: true },
+        }),
+      ]);
+      const header = await loadQuoteHeader({
+        jobId: conversation?.jobId,
+        userId: quote.userId,
+        companyId: quote.companyId,
+      });
+      await syncQuoteToQbo(conn, quote, dto, {
+        name: quote.customerName ?? header.customerName,
+        phone: quote.customerPhone,
+        address: quote.customerAddress,
+      });
+    })().catch((e) =>
+      logger.error("QBO estimate sync failed", {
+        quoteId: quote.id,
+        error: e instanceof Error ? e.message : String(e),
+      })
+    );
   }
 
   /**
@@ -1104,6 +1184,41 @@ export class QuoteController {
       },
     });
     logger.info("Proposal emailed", { quoteId: quote.id, to });
+    // Deliberately NO QuickBooks side effect here (QBO PRD US2): posting is tied to quote
+    // completion, and emailing a proposal must never touch the books.
     res.json({ success: true, data: { sent: true, to } });
+  }
+
+  /**
+   * POST /api/v1/quotes/:quoteId/qbo — retry a failed post (QBO PRD US8). Completed quotes
+   * only: completion is the event that puts an estimate in QBO, so this re-runs exactly that
+   * (creating or updating-in-place per US6).
+   */
+  static async syncQbo(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    if (quote.status !== "COMPLETED")
+      return fail(res, 409, "Only a Completed quote posts to QuickBooks — mark it Completed first");
+    const conn = await qboConnectionFor(quote.companyId);
+    if (!qboConnected(conn))
+      return fail(res, 409, "QuickBooks is not connected for this company");
+    const conversation = await prisma.conversation.findUnique({
+      where: { id: quote.conversationId },
+      select: { jobId: true },
+    });
+    const header = await loadQuoteHeader({
+      jobId: conversation?.jobId,
+      userId: quote.userId,
+      companyId: quote.companyId,
+    });
+    // Same precedence as the proposal: the quote's own customer fields beat the CRM header.
+    const result = await syncQuoteToQbo(conn, quote, await quoteDtoWithProducts(quote), {
+      name: quote.customerName ?? header.customerName,
+      phone: quote.customerPhone,
+      address: quote.customerAddress,
+    });
+    res.json({ success: true, data: result });
   }
 }
