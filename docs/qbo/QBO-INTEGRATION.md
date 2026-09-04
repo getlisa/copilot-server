@@ -479,7 +479,7 @@ Everything outside the tax slice is unblocked.
 | T-11 | CS | `npm install`, then a clean `npm run typecheck` + `npm test`. | — | **DONE** 2026-09-04: `npm ci --registry=https://registry.npmjs.org` (473 pkgs — the repo `.npmrc` CodeArtifact token is expired, but the deps are public); `tsc --noEmit` exit 0; `npm test` exit 0, all 15 checks. |
 | T-10 | CS | **Run the migration — once.** *(Edits Ashish's runbook block additively — merge into it, never replace it.)* Merge every column change (T-24 drops, T-02 lock, T-09 sync state, T-18 tax) into the single block, add `DROP COLUMN IF EXISTS` for the removed key columns, **probe the target schema first** (`information_schema.columns` — merged ≠ applied, no ledger), apply by hand to local dev **and** prod Aurora. Never `prisma db push`. | T-24, T-02, T-09, T-18 | TODO |
 | T-08 | BOTH | **Sandbox end-to-end — on the production environment with sandbox credentials (D-10).** Set `QBO_ENVIRONMENT=sandbox` and the Development keyset there, register the callback on the **Development** redirect-URI list, and walk: first post; reopen → edit → re-complete (update-in-place, confirm sparse update replaces lines); estimate deleted in QBO → re-complete; access revoked in QBO; either/or options; unpriced line; empty quote. Record in §9. **Caveat to manage, not a blocker:** for the duration, a live Connect button sits in front of real customers and would bind them to an Intuit *test* company — worse now that `15c465c` shows the card to every user. Mitigate by settling D-11 first (admin-only Connect), doing it in a known window, and flipping to the Production keyset immediately after. The environment stamp (T-24) makes the flip fail closed, so every sandbox connection reads *reconnect required* rather than silently posting into a test company. | T-10, D-11 | TODO |
-| T-15 | CS | Set all QBO env vars on every deploy target (`QBO_CLIENT_ID`, `QBO_CLIENT_SECRET`, `QBO_ENVIRONMENT`, `QBO_REDIRECT_URI`, `QBO_TOKEN_KEY`). Note Intuit issues **separate keysets for Development and Production** — the sandbox→production flip swaps the key pair *and* invalidates every token minted under the old one (T-24 makes that fail closed). | T-22, T-23 | TODO |
+| T-15 | CS | Set all QBO env vars on every deploy target (`QBO_CLIENT_ID`, `QBO_CLIENT_SECRET`, `QBO_ENVIRONMENT`, `QBO_REDIRECT_URI`, `QBO_TOKEN_KEY`). Note Intuit issues **separate keysets for Development and Production** — the sandbox→production flip swaps the key pair *and* invalidates every token minted under the old one (T-24 makes that fail closed). | T-22, T-23 | **DONE** 2026-09-04 — secret `techcopilot/prod/app` + task def `:86`; service NOT updated (§10) |
 | T-14 | BOTH | Write each repo's real deploy model into §8 (backend: CodeBuild → ECR → ECS, no in-repo trigger found; frontend: TBD). Do not carry over the `collection_agent_backend` auto-deploy assumption. | — | TODO |
 | T-12 | CS | **Console auth.** `adminRoute` is mounted unauthenticated (`server.ts:86`). Even after T-20 removes the connect handler, `GET /op-x7k2/companies/:companyId/qbo` leaks realm id and connection state for any company id, and `DELETE …/qbo` disconnects any company's QuickBooks. At minimum put a shared-secret header on the QBO routes. | T-20 | TODO |
 | T-13 | CS | Confirm staging/prod run with `NODE_ENV=production` so the `X-Dev-Bypass` header cannot fabricate a `companyId`. | — | TODO |
@@ -583,3 +583,70 @@ checks, including the new `check:qboauth`).
 still owe it columns); no env vars are set on any server (T-15); nothing tested against Intuit
 (T-08); D-11 answered as "all users can view", implemented as view-for-all / act-for-admins.
 
+### 2026-09-04 — pushed, and the deploy target
+
+Both commits are on `origin/feature/QBO-integration` (fast-forward, Ashish's commits untouched):
+
+```
+copilot-server      ce771ab  QBO: Clara-owned Intuit app, admin-gated connect, callback off the console
+technician-copilot  667580e  QBO: one-click Connect, admin-gated actions, service_manager is an admin
+```
+
+**Infrastructure, established by probing (T-14 partially answered):**
+
+| What | Where |
+|---|---|
+| copilot-server (backend) | `techcopilot-assistant.justclara.ai` → ECS `techcopilot-prod-ecs-cluster` / service `techcopilot-prod-assistant`, container `assistant`, **us-east-1**, account `458799594709` |
+| platform API (users/auth) | `techcopilot-core.justclara.ai` → service `techcopilot-prod-core` |
+| frontend | `tech.justclara.ai` (also `field.justclara.ai`, which 301s to add a trailing slash) |
+| config style | one Secrets Manager secret **`techcopilot/prod/app`**; the task definition references 19 keys from it. Only `NODE_ENV` is a plain env var — **QBO vars belong in the secret, not in `environment`** |
+| staging | the `execute-api` host in the frontend `.env` returns 504. Dead. |
+
+**Intuit app values** (the customer-facing fields, mirroring collections'
+`collections.justclara.ai/settings?tab=integrations`):
+
+| Field | Value |
+|---|---|
+| Host domain | `tech.justclara.ai` |
+| Launch / Disconnect / Connect-Reconnect URL | `https://tech.justclara.ai/profile` |
+| Redirect URI | `https://techcopilot-assistant.justclara.ai/api/v1/companies/connections/qbo/callback` |
+
+The redirect URI must be registered on **both** keysets (Development and Production) and matches
+character-for-character. A second URI on `techcopilot-core...` is also registered — it will 404
+forever, since that host is the platform API; remove it so nobody wires it up by mistake.
+
+**Credentials verified 2026-09-04.** Sandbox client id + secret POSTed to Intuit's token endpoint
+with a deliberately invalid code returned `400 invalid_grant "Invalid authorization code"` — the
+app authenticated, only the fake code was rejected. Control: the same client id with a wrong
+secret returned `401 invalid_client`. **The redirect URI could NOT be verified this way** — a
+consent URL built with a deliberately unregistered redirect URI reaches the identical Intuit
+sign-in page, because Intuit checks `redirect_uri` only after the user signs in. Only a real
+browser consent proves it.
+
+**Env vars set — T-15 done, 2026-09-04.** The five QBO keys were merged into the
+`techcopilot/prod/app` Secrets Manager secret (now 29 keys; version `e0469f6c-45f3-4412-82db-2663ba672467`;
+no existing key overwritten) and task definition **`techcopilot-prod-assistant:86`** was registered
+with them, up from 19 secrets to 24.
+
+**The service was deliberately NOT updated.** It still runs `:85`, ACTIVE, 1/1 — production is
+untouched, and the new variables do nothing until the QBO image is deployed. To go live:
+
+```
+aws ecs update-service --region us-east-1 --cluster techcopilot-prod-ecs-cluster \
+  --service techcopilot-prod-assistant \
+  --task-definition arn:aws:ecs:us-east-1:458799594709:task-definition/techcopilot-prod-assistant:86 \
+  --force-new-deployment
+```
+
+Note `QBO_ENVIRONMENT=sandbox` is now in a **production** secret. That is the plan (D-10: test on
+prod with sandbox credentials), but it means the flip to production is a secret edit plus a new
+task-definition revision, not just a redeploy — and every connection made in the meantime stops
+working at that point, by design (T-24's environment stamp), so those companies must reconnect.
+
+The script that did it, re-runnable and idempotent (dry-run by default, `--apply` to write):
+`scratchpad/set-qbo-env.sh`. It reads values from `copilot-server/.env`, never prints them, and
+reuses the existing secret-ARN prefix rather than guessing it.
+
+**Then, in order:** run the `qbo_connections` block from the runbook (T-10) → deploy the branch to
+`techcopilot-prod-assistant` → click Connect as an admin and sign in with a sandbox QuickBooks
+company (T-08). Until the migration runs, the callback will fail on the insert.
