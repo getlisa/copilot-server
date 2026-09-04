@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import bcrypt from "bcryptjs";
-import { RequestWithUser } from "../middlewares/auth";
+import { RequestWithUser, isAdminRole } from "../middlewares/auth";
 import { DEFAULT_PROPOSAL_EMAIL_TEMPLATE } from "../../copilot/estimating/proposalEmail";
 import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
@@ -155,6 +155,16 @@ export class CompanyController {
     res.json({
       success: true,
       data: {
+        /**
+         * Whether THIS caller may connect or disconnect — decided here, from the role in the
+         * verified JWT, and not by the client inspecting its own stored user object.
+         *
+         * The client cannot answer this reliably: it reads `role` from whatever the login
+         * response happened to include, while the server reads it from the token. When those
+         * disagree the client fails closed and hides the button from admins too, with no error
+         * anywhere — which is exactly how a working feature looks broken.
+         */
+        canManage: isAdminRole(req.user?.role),
         qbo: {
           /** Server has the Intuit app keys, callback URL and token key set. */
           configured: isQboConfigured(),

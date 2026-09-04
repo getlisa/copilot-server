@@ -92,6 +92,18 @@ async function main() {
   process.env.QBO_TOKEN_KEY = saved;
   assert.strictEqual(isQboConfigured(), true);
 
+  // ---- who may manage the connection ----
+  // getConnections reports canManage from the JWT role. Pinned because the failure mode is
+  // silent: if this ever regresses to false for an admin, the Connect button simply vanishes.
+  for (const [role, expected] of [
+    ["admin", true],
+    ["service_manager", true],
+    ["technician", false],
+    [undefined, false],
+  ] as [string | undefined, boolean][]) {
+    assert.strictEqual(isAdminRole(role), expected, `canManage for role=${role}`);
+  }
+
   console.log("check-qbo-auth: OK");
 }
 
