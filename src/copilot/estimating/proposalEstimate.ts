@@ -208,6 +208,15 @@ export async function buildEstimateStyleDocx(input: ProposalInput): Promise<Buff
   const ROW_BORDERS: Borders = { ...NO_BORDERS, bottom: { style: BorderStyle.SINGLE, size: 4, color: LINE } };
   const headCell = (text: string, width: number, align?: (typeof AlignmentType)[keyof typeof AlignmentType]) =>
     cell([para([run(text, { bold: true, pt: 8.5, color: MUTED })], { align })], { width, fill: HEADFILL });
+  /**
+   * Print the Taxed column only when this document charges tax. `mapEstimateQuote` sets
+   * taxOther to 0, so a green tick on every material line was telling the customer those lines
+   * were taxed and then charging nothing. Documents that DO carry tax keep the column; the 10%
+   * width goes to Line Item when it is dropped, so the table still fills the page.
+   */
+  const showTax = !!quote.taxOther;
+  const itemW = showTax ? 42 : 52;
+
   const itemRows = quote.lineItems.map((li) => {
     const taxed = li.kind === "material" || li.kind === "service";
     return new TableRow({
@@ -217,7 +226,7 @@ export async function buildEstimateStyleDocx(input: ProposalInput): Promise<Buff
             para([run([li.code, li.description].filter(Boolean).join(" - "), { pt: 9.5 })]),
             para([run(`${li.kind} · ${li.sourceSheet}`, { pt: 8, color: MUTED })]),
           ],
-          { width: 42, borders: ROW_BORDERS }
+          { width: itemW, borders: ROW_BORDERS }
         ),
         cell([para("Quoted")], { width: 10, borders: ROW_BORDERS }),
         cell([para([run(money(li.unitPrice))], { align: AlignmentType.RIGHT })], { width: 12, borders: ROW_BORDERS }),
@@ -225,15 +234,19 @@ export async function buildEstimateStyleDocx(input: ProposalInput): Promise<Buff
           [para([run(`${li.quantity}${li.unit && li.unit !== "EA" ? ` ${li.unit}` : ""}`)], { align: AlignmentType.CENTER })],
           { width: 10, borders: ROW_BORDERS }
         ),
-        cell(
-          [
-            para(
-              [taxed ? run("✓", { bold: true, color: GREEN }) : run("-", { color: MUTED })],
-              { align: AlignmentType.CENTER }
-            ),
-          ],
-          { width: 10, borders: ROW_BORDERS }
-        ),
+        ...(showTax
+          ? [
+              cell(
+                [
+                  para(
+                    [taxed ? run("✓", { bold: true, color: GREEN }) : run("-", { color: MUTED })],
+                    { align: AlignmentType.CENTER }
+                  ),
+                ],
+                { width: 10, borders: ROW_BORDERS }
+              ),
+            ]
+          : []),
         cell([para([run(money(li.lineTotal))], { align: AlignmentType.RIGHT })], { width: 16, borders: ROW_BORDERS }),
       ],
     });
@@ -245,11 +258,11 @@ export async function buildEstimateStyleDocx(input: ProposalInput): Promise<Buff
       new TableRow({
         tableHeader: true,
         children: [
-          headCell("Line Item", 42),
+          headCell("Line Item", itemW),
           headCell("Status", 10),
           headCell("Rate", 12, AlignmentType.RIGHT),
           headCell("Qty", 10, AlignmentType.CENTER),
-          headCell("Taxed", 10, AlignmentType.CENTER),
+          ...(showTax ? [headCell("Taxed", 10, AlignmentType.CENTER)] : []),
           headCell("Total", 16, AlignmentType.RIGHT),
         ],
       }),
