@@ -18,6 +18,13 @@ import {
   QBO_ENVIRONMENT,
   QBO_APP_RETURN_URL,
 } from "../../lib/qbo";
+import {
+  syncQboReferenceData,
+  searchQboCustomers,
+  qboIncomeAccounts,
+  qboTaxRateOptions,
+  qboSyncedAt,
+} from "../../lib/qboIngest";
 
 /**
  * Company registration (hidden page — reachable only by direct URL, no auth).
@@ -175,6 +182,8 @@ export class CompanyController {
           realmId: conn?.realmId ?? null,
           /** The environment this SERVER runs against, not a per-company choice. */
           environment: QBO_ENVIRONMENT,
+          /** When reference data was last pulled; null means never. Drives the Sync button. */
+          referenceSyncedAt: (await qboSyncedAt(companyId))?.toISOString() ?? null,
         },
         // ponytail: ZenTrades is a display-only row in the UI for now; add a real entry
         // here when that integration exists.
@@ -272,6 +281,96 @@ export class CompanyController {
   // Intuit Client ID + Secret here. Clara now owns the app and the keys come from server env,
   // so the endpoint is gone along with lib/qbo.ts::saveQboCredentials. The deferred design is
   // documented at the top of src/lib/qbo.ts; the frontend key form is commented out, not deleted.
+
+  /**
+   * POST /api/v1/companies/connections/qbo/sync — pull QuickBooks reference data (customers,
+   * items, tax codes, tax rates, accounts) into the raw_<entity>_qb tables. Admin-only: it is a
+   * write, it costs API quota against an app shared by every client, and it is a settings action.
+   *
+   * Synchronous on purpose. It is admin-initiated and the admin wants to see the counts; a
+   * background job here would only add a status endpoint to build and a silent failure to miss.
+   */
+  static async syncQboData(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const conn = await qboConnectionFor(companyId);
+    if (!qboConnected(conn))
+      return res.status(409).json({
+        success: false,
+        error: { status: 409, message: "QuickBooks is not connected for this company" },
+      });
+    try {
+      const counts = await syncQboReferenceData(companyId);
+      res.json({ success: true, data: { counts, syncedAt: new Date().toISOString() } });
+    } catch (e) {
+      logger.error("QBO reference sync failed", {
+        companyId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      res.status(502).json({
+        success: false,
+        error: { status: 502, message: "Could not read from QuickBooks. Please try again." },
+      });
+    }
+  }
+
+  /**
+   * GET /api/v1/companies/qbo/customers?q= — customer typeahead for the estimate screen.
+   *
+   * Open to every role, like the item list: a technician picking the customer on a quote needs
+   * it, and gating it would empty the picker with no error anywhere. Reads the local mirror, not
+   * Intuit — a keystroke must not become an API call, and the picker must keep working when
+   * QuickBooks is down. A company with no connection simply gets an empty list, which is what
+   * lets the UI fall back to "add as new customer".
+   */
+  static async listQboCustomers(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const q = typeof req.query.q === "string" ? req.query.q : "";
+    const limit = Number(req.query.limit);
+    res.json({
+      success: true,
+      data: await searchQboCustomers(companyId, q, Number.isFinite(limit) ? limit : 20),
+    });
+  }
+
+  /**
+   * GET /api/v1/companies/qbo/income-accounts — so an admin chooses the revenue account CLARA
+   * bills auto-created items against, instead of the code taking whichever Income account
+   * QuickBooks happened to return first.
+   */
+  static async listQboIncomeAccounts(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    res.json({ success: true, data: await qboIncomeAccounts(companyId) });
+  }
+
+  /**
+   * GET /api/v1/companies/qbo/tax-rates — the company's QuickBooks tax rates, offered as a
+   * pre-fill for the organisation's default rate so an admin imports it rather than typing it.
+   * A pre-fill only: CLARA computes tax from its OWN setting, never from this list.
+   */
+  static async listQboTaxRates(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const rates = await qboTaxRateOptions(companyId);
+    res.json({
+      success: true,
+      data: rates.map((r) => ({ ...r, rateValue: r.rateValue == null ? null : Number(r.rateValue) })),
+    });
+  }
 
   /**
    * GET /api/v1/companies/connections/qbo/items — the connected QBO account's item list, for

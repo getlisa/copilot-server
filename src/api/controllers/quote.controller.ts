@@ -27,6 +27,7 @@ import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating
 import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
 import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
 import { qboConnectionFor, qboConnected, syncQuoteToQbo } from "../../lib/qbo";
+import { ensureQboItem } from "../../lib/qboIngest";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
@@ -937,11 +938,17 @@ export class QuoteController {
         userId: quote.userId,
         companyId: quote.companyId,
       });
-      await syncQuoteToQbo(conn, quote, dto, {
-        name: quote.customerName ?? header.customerName,
-        phone: quote.customerPhone,
-        address: quote.customerAddress,
-      });
+      await syncQuoteToQbo(
+        conn,
+        quote,
+        dto,
+        {
+          name: quote.customerName ?? header.customerName,
+          phone: quote.customerPhone,
+          address: quote.customerAddress,
+        },
+        ensureQboItem
+      );
     })().catch((e) =>
       logger.error("QBO estimate sync failed", {
         quoteId: quote.id,
@@ -1214,11 +1221,17 @@ export class QuoteController {
       companyId: quote.companyId,
     });
     // Same precedence as the proposal: the quote's own customer fields beat the CRM header.
-    const result = await syncQuoteToQbo(conn, quote, await quoteDtoWithProducts(quote), {
-      name: quote.customerName ?? header.customerName,
-      phone: quote.customerPhone,
-      address: quote.customerAddress,
-    });
+    const result = await syncQuoteToQbo(
+      conn,
+      quote,
+      await quoteDtoWithProducts(quote),
+      {
+        name: quote.customerName ?? header.customerName,
+        phone: quote.customerPhone,
+        address: quote.customerAddress,
+      },
+      ensureQboItem
+    );
     res.json({ success: true, data: result });
   }
 }

@@ -111,7 +111,128 @@ Zero-risk to the app — it connects as `app_user`, not `postgres`.
 | Connection string auth fails with correct password | Password has `: # ? ] *` etc. — URL-encode it (step 4) |
 | Which DB is prod? | NOT the Supabase URLs in local `.env` — prod is the Aurora us-east-1 instance |
 
-## Pending migration: QuickBooks Online estimate posting (2026-09-02)
+## Pending migration: QuickBooks reference-data ingestion (2026-09-07)
+
+Five mirror tables for QuickBooks reference data, plus our own item-id mapping. Additive and
+idempotent; no existing table or column is touched, so nothing changes behaviour for a company
+without a QuickBooks connection.
+
+Naming follows the product convention `raw_<entity>_qb`. These are a CACHE of Intuit's data and
+never a source of truth. `qbo_item_links` is deliberately NOT one of them: it records a decision
+CLARA made (which QBO item a CLARA item maps to) and must survive any re-sync.
+
+Run this BEFORE the image ships — Prisma selects every scalar column, and
+`admin.controller.ts` reads `companies`/`company_configs` with no `select`, so the console 500s
+against an unmigrated database.
+
+```sql
+CREATE TABLE IF NOT EXISTS public.raw_customer_qb (
+  id           SERIAL PRIMARY KEY,
+  company_id   INT     NOT NULL,
+  qbo_id       TEXT    NOT NULL,
+  display_name TEXT    NOT NULL,
+  email        TEXT,
+  phone        TEXT,
+  active       BOOLEAN NOT NULL DEFAULT TRUE,
+  raw          JSONB   NOT NULL,
+  synced_at    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS raw_customer_qb_company_id_qbo_id_key ON public.raw_customer_qb (company_id, qbo_id);
+CREATE INDEX IF NOT EXISTS raw_customer_qb_company_id_display_name_idx ON public.raw_customer_qb (company_id, display_name);
+
+CREATE TABLE IF NOT EXISTS public.raw_item_qb (
+  id         SERIAL PRIMARY KEY,
+  company_id INT     NOT NULL,
+  qbo_id     TEXT    NOT NULL,
+  name       TEXT    NOT NULL,
+  type       TEXT,
+  taxable    BOOLEAN,
+  active     BOOLEAN NOT NULL DEFAULT TRUE,
+  raw        JSONB   NOT NULL,
+  synced_at  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS raw_item_qb_company_id_qbo_id_key ON public.raw_item_qb (company_id, qbo_id);
+-- Names are stored casefolded, so this doubles as the case-insensitive lookup.
+CREATE UNIQUE INDEX IF NOT EXISTS raw_item_qb_company_id_name_key ON public.raw_item_qb (company_id, name);
+
+CREATE TABLE IF NOT EXISTS public.raw_taxcode_qb (
+  id         SERIAL PRIMARY KEY,
+  company_id INT     NOT NULL,
+  qbo_id     TEXT    NOT NULL,
+  name       TEXT    NOT NULL,
+  taxable    BOOLEAN NOT NULL DEFAULT TRUE,
+  active     BOOLEAN NOT NULL DEFAULT TRUE,
+  raw        JSONB   NOT NULL,
+  synced_at  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS raw_taxcode_qb_company_id_qbo_id_key ON public.raw_taxcode_qb (company_id, qbo_id);
+
+CREATE TABLE IF NOT EXISTS public.raw_taxrate_qb (
+  id         SERIAL PRIMARY KEY,
+  company_id INT     NOT NULL,
+  qbo_id     TEXT    NOT NULL,
+  name       TEXT    NOT NULL,
+  rate_value DECIMAL(6,4),
+  active     BOOLEAN NOT NULL DEFAULT TRUE,
+  raw        JSONB   NOT NULL,
+  synced_at  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS raw_taxrate_qb_company_id_qbo_id_key ON public.raw_taxrate_qb (company_id, qbo_id);
+
+CREATE TABLE IF NOT EXISTS public.raw_account_qb (
+  id                SERIAL PRIMARY KEY,
+  company_id        INT     NOT NULL,
+  qbo_id            TEXT    NOT NULL,
+  name              TEXT    NOT NULL,
+  account_type      TEXT,
+  account_sub_type  TEXT,
+  active            BOOLEAN NOT NULL DEFAULT TRUE,
+  raw               JSONB   NOT NULL,
+  synced_at         TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS raw_account_qb_company_id_qbo_id_key ON public.raw_account_qb (company_id, qbo_id);
+CREATE INDEX IF NOT EXISTS raw_account_qb_company_id_account_type_idx ON public.raw_account_qb (company_id, account_type);
+
+-- OUR mapping, not a mirror. Scoped by realm_id because an item id means nothing outside the
+-- QuickBooks company that issued it: reconnect to a different file and the ids are strangers'.
+-- Two nullable keys on purpose — Postgres treats NULLs as distinct in a unique index, so a
+-- pricebook-keyed row and a name-keyed row never collide. Measured 2026-09-07: 366 of 674 quote
+-- lines carry a pricebook_code (zero orphans), 308 do not, including all 65 labor lines.
+CREATE TABLE IF NOT EXISTS public.qbo_item_links (
+  id                SERIAL PRIMARY KEY,
+  company_id        INT     NOT NULL,
+  realm_id          TEXT    NOT NULL,
+  pricebook_item_id INT,
+  item_key          TEXT,
+  qbo_item_id       TEXT    NOT NULL,
+  created_by_clara  BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at        TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS qbo_item_links_company_realm_pricebook_key ON public.qbo_item_links (company_id, realm_id, pricebook_item_id);
+CREATE UNIQUE INDEX IF NOT EXISTS qbo_item_links_company_realm_itemkey_key ON public.qbo_item_links (company_id, realm_id, item_key);
+CREATE INDEX IF NOT EXISTS qbo_item_links_company_realm_idx ON public.qbo_item_links (company_id, realm_id);
+
+-- New tables are created by postgres; hand them to app_user like the rest.
+ALTER TABLE public.raw_customer_qb OWNER TO app_user;
+ALTER TABLE public.raw_item_qb     OWNER TO app_user;
+ALTER TABLE public.raw_taxcode_qb  OWNER TO app_user;
+ALTER TABLE public.raw_taxrate_qb  OWNER TO app_user;
+ALTER TABLE public.raw_account_qb  OWNER TO app_user;
+ALTER TABLE public.qbo_item_links  OWNER TO app_user;
+GRANT USAGE ON SEQUENCE public.raw_customer_qb_id_seq TO app_user;
+GRANT USAGE ON SEQUENCE public.raw_item_qb_id_seq     TO app_user;
+GRANT USAGE ON SEQUENCE public.raw_taxcode_qb_id_seq  TO app_user;
+GRANT USAGE ON SEQUENCE public.raw_taxrate_qb_id_seq  TO app_user;
+GRANT USAGE ON SEQUENCE public.raw_account_qb_id_seq  TO app_user;
+GRANT USAGE ON SEQUENCE public.qbo_item_links_id_seq  TO app_user;
+```
+
+`app_user` cannot run this: it is not a superuser, has no CREATE on schema `public`, and the
+existing tables are owned by `postgres`. Run it as the Aurora master through a one-off ECS task —
+the recipe is in `docs/qbo/QBO-INTEGRATION.md` §10.
+
+## APPLIED 2026-09-04: QuickBooks Online estimate posting (2026-09-02)
 
 One table for per-company QBO OAuth connections plus the posted-estimate id on quotes.
 Additive and idempotent; run via step 4 above, BEFORE deploying the code that ships it —
@@ -162,7 +283,7 @@ Also required on the LOCAL dev database (Supabase) — run the same block there 
 Do NOT use `prisma db push` for it: the duplicate `DIRECT_URL` in local `.env` makes the
 Prisma CLI target prod.
 
-## Pending migration: company service address (2026-08-25)
+## APPLIED (date unrecorded): company service address (2026-08-25)
 
 Registration now captures a billing AND a service address; `companies.address` stays the
 billing/mailing address, the new JSONB column holds the service location. Additive and

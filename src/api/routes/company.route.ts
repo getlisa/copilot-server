@@ -37,6 +37,24 @@ companyRoute.delete(
   CompanyController.disconnectQboForCompany
 );
 
+// Reference data. The sync is a settings write, so admin-only. The reads a technician's estimate
+// screen needs — the customer picker — are open to every role, for the same reason the item list
+// is: gating them empties the picker with no error anywhere.
+companyRoute.post(
+  "/connections/qbo/sync",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.syncQboData
+);
+companyRoute.get("/qbo/customers", authMiddleware, CompanyController.listQboCustomers);
+companyRoute.get(
+  "/qbo/income-accounts",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.listQboIncomeAccounts
+);
+companyRoute.get("/qbo/tax-rates", authMiddleware, requireAdmin, CompanyController.listQboTaxRates);
+
 companyRoute.get("/markup", authMiddleware, CompanyController.getDefaultMarkup);
 companyRoute.put("/markup", authMiddleware, requireAdmin, CompanyController.putDefaultMarkup);
 companyRoute.get(
