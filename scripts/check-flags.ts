@@ -21,7 +21,19 @@ const expect = (label: string, actual: unknown, expected: unknown) => {
   } else console.log(`ok   ${label}`);
 };
 
-const line = (overrides: Partial<QuoteLineItem>): QuoteLineItem =>
+/**
+ * The money columns are Prisma `Decimal`, but the code under test reads them through
+ * `Number(v)` (quoteDto.ts:138), so these fixtures use plain numbers. Spelling that out in the
+ * override type keeps the literals honest under the typechecker rather than relying on
+ * `scripts/` being excluded from it.
+ */
+type LineOverrides = Partial<Omit<QuoteLineItem, "quantity" | "unitPrice" | "totalPrice">> & {
+  quantity?: number | null;
+  unitPrice?: number | null;
+  totalPrice?: number | null;
+};
+
+const line = (overrides: LineOverrides): QuoteLineItem =>
   ({
     id: "line-1",
     quoteId: "quote-1",

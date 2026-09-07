@@ -1,0 +1,10 @@
+{
+  // The check-* scripts are the entire test suite for this service, and until now they were
+  // NOT typechecked: tsconfig.json excludes "scripts", and `tsx` does no typechecking at all.
+  // A stale complete-object literal in a check script therefore passed in silence, and a new
+  // assertion could be written against `undefined` and still report OK.
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true, "rootDir": "." },
+  "include": ["scripts/**/*", "src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
