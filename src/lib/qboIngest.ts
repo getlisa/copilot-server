@@ -431,3 +431,172 @@ async function firstIncomeAccountId(
   });
   return rows[0] ? String(rows[0].Id) : null;
 }
+
+// ---------- customers: pick an existing one, or create and sync a new one ----------
+
+/**
+ * Intuit's rules for a customer, worth enforcing before we call rather than after we fail:
+ *  - DisplayName must not contain a colon, tab or newline (colon is the sub-customer separator);
+ *  - DisplayName must be unique across Customer, Vendor AND Employee — so a name that collides
+ *    with a vendor is rejected, which no amount of customer-list checking would have predicted;
+ *  - an email, if given, must contain an "@" and a "." or the whole create is rejected;
+ *  - DisplayName, or one of Title/GivenName/MiddleName/FamilyName/Suffix, is required.
+ * Source: Intuit Customer entity reference (~/clara/customerqbo.md).
+ */
+export const customerDisplayName = (name: string) =>
+  name.replace(/[:\t\n\r]/g, " ").replace(/\s+/g, " ").trim().slice(0, 100);
+
+const EMAIL_OK = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export interface NewQboCustomer {
+  name: string;
+  email?: string | null;
+  phone?: string | null;
+  address?: string | null;
+}
+
+/** What the picker and the create path both return, so the caller treats them alike. */
+export interface LinkedQboCustomer {
+  qboId: string;
+  displayName: string;
+}
+
+/**
+ * Create a customer in QuickBooks and mirror it locally.
+ *
+ * Thrown errors carry a message meant for a technician standing in someone's kitchen, because
+ * that is where this gets called from. The duplicate case is the one worth naming: QuickBooks
+ * enforces DisplayName uniqueness across customers, vendors and employees, so "already exists"
+ * can be true even when the customer list looks clear.
+ */
+export async function createQboCustomer(
+  conn: QboConnection,
+  companyId: number,
+  input: NewQboCustomer
+): Promise<LinkedQboCustomer> {
+  const displayName = customerDisplayName(input.name);
+  if (!displayName) throw new Error("A customer name is required");
+
+  const email = str(input.email);
+  if (email && !EMAIL_OK.test(email))
+    throw new Error(`"${email}" is not a valid email address`);
+
+  let created: { Customer: { Id: string; DisplayName?: string } };
+  try {
+    created = await qboFetch(conn, "/customer", {
+      method: "POST",
+      body: JSON.stringify({
+        DisplayName: displayName,
+        ...(email ? { PrimaryEmailAddr: { Address: email } } : {}),
+        ...(str(input.phone) ? { PrimaryPhone: { FreeFormNumber: str(input.phone) } } : {}),
+        ...(str(input.address) ? { BillAddr: { Line1: str(input.address) } } : {}),
+      }),
+    });
+  } catch (e) {
+    const body = e instanceof Error ? e.message : String(e);
+    // QBO fault 6240 / "Duplicate Name Exists Error" — the name is taken by a customer, vendor
+    // or employee. Say which name, since the UI cannot know why an unused-looking name failed.
+    if (/6240|Duplicate Name/i.test(body))
+      throw new Error(
+        `"${displayName}" already exists in QuickBooks (names are shared with vendors and employees). Pick the existing customer, or use a different name.`
+      );
+    throw e;
+  }
+
+  const qboId = String(created.Customer.Id);
+  await mirrorCustomer(companyId, qboId, displayName, input, created.Customer);
+  logger.info("QBO customer created", { companyId, qboId, displayName });
+  return { qboId, displayName };
+}
+
+/** Write a customer into the mirror so the picker sees it without waiting for a full re-sync. */
+async function mirrorCustomer(
+  companyId: number,
+  qboId: string,
+  displayName: string,
+  input: NewQboCustomer,
+  raw: object
+) {
+  const data = {
+    displayName,
+    email: str(input.email),
+    phone: str(input.phone),
+    active: true,
+    raw,
+    syncedAt: new Date(),
+  };
+  try {
+    await prisma.rawQbCustomer.upsert({
+      where: { companyId_qboId: { companyId, qboId } },
+      create: { companyId, qboId, ...data },
+      update: data,
+    });
+  } catch (e) {
+    // The id is already in hand; a mirror miss costs a picker refresh, not the estimate.
+    logger.warn("Could not mirror QBO customer", {
+      companyId,
+      qboId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+/**
+ * The customer an estimate bills to, guaranteed to exist in QuickBooks before the estimate does.
+ *
+ * Preference order:
+ *  1. the customer explicitly linked to this quote — what the estimate screen's picker sets;
+ *  2. an exact DisplayName match, from the mirror first and then live, so we adopt rather than
+ *     duplicate (US4: never a second record, never a suffix, never an overwrite);
+ *  3. create one from the quote's own customer details.
+ *
+ * Whichever path runs, the id is written back to the quote, so re-completing later reuses it
+ * instead of matching by name again.
+ */
+export async function ensureQboCustomer(
+  conn: QboConnection,
+  companyId: number,
+  quote: { id: string; qboCustomerId: string | null },
+  fallback: NewQboCustomer
+): Promise<string> {
+  if (quote.qboCustomerId) return quote.qboCustomerId;
+
+  const displayName = customerDisplayName(fallback.name) || "Customer";
+
+  const mirrored = await prisma.rawQbCustomer.findFirst({
+    where: { companyId, displayName, active: true },
+    select: { qboId: true, displayName: true },
+  });
+  let linked: LinkedQboCustomer | null = mirrored
+    ? { qboId: mirrored.qboId, displayName: mirrored.displayName }
+    : null;
+
+  if (!linked) {
+    const found = await queryAll<{ Id: string; DisplayName?: string }>(
+      conn,
+      "Customer",
+      `DisplayName = '${escLiteral(displayName)}'`,
+      { pageSize: 1, maxPages: 1 }
+    );
+    if (found[0]) {
+      linked = { qboId: String(found[0].Id), displayName };
+      await mirrorCustomer(companyId, linked.qboId, displayName, fallback, found[0]);
+    }
+  }
+
+  if (!linked) linked = await createQboCustomer(conn, companyId, { ...fallback, name: displayName });
+
+  await linkCustomerToQuote(quote.id, linked);
+  return linked.qboId;
+}
+
+/** Record the choice on the quote. The estimate payload reads it; the UI displays the name. */
+export async function linkCustomerToQuote(quoteId: string, customer: LinkedQboCustomer) {
+  await prisma.quote.update({
+    where: { id: quoteId },
+    data: { qboCustomerId: customer.qboId, qboCustomerName: customer.displayName },
+  });
+}
+
+/** QBO query literals escape single quotes with a backslash. */
+const escLiteral = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");

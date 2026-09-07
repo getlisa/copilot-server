@@ -117,6 +117,14 @@ export interface QuoteDto {
    * Customer identification, per quote (PRD US1–US3). Free text, all optional, never
    * validated; null renders blank/omitted on documents — never a placeholder, never an error.
    */
+  /**
+   * The QuickBooks customer this estimate bills to, once one has been chosen or created. Null
+   * means the estimate screen has not linked one — the picker shows "choose or add" — and the
+   * posting path will fall back to matching on `customerName`.
+   */
+  qboCustomerId: string | null;
+  /** DisplayName as QuickBooks holds it, so the picker can show the link without a round trip. */
+  qboCustomerName: string | null;
   customerName: string | null;
   customerAddress: string | null;
   customerPhone: string | null;
@@ -346,6 +354,8 @@ export function toQuoteDto(
     completedAt: quote.completedAt?.toISOString() ?? null,
     lineItems: dtos,
     markupPercent,
+    qboCustomerId: quote.qboCustomerId,
+    qboCustomerName: quote.qboCustomerName,
     customerName: quote.customerName ?? null,
     customerAddress: quote.customerAddress ?? null,
     customerPhone: quote.customerPhone ?? null,

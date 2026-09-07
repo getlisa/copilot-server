@@ -294,33 +294,19 @@ export async function queryAll<T>(
 const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 
 // ---------- customers (US4) ----------
+// Customer resolution moved to lib/qboIngest::ensureQboCustomer and is injected below, for the
+// same reason items are: the registry needs this module's API client. It also does more than a
+// name match now — a customer picked or created on the estimate screen is linked to the quote,
+// and an estimate can only be posted once that customer exists in QuickBooks with an id
+// (product rule, 2026-09-07).
 
-/** DisplayName is QBO's unique customer key; colons are reserved (sub-customer separator). */
-const displayName = (name: string) => name.replace(/:/g, " ").trim().slice(0, 100);
-
-/**
- * Exact-name match reuses the existing QBO customer untouched (US4 — never a duplicate,
- * never a suffix, never an overwrite); a customer is created only when no name match exists.
- */
-async function customerRefFor(
+/** Resolve the QBO customer id this estimate bills to, creating the customer if it must. */
+export type EnsureCustomer = (
   conn: QboConnection,
-  customer: { name: string; email?: string | null; phone?: string | null; address?: string | null }
-): Promise<string> {
-  const name = displayName(customer.name) || "Customer";
-  const found = await query(conn, `select Id from Customer where DisplayName = '${esc(name)}'`);
-  const existing = found.QueryResponse?.Customer?.[0]?.Id;
-  if (existing) return String(existing);
-  const created = await qboFetch(conn, "/customer", {
-    method: "POST",
-    body: JSON.stringify({
-      DisplayName: name,
-      ...(customer.email ? { PrimaryEmailAddr: { Address: customer.email } } : {}),
-      ...(customer.phone ? { PrimaryPhone: { FreeFormNumber: customer.phone } } : {}),
-      ...(customer.address ? { BillAddr: { Line1: customer.address } } : {}),
-    }),
-  });
-  return String(created.Customer.Id);
-}
+  companyId: number,
+  quote: { id: string; qboCustomerId: string | null },
+  fallback: { name: string; email?: string | null; phone?: string | null; address?: string | null }
+) => Promise<string>;
 
 // ---------- items (US5) ----------
 
@@ -475,20 +461,26 @@ export const optionGroupsOf = (dto: { optionTotals: QuoteOptionTotal[] }) =>
  */
 export async function syncQuoteToQbo(
   conn: QboConnection,
-  quote: { id: string; qboEstimateId: string | null; chosenOptionGroup: string | null },
+  quote: {
+    id: string;
+    qboEstimateId: string | null;
+    chosenOptionGroup: string | null;
+    qboCustomerId: string | null;
+  },
   dto: { lineItems: LineItemDto[]; optionTotals: QuoteOptionTotal[] },
   customer: { name: string; email?: string | null; phone?: string | null; address?: string | null },
-  ensureItem: EnsureItem
+  deps: { ensureItem: EnsureItem; ensureCustomer: EnsureCustomer }
 ): Promise<{ estimateId: string; updated: boolean }> {
   if (dto.lineItems.length === 0) throw new Error("Quote has no line items to post");
   if (optionGroupsOf(dto).length > 0 && !quote.chosenOptionGroup)
     throw new Error("Quote has unresolved option groups — the customer's choice must be confirmed first");
 
-  const customerRef = await customerRefFor(conn, customer);
+  // The customer is ensured FIRST: an estimate cannot reference one that has no id yet.
+  const customerRef = await deps.ensureCustomer(conn, conn.companyId, quote, customer);
   const itemRefFor = await itemRefResolver(
     conn,
     dto.lineItems.filter((i) => !i.optionGroup || i.optionGroup === quote.chosenOptionGroup),
-    ensureItem
+    deps.ensureItem
   );
   const payload = {
     CustomerRef: { value: customerRef },

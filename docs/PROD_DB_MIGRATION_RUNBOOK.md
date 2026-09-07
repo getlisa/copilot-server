@@ -213,6 +213,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS qbo_item_links_company_realm_pricebook_key ON 
 CREATE UNIQUE INDEX IF NOT EXISTS qbo_item_links_company_realm_itemkey_key ON public.qbo_item_links (company_id, realm_id, item_key);
 CREATE INDEX IF NOT EXISTS qbo_item_links_company_realm_idx ON public.qbo_item_links (company_id, realm_id);
 
+-- The QuickBooks customer an estimate bills to, chosen or created on the estimate screen. The
+-- customer must exist in QuickBooks (and so have an id) before the estimate is posted; null means
+-- nothing has been linked yet and the posting path falls back to matching on the customer name.
+ALTER TABLE public.quotes ADD COLUMN IF NOT EXISTS qbo_customer_id   TEXT;
+ALTER TABLE public.quotes ADD COLUMN IF NOT EXISTS qbo_customer_name TEXT;
+
 -- New tables are created by postgres; hand them to app_user like the rest.
 ALTER TABLE public.raw_customer_qb OWNER TO app_user;
 ALTER TABLE public.raw_item_qb     OWNER TO app_user;

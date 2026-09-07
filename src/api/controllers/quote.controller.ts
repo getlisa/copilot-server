@@ -27,7 +27,7 @@ import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating
 import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
 import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
 import { qboConnectionFor, qboConnected, syncQuoteToQbo } from "../../lib/qbo";
-import { ensureQboItem } from "../../lib/qboIngest";
+import { ensureQboItem, ensureQboCustomer } from "../../lib/qboIngest";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
@@ -611,6 +611,40 @@ export class QuoteController {
       data[field] = value || null;
     }
 
+    /**
+     * Linking the QuickBooks customer chosen on the estimate screen (product rule, 2026-09-07:
+     * pick an existing customer or create one, and the customer must exist in QuickBooks before
+     * the estimate can be posted). The id is validated against this company's mirror rather than
+     * trusted from the client — otherwise a caller could bill this estimate to another company's
+     * customer, which is a cross-tenant write into someone else's books.
+     *
+     * Null clears the link and the posting path falls back to matching on the customer name.
+     */
+    if (body.qboCustomerId !== undefined) {
+      if (body.qboCustomerId === null) {
+        data.qboCustomerId = null;
+        data.qboCustomerName = null;
+      } else {
+        const qboCustomerId = String(body.qboCustomerId);
+        const known = await prisma.rawQbCustomer.findUnique({
+          where: { companyId_qboId: { companyId: user.companyId, qboId: qboCustomerId } },
+          select: { displayName: true },
+        });
+        if (!known)
+          return fail(
+            res,
+            400,
+            "That QuickBooks customer is not in this company's synced customers — sync QuickBooks, or add the customer as new"
+          );
+        data.qboCustomerId = qboCustomerId;
+        data.qboCustomerName = known.displayName;
+        // Keep the quote's own customer name in step, so the proposal and the books agree on
+        // who this is for. Only when the quote has no name of its own — never overwrite what a
+        // technician typed.
+        if (!quote.customerName) data.customerName = known.displayName;
+      }
+    }
+
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
     await prisma.quote.update({ where: { id: quote.id }, data });
     const updated = await loadOwnedQuote(quote.id, user.userId);
@@ -947,7 +981,7 @@ export class QuoteController {
           phone: quote.customerPhone,
           address: quote.customerAddress,
         },
-        ensureQboItem
+        { ensureItem: ensureQboItem, ensureCustomer: ensureQboCustomer }
       );
     })().catch((e) =>
       logger.error("QBO estimate sync failed", {
@@ -1230,7 +1264,7 @@ export class QuoteController {
         phone: quote.customerPhone,
         address: quote.customerAddress,
       },
-      ensureQboItem
+      { ensureItem: ensureQboItem, ensureCustomer: ensureQboCustomer }
     );
     res.json({ success: true, data: result });
   }

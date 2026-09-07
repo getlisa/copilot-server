@@ -565,6 +565,15 @@ model Quote {
   /// QBO Estimate id once posted (companies with a QboConnection). Posted at completion;
   /// re-completing after a reopen UPDATES this same estimate in place (QBO PRD US6).
   qboEstimateId     String?         @map("qbo_estimate_id")
+  /// The QuickBooks customer this estimate bills to, chosen or created on the estimate screen.
+  /// A customer must exist in QuickBooks — and therefore have an id — BEFORE the estimate can be
+  /// posted, because the estimate references it (product rule, 2026-09-07). Null means nobody has
+  /// picked one yet; the posting path then falls back to matching on the quote's customer name so
+  /// existing quotes keep working, and records the id here once it has one.
+  qboCustomerId     String?         @map("qbo_customer_id")
+  /// DisplayName as QuickBooks holds it, so the UI can show what it is actually linked to
+  /// without a round trip. Display only — `qboCustomerId` is the identity.
+  qboCustomerName   String?         @map("qbo_customer_name")
   /// Which option group the customer chose, answered at completion time (QBO PRD US3).
   /// Null = not asked / no options. Cleared on reopen so re-completion asks again.
   chosenOptionGroup String?         @map("chosen_option_group")

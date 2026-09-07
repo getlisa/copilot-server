@@ -24,6 +24,7 @@ import {
   qboIncomeAccounts,
   qboTaxRateOptions,
   qboSyncedAt,
+  createQboCustomer,
 } from "../../lib/qboIngest";
 
 /**
@@ -338,6 +339,51 @@ export class CompanyController {
       success: true,
       data: await searchQboCustomers(companyId, q, Number.isFinite(limit) ? limit : 20),
     });
+  }
+
+  /**
+   * POST /api/v1/companies/qbo/customers — create a customer in QuickBooks and mirror it.
+   *
+   * The other half of the estimate screen's picker: choose an existing customer, or add a new one
+   * and sync it. A customer must exist in QuickBooks before the estimate that bills to it can be
+   * posted, so this is what makes "add new" usable mid-quote rather than a settings chore.
+   *
+   * Open to every role, deliberately. A technician standing in a new customer's kitchen is
+   * exactly who needs it; requiring an admin would mean the estimate cannot be posted until
+   * someone back at the office logs in.
+   */
+  static async createQboCustomerForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const conn = await qboConnectionFor(companyId);
+    if (!qboConnected(conn))
+      return res.status(409).json({
+        success: false,
+        error: { status: 409, message: "QuickBooks is not connected for this company" },
+      });
+    const name = str(req.body?.name);
+    if (!name)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "A customer name is required" } });
+    try {
+      const created = await createQboCustomer(conn, companyId, {
+        name,
+        email: str(req.body?.email),
+        phone: str(req.body?.phone),
+        address: str(req.body?.address),
+      });
+      res.status(201).json({ success: true, data: created });
+    } catch (e) {
+      // These messages are written for the person on site — a duplicate name or a malformed
+      // email is theirs to fix, not a server fault, so it comes back as a 400 they can act on.
+      const message = e instanceof Error ? e.message : "Could not create the customer";
+      logger.warn("QBO customer create refused", { companyId, message });
+      res.status(400).json({ success: false, error: { status: 400, message } });
+    }
   }
 
   /**

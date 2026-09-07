@@ -47,6 +47,13 @@ companyRoute.post(
   CompanyController.syncQboData
 );
 companyRoute.get("/qbo/customers", authMiddleware, CompanyController.listQboCustomers);
+// Creating a customer is part of the technician's flow on the estimate screen, not a settings
+// action — an admin gate here would block posting the estimate until the office logs in.
+companyRoute.post(
+  "/qbo/customers",
+  authMiddleware,
+  CompanyController.createQboCustomerForCompany
+);
 companyRoute.get(
   "/qbo/income-accounts",
   authMiddleware,
