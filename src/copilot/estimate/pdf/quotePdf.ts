@@ -97,6 +97,9 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
 
       // ---- Line-item table ----
       y = 185;
+      // Does this document charge tax at all? Drives whether the Taxed column is printed.
+      const showTax = !!quote.taxOther;
+
       // header band
       doc.rect(MARGIN, y, CONTENT_W, 22).fill(HEADFILL);
       doc.fillColor(MUTED).font("Helvetica-Bold").fontSize(8.5);
@@ -104,7 +107,11 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
       doc.text("Status", COL.status, y + 7);
       doc.text("Rate", COL.rate, y + 7, { width: 50, align: "right" });
       doc.text("Qty", COL.qty, y + 7, { width: 28, align: "center" });
-      doc.text("Taxed", COL.taxed, y + 7, { width: 40, align: "center" });
+      // The Taxed column is drawn only when this document actually charges tax. Quotes mapped
+      // from the estimating agent hardcode taxOther to 0 (proposalEstimate.ts), so printing a
+      // green tick against every material line told the customer those lines were taxed and
+      // then charged them nothing. Estimates that DO carry tax still show it.
+      if (showTax) doc.text("Taxed", COL.taxed, y + 7, { width: 40, align: "center" });
       doc.text("Total", COL.total, y + 7, { width: RIGHT - COL.total, align: "right" });
       y += 22;
 
@@ -145,8 +152,10 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
         doc.text("Quoted", COL.status, titleY, { width: 50 });
         doc.text(money(li.unitPrice, quote.currency), COL.rate, titleY, { width: 50, align: "right" });
         doc.text(`${li.quantity}${li.unit && li.unit !== "EA" ? ` ${li.unit}` : ""}`, COL.qty, titleY, { width: 28, align: "center" });
-        if (taxed) drawCheck(COL.taxed + 20, titleY + 5);
-        else doc.fillColor(MUTED).text("-", COL.taxed, titleY, { width: 40, align: "center" });
+        if (showTax) {
+          if (taxed) drawCheck(COL.taxed + 20, titleY + 5);
+          else doc.fillColor(MUTED).text("-", COL.taxed, titleY, { width: 40, align: "center" });
+        }
         doc.fillColor(INK).text(money(li.lineTotal, quote.currency), COL.total, titleY, { width: RIGHT - COL.total, align: "right" });
 
         y = Math.max(bottom, titleY + 14) + 6;

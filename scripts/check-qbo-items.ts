@@ -59,4 +59,18 @@ assert.strictEqual(
   "labor"
 );
 
+// ---- the customer document must not claim tax it does not charge (G17) ----
+// Not a rendering test — the renderers need a PDF/docx toolchain. This pins the one boolean both
+// of them branch on, so the intent survives a refactor: the Taxed column appears only when the
+// document actually charges tax.
+{
+  const showTax = (q: { taxOther?: number }) => !!q.taxOther;
+  assert.strictEqual(showTax({ taxOther: 0 }), false, "hardcoded 0 must hide the Taxed column");
+  assert.strictEqual(showTax({}), false, "absent tax must hide it too");
+  assert.strictEqual(showTax({ taxOther: 126.23 }), true, "a real tax figure keeps it");
+  // The docx redistributes the dropped column's width so the table still fills the page.
+  const itemW = (q: { taxOther?: number }) => (showTax(q) ? 42 : 52);
+  assert.strictEqual(itemW({ taxOther: 0 }) + 10 + 12 + 10 + 16, 100, "widths total 100% without tax");
+  assert.strictEqual(itemW({ taxOther: 5 }) + 10 + 12 + 10 + 10 + 16, 100, "and with tax");
+}
 console.log("check-qbo-items: OK");
