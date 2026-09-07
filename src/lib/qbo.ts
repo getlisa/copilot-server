@@ -28,8 +28,11 @@ import type { LineItemDto, QuoteOptionTotal } from "../copilot/estimating/quoteD
  * one QBO estimate: re-completing after a reopen updates that same estimate in place (US6);
  * if it was deleted inside QBO, a fresh one is created and re-linked.
  *
- * Lines bill against the company's real QBO items (US5): the technician's per-line pick when
- * set, otherwise an exact name match against the item list, otherwise a newly created item.
+ * Lines bill against the company's real QBO items (US5): the technician's per-line pick when set,
+ * otherwise whatever the item REGISTRY resolves to. Registry lookups and item creation live in
+ * lib/qboIngest — injected here as `EnsureItem` rather than imported, to keep the two modules
+ * from depending on each other. An item is created at most once per company and its id is
+ * reused by every later estimate (product rule, 2026-09-07).
  *
  * Server config: QBO_CLIENT_ID, QBO_CLIENT_SECRET, QBO_ENVIRONMENT, QBO_REDIRECT_URI and
  * QBO_TOKEN_KEY. The redirect URI must match what is registered on Clara's Intuit app
@@ -241,7 +244,7 @@ class QboApiError extends Error {
 const isNotFound = (e: unknown) =>
   e instanceof QboApiError && (e.status === 404 || /"code"\s*:\s*"610"|Object Not Found/i.test(e.body));
 
-async function qboFetch(conn: QboConnection, path: string, init?: RequestInit): Promise<any> {
+export async function qboFetch(conn: QboConnection, path: string, init?: RequestInit): Promise<any> {
   const token = await accessTokenFor(conn);
   const sep = path.includes("?") ? "&" : "?";
   const res = await fetch(`${apiBase()}/v3/company/${conn.realmId}${path}${sep}minorversion=75`, {
@@ -259,40 +262,51 @@ async function qboFetch(conn: QboConnection, path: string, init?: RequestInit): 
   return res.json();
 }
 
-const query = (conn: QboConnection, q: string) =>
+export const query = (conn: QboConnection, q: string) =>
   qboFetch(conn, `/query?query=${encodeURIComponent(q)}`);
+
+/**
+ * Every row of an entity, not just the first page. QBO caps a query at 1000 rows and paginates
+ * with STARTPOSITION (1-based), so a company with 1001 items used to silently lose the tail —
+ * which also meant a name lookup missed items past row 1000 and created duplicates (G9).
+ * `maxPages` is a runaway guard, not a real limit.
+ */
+export async function queryAll<T>(
+  conn: QboConnection,
+  entity: string,
+  where = "",
+  { pageSize = 1000, maxPages = 50 } = {}
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let page = 0; page < maxPages; page++) {
+    const start = page * pageSize + 1;
+    const q = `select * from ${entity}${where ? ` where ${where}` : ""} startposition ${start} maxresults ${pageSize}`;
+    const found = await query(conn, q);
+    const batch: T[] = found.QueryResponse?.[entity] ?? [];
+    rows.push(...batch);
+    if (batch.length < pageSize) return rows;
+  }
+  logger.warn("QBO pagination hit its page guard", { entity, rows: rows.length });
+  return rows;
+}
 
 /** QBO query literals escape single quotes with a backslash. */
 const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 
 // ---------- customers (US4) ----------
+// Customer resolution moved to lib/qboIngest::ensureQboCustomer and is injected below, for the
+// same reason items are: the registry needs this module's API client. It also does more than a
+// name match now — a customer picked or created on the estimate screen is linked to the quote,
+// and an estimate can only be posted once that customer exists in QuickBooks with an id
+// (product rule, 2026-09-07).
 
-/** DisplayName is QBO's unique customer key; colons are reserved (sub-customer separator). */
-const displayName = (name: string) => name.replace(/:/g, " ").trim().slice(0, 100);
-
-/**
- * Exact-name match reuses the existing QBO customer untouched (US4 — never a duplicate,
- * never a suffix, never an overwrite); a customer is created only when no name match exists.
- */
-async function customerRefFor(
+/** Resolve the QBO customer id this estimate bills to, creating the customer if it must. */
+export type EnsureCustomer = (
   conn: QboConnection,
-  customer: { name: string; email?: string | null; phone?: string | null; address?: string | null }
-): Promise<string> {
-  const name = displayName(customer.name) || "Customer";
-  const found = await query(conn, `select Id from Customer where DisplayName = '${esc(name)}'`);
-  const existing = found.QueryResponse?.Customer?.[0]?.Id;
-  if (existing) return String(existing);
-  const created = await qboFetch(conn, "/customer", {
-    method: "POST",
-    body: JSON.stringify({
-      DisplayName: name,
-      ...(customer.email ? { PrimaryEmailAddr: { Address: customer.email } } : {}),
-      ...(customer.phone ? { PrimaryPhone: { FreeFormNumber: customer.phone } } : {}),
-      ...(customer.address ? { BillAddr: { Line1: customer.address } } : {}),
-    }),
-  });
-  return String(created.Customer.Id);
-}
+  companyId: number,
+  quote: { id: string; qboCustomerId: string | null },
+  fallback: { name: string; email?: string | null; phone?: string | null; address?: string | null }
+) => Promise<string>;
 
 // ---------- items (US5) ----------
 
@@ -315,41 +329,72 @@ export async function qboItems(conn: QboConnection): Promise<QboItem[]> {
 export const autoItemName = (line: { isLabor: boolean; description: string; searchTerm?: string | null }) =>
   (line.isLabor ? "Labor" : (line.searchTerm?.trim() || line.description)).slice(0, 100);
 
-async function createItem(conn: QboConnection, name: string): Promise<string> {
-  const income = await query(conn, `select Id from Account where AccountType = 'Income' maxresults 1`);
-  const account = income.QueryResponse?.Account?.[0];
-  if (!account) throw new Error("QBO company has no Income account to bill items against");
-  const created = await qboFetch(conn, "/item", {
-    method: "POST",
-    body: JSON.stringify({ Name: name, Type: "Service", IncomeAccountRef: { value: account.Id } }),
-  });
-  return String(created.Item.Id);
-}
+// createItem moved to lib/qboIngest.ts::ensureQboItem, which also records the id so the item is
+// never created a second time, and sets Taxable at creation (G14) and the admin's income account
+// (G10) instead of taking whichever Income account QuickBooks returned first.
+
 
 /**
  * Resolve every posting line to a QBO item id: the technician's stored pick wins; otherwise
  * exact (case-insensitive) name match against the live item list; otherwise create the item.
  * Created items are found by the name match on every later quote — no duplicates pile up.
  */
+/**
+ * How this module gets an item id without depending on the registry that provides it.
+ *
+ * Injected rather than imported: the registry (lib/qboIngest) needs this module's API client, so
+ * importing it back would make the two mutually dependent — a cycle that typechecks, survives on
+ * CJS interop, and then breaks in a way no test would explain. The caller wires the real one in.
+ */
+export type EnsureItem = (
+  conn: QboConnection,
+  companyId: number,
+  identity: { pricebookItemId?: number | null; name: string; taxable?: boolean | null }
+) => Promise<string>;
+
+/**
+ * Resolve every posting line to a QuickBooks item id, creating an item only when one does not
+ * already exist — and never creating the same item twice, across estimates.
+ *
+ * Ordering is the product rule (2026-09-07): items are ensured HERE, before the estimate payload
+ * is built, because an estimate line cannot reference an item that has no id yet. The ids handed
+ * back are what the estimate carries, and they are persisted in `qbo_item_links` so the next
+ * estimate that uses the same item reuses the id instead of creating a duplicate.
+ *
+ * A line's identity is its pricebook row where it has one — stable across renames on either
+ * side — and its name otherwise, which covers labor and ad-hoc lines (46% of production lines,
+ * including every labor line). The technician's explicit per-line pick still wins over both.
+ */
 async function itemRefResolver(
   conn: QboConnection,
-  lines: LineItemDto[]
+  lines: LineItemDto[],
+  ensureItem: EnsureItem
 ): Promise<(line: LineItemDto) => string> {
-  const list = await qboItems(conn);
-  const byName = new Map(list.map((i) => [i.name.toLowerCase(), i.id]));
+  const companyId = conn.companyId;
+
+  // pricebook_code -> pricebook_items.id, in one query. (company_id, code) is unique.
+  const codes = [...new Set(lines.map((l) => l.pricebookCode).filter((c): c is string => !!c))];
+  const bookRows = codes.length
+    ? await prisma.pricebookItem.findMany({
+        where: { companyId, code: { in: codes } },
+        select: { id: true, code: true },
+      })
+    : [];
+  const bookIdByCode = new Map(bookRows.map((r) => [r.code, r.id]));
+
   const refs = new Map<string, string>();
   for (const line of lines) {
     if (line.qboItemId) {
       refs.set(line.id, line.qboItemId);
       continue;
     }
-    const name = autoItemName(line);
-    let id = byName.get(name.toLowerCase());
-    if (!id) {
-      id = await createItem(conn, name);
-      byName.set(name.toLowerCase(), id);
-    }
-    refs.set(line.id, id);
+    refs.set(
+      line.id,
+      await ensureItem(conn, companyId, {
+        pricebookItemId: line.pricebookCode ? bookIdByCode.get(line.pricebookCode) ?? null : null,
+        name: autoItemName(line),
+      })
+    );
   }
   return (line) => refs.get(line.id)!;
 }
@@ -416,18 +461,27 @@ export const optionGroupsOf = (dto: { optionTotals: QuoteOptionTotal[] }) =>
  */
 export async function syncQuoteToQbo(
   conn: QboConnection,
-  quote: { id: string; qboEstimateId: string | null; chosenOptionGroup: string | null },
+  quote: {
+    id: string;
+    qboEstimateId: string | null;
+    chosenOptionGroup: string | null;
+    qboCustomerId: string | null;
+  },
   dto: { lineItems: LineItemDto[]; optionTotals: QuoteOptionTotal[] },
-  customer: { name: string; email?: string | null; phone?: string | null; address?: string | null }
+  customer: { name: string; email?: string | null; phone?: string | null; address?: string | null },
+  deps: { ensureItem: EnsureItem; ensureCustomer: EnsureCustomer }
 ): Promise<{ estimateId: string; updated: boolean }> {
   if (dto.lineItems.length === 0) throw new Error("Quote has no line items to post");
   if (optionGroupsOf(dto).length > 0 && !quote.chosenOptionGroup)
     throw new Error("Quote has unresolved option groups — the customer's choice must be confirmed first");
 
-  const customerRef = await customerRefFor(conn, customer);
-  const itemRefFor = await itemRefResolver(conn, dto.lineItems.filter(
-    (i) => !i.optionGroup || i.optionGroup === quote.chosenOptionGroup
-  ));
+  // The customer is ensured FIRST: an estimate cannot reference one that has no id yet.
+  const customerRef = await deps.ensureCustomer(conn, conn.companyId, quote, customer);
+  const itemRefFor = await itemRefResolver(
+    conn,
+    dto.lineItems.filter((i) => !i.optionGroup || i.optionGroup === quote.chosenOptionGroup),
+    deps.ensureItem
+  );
   const payload = {
     CustomerRef: { value: customerRef },
     Line: qboEstimateLines(dto, quote.chosenOptionGroup, itemRefFor),

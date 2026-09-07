@@ -131,6 +131,8 @@ export function validateDocxTemplate(templateBuffer: Buffer): string | null {
     completedAt: null,
     lineItems: [],
     markupPercent: 0,
+    qboCustomerId: null,
+    qboCustomerName: null,
     customerName: null,
     customerAddress: null,
     customerPhone: null,
