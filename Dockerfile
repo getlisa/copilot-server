@@ -14,6 +14,11 @@ RUN npm install
 COPY ./src ./src
 COPY ./scripts ./scripts
 COPY tsconfig.json .
+# tsconfig.scripts.json too, or `npm test` below dies on TS5058 before it runs a single check.
+# The check-* scripts ARE this service's test suite and were never typechecked (tsconfig.json
+# excludes "scripts", and tsx does no typechecking), so typecheck:scripts was added to the chain
+# — and the chain runs here, in the builder, which means a missing file blocks every deploy.
+COPY tsconfig.scripts.json .
 
 RUN npx prisma generate
 
