@@ -9,6 +9,7 @@
  * Pure — no network, no database.
  *   npx tsx scripts/check-markup.ts
  */
+import type { LineItemInput, QuoteInput } from "../src/copilot/estimating/quoteDto";
 import {
   effectiveTotal,
   markedUpPrices,
@@ -33,7 +34,6 @@ const line = (
 ) =>
   ({
     id,
-    quoteId: "q1",
     description: id,
     quantity: fields.quantity ?? 1,
     unit: "EA",
@@ -46,22 +46,33 @@ const line = (
     agentSuggested: false,
     manuallyEdited: fields.manuallyEdited ?? false,
     ambiguousAction: null,
+    sourcePricebookId: null,
+    qboItemId: null,
+    qboItemName: null,
+    taxable: true,
     sortOrder: fields.sortOrder ?? 0,
-    createdAt: now,
-    updatedAt: now,
-  }) as any;
+  }) satisfies LineItemInput;
 
-const quoteOf = (markupPercent: number, lineItems: unknown[]) =>
-  ({
-    id: "q1",
-    conversationId: "c1",
-    status: "DRAFT",
-    markupPercent,
-    createdAt: now,
-    updatedAt: now,
-    completedAt: null,
-    lineItems,
-  }) as any;
+const quoteOf = (markupPercent: number, lineItems: LineItemInput[]): QuoteInput => ({
+  id: "q1",
+  conversationId: "c1",
+  status: "DRAFT",
+  markupPercent,
+  createdAt: now,
+  updatedAt: now,
+  completedAt: null,
+  customerId: null,
+  customerName: null,
+  customerAddress: null,
+  customerPhone: null,
+  salesTaxId: null,
+  taxRatePercent: null,
+  chosenOptionGroup: null,
+  qboEstimateId: null,
+  qboSyncedAt: null,
+  qboSyncError: null,
+  lineItems,
+});
 
 let pass = 0;
 let total = 0;

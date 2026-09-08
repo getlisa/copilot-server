@@ -484,8 +484,44 @@ Everything outside the tax slice is unblocked.
 | T-12 | CS | **Console auth.** `adminRoute` is mounted unauthenticated (`server.ts:86`). Even after T-20 removes the connect handler, `GET /op-x7k2/companies/:companyId/qbo` leaks realm id and connection state for any company id, and `DELETE …/qbo` disconnects any company's QuickBooks. At minimum put a shared-secret header on the QBO routes. | T-20 | TODO |
 | T-13 | CS | Confirm staging/prod run with `NODE_ENV=production` so the `X-Dev-Bypass` header cannot fabricate a `companyId`. | — | TODO |
 | T-31 | BOTH | **Update the canonical PRD, not just the status doc.** *(Edits Ashish's files — `QBO_PRD_IMPLEMENTATION_STATUS.md` and the Confluence PRD. These corrections are necessary and additive; make them surgically and say what changed, do not rewrite his documents.)* US1 still specifies the per-company key form; open question #3 is now decided; the story table has no row for sales tax or read-back, so D6's requirement is untrackable; and `QBO_PRD_IMPLEMENTATION_STATUS.md:4` ("the code matches the PRD") plus its ✅ on US1/US10 become false the moment this lands — as does its "small change, isolated in qbo.ts + ConnectionsCard" estimate, against ~14 files across two repos. | — | TODO |
-| T-17 | CS | Observability for the ≥95%-within-a-minute measure. | T-09 | TODO |
+| T-17 | CS | Observability for the ≥95%-within-a-minute measure. | T-09 | **DONE** |
 | T-16 | BOTH | *(folded into T-25)* Self-serve disconnect. | — | — |
+
+### Phase 6 — tax on estimates, sub-customers, address (opened 2026-09-08)
+
+Everything on the board that does not need a product decision. Recorded before any code was
+written, because this task outlives a context window and this file is what survives.
+
+| ID | Repo | Task | Depends | Status |
+|---|---|---|---|---|
+| T-61 | CS | **Expand migration #2.** `customers.parent_id` (FK self, `ON DELETE SET NULL`); structured address columns on `customers` (`address_line1/2`, `city`, `state`, `postal_code`, `country`), keeping freeform `address` as the typed original; `quotes.sales_tax_id` (FK `sales_tax`, `ON DELETE SET NULL`) + `quotes.tax_rate_percent decimal(6,4)`; `quote_line_items.taxable bool not null default true`. All additive, all safe before the code deploys. Verify against `prisma migrate diff --from-empty --to-schema-datamodel` exactly as F33 taught. | T-39 | **SQL WRITTEN, NOT YET APPLIED** — `docs/sql/phase1b.sql`; needs master creds (§10) |
+| T-62 | BOTH | **Tax reaches the estimate.** `defaultSalesTax` gains its caller: resolve at quote CREATE, snapshot `sales_tax_id` + `tax_rate_percent`, never re-resolve — the shipped Tax Settings card already promises "existing estimates keep the rate they were created with". Tax fields added to `QuoteDto` (the one place totals are computed) so PDF/email/DOCX/template inherit them. Wireframe UI: totals block, inline rate pencil on a DRAFT, per-line Taxable toggle. | T-61 | **DONE** |
+| T-63 | CS | **`TxnTaxDetail` on the QBO post.** `TxnTaxCodeRef.value` = the `sales_tax_qb` **code** row's `qbo_id` for the quote's rate, realm-scoped; per line `TaxCodeRef` = `TAX`/`NON` from `taxable`; omit `TxnTaxDetail` entirely when `sales_tax_id` is null, so "no rate" stays distinguishable from "a deliberate 0%" (F20). Record the delta against QBO's returned `TotalAmt` rather than asserting equality — QBO recomputes a group code per component and rounds each, so Tucson (7.1 + 2) can differ from 9.1% × subtotal by a cent. | T-61 | **DONE** |
+| T-64 | BOTH | **Sub-customers.** Create with `ParentRef: {value}` + `Job: true`; ingest in two passes (insert all, then link, because the query can return a child before its parent); parent selector in the picker; refuse a parent with no `customer_qb` row for the connected realm — a child cannot sync before its parent, the same rule as customer-before-estimate. | T-61 | **DONE** |
+| T-65 | BOTH | **Address, structured.** New `src/lib/addressParse.ts` — deliberately outside `qboIngest.ts`, which already needed injection to break an import cycle — calling the existing `callStructured`. **Structure only, never fabricate**: it normalises what was typed ("tucson az" → Tucson / AZ) and returns `missing[]` so the UI can ask. A guessed ZIP changes the tax jurisdiction, which is why "complete the address" is read as *ask for what is missing*. QBO ingestion writes `BillAddr` directly and never calls the LLM. | T-61 | **DONE** |
+| T-43 | CS | Timeout + bounded retry on every Intuit call. `serpapi.ts` is the house pattern; `qbo.ts` is the outlier. | — | **DONE** |
+| T-44 | CS | Concurrency guard on the sync (advisory lock), and fewer round trips per row. | — | **DONE** |
+| T-45 | CS | Record partial sync failure so `qboSyncedAt` cannot report a failed run as fresh. | — | **DONE** |
+| T-46 | CS | Converge the mirrors downward: rows deleted or deactivated in QuickBooks must stop being offered. | — | **DONE** |
+| T-47 | CS | `queryAll` truncates at 50,000 and reports the partial count as the total. | — | **DONE** |
+| T-48 | CS | Persist a pending marker **before** the QBO create — a crash between create and persist duplicates the customer's estimate. `PrivateNote` already carries `CLARA quote <id>` and is never read back. | — | **DONE** |
+| T-49 | CS | Three check-script fixtures cast `as any`, defeating the very config added to catch DTO drift. | — | **DONE** — the three that feed `toQuoteDto` are typed against `QuoteInput` now. One cast remains, in `check-qbo-auth.ts:43`: it builds a partial `QboConnection` for `qboConnected`, whose signature is a type guard over the full Prisma row, so narrowing it would cost the guard. It does not touch the DTO, so it is outside what T-49 was about. |
+| T-50 | CS | `linkItem` swallows every error, not just the unique violation it documents. | — | **DONE** |
+| T-52 | CS | The dev auth bypass is armed by the *absence* of `NODE_ENV=production` — fail-open. Make it a positive opt-in. | — | **DONE** |
+| T-53 | CS | Raw Intuit/Prisma text reflected to clients; a customer email address written to a log line. | — | **DONE** |
+| T-54 | CS | `loadOwnedQuote` scopes by `userId` while the QBO post resolves its tenant from `quote.companyId`. | — | **DONE** |
+| T-17 | CS | A failed estimate post is logged and forgotten — now load-bearing, because `ensureCustomer` can have created a customer in the client's books first. | — | TODO |
+| T-42 | TC | Client-side hardening against a stale server. | — | **DONE** |
+| T-66 | CS | **Phase 2 (contract)** — drop `raw_qb_customer`, `raw_qb_tax_code`, `raw_qb_tax_rate`. Irreversible. Runs **last**, only after the runbook gate returns 0. | all above | TODO |
+
+**Excluded from "all tasks", and why** — so nobody re-opens them as oversights:
+
+- **T-40** (a connected company cannot create sales tax — the CRM half): needs a product decision,
+  and Bharath ruled CRM out of scope. The QuickBooks half is built.
+- **T-41** (realm-scope the item and account mirrors): needs its own migration and is unreachable
+  until a company reconnects to a *different* QuickBooks file.
+- **T-51** (trigram index for the customer typeahead): `CREATE EXTENSION pg_trgm` needs
+  `rds_superuser`; the app role does not have it.
 
 ### Deliberately out of scope, recorded so nobody re-discovers them
 
@@ -1008,3 +1044,132 @@ document's earlier entries was meaningless.
 
 Together with the backend's excluded `scripts/` directory (§11.2), that is **two** verification
 gates in this codebase that reported success while checking nothing. Both are now real.
+
+### 2026-09-08 — Phase 1 applied, backend and frontend shipped, T-39 passed
+
+**Phase 1 (expand) on production Aurora.** Verified against the schema first —
+`prisma migrate diff --from-empty --to-schema-datamodel` compared to the hand-written SQL, all 8
+index names and all 54 columns matching. The SQL exceeded the ECS container-override limit of
+8192 bytes (7456 bytes of SQL, but the override carries more than the SQL), so it went in
+gzip+base64 at 3400 bytes. Applied, then verified **as `app_user`**, not as the migration role:
+
+- `customers`, `customer_qb`, `sales_tax`, `sales_tax_qb` — all four owned by `app_user`
+- 13 indexes, including the partial `sales_tax_one_default_per_company` and Prisma's own
+  63-byte-truncated `sales_tax_qb_sales_tax_id_company_id_realm_id_qbo_type_qbo__key`
+- `quotes.customer_id` and `quotes_customer_id_fkey` present
+- `app_user` holds INSERT on the new tables
+
+The task definition registered with master credentials (`:97`) was deregistered immediately after.
+
+**Backend shipped.** PR #13 merged as `263eea2`. The pipeline is
+`main` → CodeBuild (`techcopilot-prod-assistant-build`) → ECS deploy; Source/Build/Deploy all
+Succeeded, task definition `:98`, image `techcopilot-assistant:263eea2`, 1/1 running, rollout
+COMPLETED with a single PRIMARY deployment. `/health` 200; `/api/v1/companies/sales-tax` 401
+unauthenticated, so D-2's server-side enforcement is holding in production.
+
+**T-39 — the gate F11 asked for. PASSED.** `syncQboReferenceData(9)` run **twice** against the
+real sandbox realm on the new image, then asserted:
+
+| Invariant | Result |
+|---|---|
+| `source = 'QBO'` on every synced rate | 2/2 — **the P0 is fixed against real data**, not just in a unit test |
+| `customer_qb` duplicates per `(customer, realm)` across two runs | 0 (39 customers → 39 rows, identical after both runs) |
+| Tucson | **9.1000** — the group cascade, not the 2% name match |
+| California | 8.0000 |
+| An ingested rate arriving as `isDefault` | none |
+| `fully_qualified_name` populated | 39/39 |
+| `sales_tax_qb` member rows | Tucson 3, California 2 — F15/F33 holds; AZ State 7.1% is shared by both and did **not** collide |
+
+**The finding that decides the tax design.** The realm's `TaxPrefs` came back as
+`{"UsingSalesTax": true, "TaxGroupCodeRef": {"value": "2"}}` — `UsingSalesTax` with **no**
+`PartnerTaxEnabled`, i.e. **manual sales tax, not Automated Sales Tax**. That matters because
+under AST, Intuit ignores an explicit `TxnTaxCodeRef` and computes tax from `ShipAddr`, which
+would have made the whole snapshot model cosmetic for this realm. It does not. Worth re-checking
+per realm before assuming it holds for a production company.
+
+**Frontend shipped.** PR #7 merged as `da46abf`. `technician-copilot` deploys via **AWS Amplify**
+(app `technician-copilot`, branch `main`, auto-build on) — recorded here because T-14 had the
+frontend deploy model as TBD and nobody should have to rediscover it.
+
+**Also settled while here.** Creating a sales-tax rate now carries `isDefault` in the same call:
+the column and the server path already existed (`upsertSalesTax` clears the previous default
+inside the creating transaction), only the form was not sending it. Pre-checked **only** when the
+company has no default yet — the first rate someone enters is the one they mean to charge, while
+a second rate must never quietly move the money.
+
+### 2026-09-08 — Phase 6 built, and the design review that reshaped it
+
+A four-lens adversarial critique ran against the proposed data model **before** the migration,
+and returned **1 P0 and 8 P1s** with the verdict *not safe to build as specified*. Every one is
+now fixed; the findings are recorded because most of them were invisible from inside the design.
+
+**The P0 — the signed proposal would have undercharged by the whole tax amount.** The design
+rested on "`quoteDto.ts` is already the single place totals are computed, so the renderers
+inherit it". That is false. There are **two** document pipelines: the `QuoteDto` invoice path,
+and a `ProposalInput` → `EstimateQuote` path that builds the bid PDF, the estimate email and the
+uploaded-template .docx — and `mapEstimateQuote` hardcoded `taxOther: 0`, which both builders
+then suppressed on falsy. The customer would have signed "for the sum of: Ten Thousand Dollars"
+while QuickBooks billed $10,910. Fixed by threading tax through `ProposalInput`, adding
+`proposalTotals.ts` as the single tax-aware arithmetic, and rendering on **rate presence** rather
+than a non-zero amount so a deliberate 0% still prints.
+
+`{total}` in customer-uploaded templates now means the amount **payable**, tax included. Those
+.docx files live in S3 and no migration can reach inside one to add a tax row; every one already
+says "Total: {total}" beside a signature line, so leaving it pre-tax would have silently turned
+each into an undercharge. `{subtotal}` is the new pre-tax token.
+
+**The P1s, each a real failure:**
+
+- **Deploy order.** Prisma SELECTs every scalar column, so the new image asks for
+  `quote_line_items.taxable` on every quote read. The runbook said new nullable columns were safe
+  to add *after* a deploy — wrong for Prisma, and it contradicted its own text 99 lines later.
+  Corrected in this PR; the DDL runs **before** the deploy, always.
+- **`sparse: true` cannot clear tax.** Re-completion posts a sparse update, under which an omitted
+  field means *keep what is there*. Clearing a rate would have left QuickBooks taxing an estimate
+  CLARA printed untaxed. Every line now carries an explicit `TaxCodeRef` — `NON` when untaxed —
+  so the books can never charge tax the document does not show.
+- **Automated Sales Tax.** Nothing read `Preferences.TaxPrefs`. Under AST, Intuit *ignores*
+  `TxnTaxCodeRef` and computes from the address, which would make the whole snapshot model
+  cosmetic. Now read every sync onto the connection and gated on.
+- **Both completion-time customer pushes lost the address, and never sent `ParentRef`.** A
+  regression I introduced: moving `BillAddr` to the create path dropped the freeform fallback that
+  `ensureQboCustomer` relied on, so the path that runs at money time created customers with no
+  address and sub-customers as roots. `pushCustomerToQbo` now resolves both itself, so no caller
+  can drop them by omission.
+- **`taxable` defaulting true contradicted the shipped PDF**, whose "Taxed" column has always left
+  labor unticked. Seeded `!isLabor` at creation, and the column now reads the stored value.
+- **The advisory lock was a no-op.** Postgres session advisory locks are re-entrant, so two syncs
+  on one pooled connection both "acquire" it. Replaced with a conditional row claim on
+  `qbo_connections.sync_started_at`, gated on the update count, with a ten-minute staleness window
+  so a killed task cannot wedge the company forever.
+- **"This job is not taxed" was not representable.** Completion fills a missing snapshot from the
+  company default, which would have undone an explicit clear on the way out. `tax_exempt` makes
+  the two states distinct.
+- **A retired tax code still resolved**, and Intuit's rejection was swallowed by the background
+  post. Completion now refuses with a 409 (`TAX_RATE_UNAVAILABLE`) listing the usable rates, in
+  front of the person who can fix it.
+
+**And one the review found in my own T-47 fix.** Making `queryAll` throw on truncation broke every
+bounded probe: `{pageSize: 1, maxPages: 1}` asking "does a customer with this name exist" returns
+a full first page when it *succeeds*, so a successful lookup became a thrown error. `expectAll`
+now separates a mirror read from an existence check.
+
+**Also fixed:** the orphan-estimate probe paged (QBO's 100-row default hid the duplicate it exists
+to find); `parent_id` and `sales_tax_id` indexed; a `CHECK` that a customer is not its own parent
+and one that the two snapshot columns move together; the five-level depth cap enforced from
+`customer_qb.raw.Level`; the revive path no longer discards the chosen parent and parsed address;
+ingest pass 2 now *unlinks* as well as links, with QuickBooks authoritative; the picker searches
+`fullyQualifiedName` so a property's name surfaces its jobs; deactivated tax codes take their
+`sales_tax_qb` rows with them; `BillAddr` Line3–5 collapse into line2 instead of vanishing; and
+the total delta against QuickBooks' returned `TotalAmt` is logged rather than left as an intention.
+
+**Test gate.** `npm test` green, and it now actually covers tax: `check-option-totals` gained a
+mixed taxable/non-taxable/labor case with an option group pinning
+`round2(rate% × taxable marked-up totals)` and option tax as one rounding, plus null-vs-0%;
+`check-qbo` pins TAX/NON per line and that the field is never omitted. The `as any` casts are gone
+from the two fixtures that fed `toQuoteDto` — its input is now a declared structural type, so
+`typecheck:scripts` can finally see DTO drift reach them.
+
+**Not applied yet: `docs/sql/phase1b.sql`.** `quotes` and `quote_line_items` are owned by
+`postgres`, not `app_user`, so the DDL needs the RDS master credentials — the same reason Phase 1
+did. **The backend must not be deployed until it lands** (see the corrected runbook rule).

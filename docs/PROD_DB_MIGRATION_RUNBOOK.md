@@ -25,8 +25,16 @@ npx prisma generate      # local only, no DB connection — regenerates client t
 npm test                 # typecheck + regression checks
 ```
 
-Deploy the code. New nullable columns are safe to add after deploy (old code ignores them);
-anything the old code would break on must be applied before the deploy instead.
+**Apply the DDL BEFORE deploying the code. Always. There is no nullable-column exception.**
+
+This line used to say the opposite — that new nullable columns were safe to add after the deploy
+because old code ignores them. That is true of a hand-written query and **false of Prisma**, which
+SELECTs every scalar column in the schema. The moment the new client ships, it asks for a column
+that does not exist yet and every read of that table 500s until the DDL lands. The reverse order
+is the safe one: an old image simply never mentions the new columns.
+
+(The corollary at "Phase 2 / contract" further down is the same rule read backwards — a column the
+new code has stopped using can only be DROPPED after that code is live.)
 
 ### 2. Get a shell inside the prod VPC
 

@@ -12,14 +12,24 @@ export interface ProposalEmailInput {
   header: QuoteHeader;
   projectTitle: string;
   lineItems: LineItemDto[];
-  /** Base scope only when optionTotals is non-empty — see QuoteDto.total. */
+  /** Base scope only when optionTotals is non-empty — see QuoteDto.total. PRE-tax. */
   total: number;
+  /**
+   * Sales tax (T-62). Null `taxRatePercent` means no rate configured and the letter shows no tax
+   * line; a configured 0% shows "Sales tax (0%): $0.00", because a customer reading a quote is
+   * entitled to know tax was considered rather than left out.
+   */
+  taxRatePercent?: number | null;
+  taxAmount?: number;
+  totalWithTax?: number;
   /** Alternative options priced per choice; never summed with each other. */
   optionTotals?: QuoteOptionTotal[];
   /**
    * Company-authored body template (companies.proposal_email_template). Supports
    * {{customerName}}, {{projectTitle}}, {{companyName}}, {{technicianName}},
-   * {{total}} and {{summary}} (the generated work/totals block).
+   * {{total}} and {{summary}} (the generated work/totals block). {{total}} is the amount
+   * PAYABLE — tax included once a rate applies — because that is the number a company template
+   * writes "for the total of {{total}}" around.
    * Null/empty falls back to the built-in letter.
    */
   template?: string | null;
@@ -46,6 +56,18 @@ function esc(s: string): string {
 /** The editable draft: subject + plain-text letter body. */
 export function draftProposalEmail(input: ProposalEmailInput): { subject: string; body: string } {
   const { header, projectTitle, lineItems, total, optionTotals } = input;
+  const taxed = input.taxRatePercent != null;
+  const taxAmount = input.taxAmount ?? 0;
+  const payable = input.totalWithTax ?? total;
+  // Rendered only when a rate exists — an absent rate prints nothing rather than "$0.00".
+  const taxLines = (subtotalLabel: string, subtotalValue: number, tax: number, payableValue: number) =>
+    taxed
+      ? [
+          `${subtotalLabel}: ${money(subtotalValue)}`,
+          `Sales tax (${input.taxRatePercent}%): ${money(tax)}`,
+          `Total: ${money(payableValue)}`,
+        ]
+      : [`${subtotalLabel}: ${money(subtotalValue)}`];
   const company = header.companyName || "Clara AI";
   const customer = header.customerName || "Customer"; // header default is already "Customer"
 
@@ -56,12 +78,14 @@ export function draftProposalEmail(input: ProposalEmailInput): { subject: string
     ? [
         "Summary of work (base scope):",
         ...base.map(itemLine),
-        `Base scope total: ${money(total)}`,
+        ...taxLines("Base scope total", total, taxAmount, payable),
         ...optionTotals.flatMap((opt) => [
           "",
           `${opt.name}:`,
           ...lineItems.filter((li) => li.optionGroup === opt.name).map(itemLine),
-          `${opt.name} total: ${money(opt.total)} — base scope + this option: ${money(opt.combinedTotal)}`,
+          `${opt.name} total: ${money(opt.total)} — base scope + this option: ${money(
+            taxed ? (opt.combinedTotalWithTax ?? opt.combinedTotal) : opt.combinedTotal
+          )}${taxed ? ` (includes ${money(opt.taxAmount ?? 0)} sales tax)` : ""}`,
         ]),
         "",
         "The options above are alternatives — choose the one that fits, and the combined total shown is your full price.",
@@ -69,7 +93,7 @@ export function draftProposalEmail(input: ProposalEmailInput): { subject: string
     : [
         "Summary of work:",
         ...lineItems.map(itemLine),
-        `Total: ${money(total)}`,
+        ...taxLines(taxed ? "Subtotal" : "Total", total, taxAmount, payable),
       ];
 
   const summary = totalsBlock.join("\n");
@@ -80,7 +104,9 @@ export function draftProposalEmail(input: ProposalEmailInput): { subject: string
     projectTitle,
     companyName: company,
     technicianName: header.technicianName ?? "",
-    total: money(total),
+    // The amount payable, so a company template saying "for the total of {{total}}" states the
+    // figure the customer is actually being asked to agree to.
+    total: money(payable),
     summary,
   };
   // Company template wins; the built-in letter is just the default template. Unknown

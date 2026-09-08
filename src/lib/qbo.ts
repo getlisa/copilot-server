@@ -238,8 +238,25 @@ async function accessTokenFor(conn: QboConnection): Promise<string> {
 // ---------- API client ----------
 
 class QboApiError extends Error {
-  constructor(message: string, readonly status: number, readonly body: string) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly body: string,
+    /** Seconds Intuit asked us to wait, when it said so. Null when the header was absent. */
+    readonly retryAfterSeconds: number | null = null
+  ) {
     super(message);
+  }
+}
+
+/**
+ * A read that could not be completed, as distinct from one that legitimately found nothing
+ * (T-47). Returning a truncated list as if it were the whole list is what makes this dangerous:
+ * the item registry would treat absent rows as "not in QuickBooks" and create duplicates.
+ */
+export class QboIncompleteReadError extends Error {
+  constructor(readonly entity: string, readonly rowsRead: number) {
+    super(`QBO ${entity} read stopped at ${rowsRead} rows without reaching the end`);
   }
 }
 
@@ -247,22 +264,84 @@ class QboApiError extends Error {
 const isNotFound = (e: unknown) =>
   e instanceof QboApiError && (e.status === 404 || /"code"\s*:\s*"610"|Object Not Found/i.test(e.body));
 
+/**
+ * Per-request timeout (T-43). Without one, a hung Intuit socket holds a Fargate task and the
+ * caller's HTTP request open indefinitely — Node's fetch has no default timeout at all.
+ */
+const QBO_TIMEOUT_MS = 30_000;
+/**
+ * Transient failures get a bounded retry: 5xx, 429, and socket/timeout errors. These are
+ * upstream blips, not request problems. Clara runs ONE Intuit app across every client (D-1),
+ * so throttling is pooled and a single 429 would otherwise discard a whole sync — which is
+ * exactly the failure this exists to absorb. Mirrors the house pattern in `serpapi.ts`.
+ */
+const QBO_RETRIES = 3;
+const QBO_BACKOFF_MS = 500;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Retryable: the server said it was its own fault, or asked us to slow down, or we never got an
+ * answer. A 4xx other than 429 is the request's fault and will fail identically next time —
+ * retrying it just multiplies a duplicate-name or validation error.
+ */
+const isTransient = (e: unknown): boolean => {
+  if (e instanceof QboApiError) return e.status === 429 || e.status >= 500;
+  // AbortError from our own timeout, plus TypeError from a socket failure.
+  return e instanceof Error && (e.name === "AbortError" || e.name === "TimeoutError" || e instanceof TypeError);
+};
+
+/** Intuit may say exactly how long to wait; prefer that over guessing. */
+const retryAfterMs = (e: unknown, attempt: number): number => {
+  if (e instanceof QboApiError && e.retryAfterSeconds != null) return e.retryAfterSeconds * 1000;
+  return QBO_BACKOFF_MS * 2 ** attempt;
+};
+
 export async function qboFetch(conn: QboConnection, path: string, init?: RequestInit): Promise<any> {
-  const token = await accessTokenFor(conn);
   const sep = path.includes("?") ? "&" : "?";
-  const res = await fetch(`${apiBase()}/v3/company/${conn.realmId}${path}${sep}minorversion=75`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new QboApiError(`QBO ${init?.method ?? "GET"} ${path} → ${res.status}: ${body}`, res.status, body);
+  const url = `${apiBase()}/v3/company/${conn.realmId}${path}${sep}minorversion=75`;
+  let last: unknown;
+
+  for (let attempt = 0; attempt <= QBO_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const wait = retryAfterMs(last, attempt - 1);
+      logger.warn("QBO call failed transiently, retrying", {
+        path,
+        attempt,
+        waitMs: wait,
+        status: last instanceof QboApiError ? last.status : undefined,
+      });
+      await sleep(wait);
+    }
+    try {
+      // The token is re-read on every attempt on purpose: a retry that straddles an expiry
+      // must not replay the stale bearer it was about to be rejected for.
+      const token = await accessTokenFor(conn);
+      const res = await fetch(url, {
+        ...init,
+        signal: AbortSignal.timeout(QBO_TIMEOUT_MS),
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        const ra = Number(res.headers.get("Retry-After"));
+        throw new QboApiError(
+          `QBO ${init?.method ?? "GET"} ${path} → ${res.status}: ${body}`,
+          res.status,
+          body,
+          Number.isFinite(ra) && ra > 0 ? ra : null
+        );
+      }
+      return await res.json();
+    } catch (e) {
+      last = e;
+      if (!isTransient(e) || attempt === QBO_RETRIES) throw e;
+    }
   }
-  return res.json();
+  throw last;
 }
 
 export const query = (conn: QboConnection, q: string) =>
@@ -278,7 +357,17 @@ export async function queryAll<T>(
   conn: QboConnection,
   entity: string,
   where = "",
-  { pageSize = 1000, maxPages = 50 } = {}
+  {
+    pageSize = 1000,
+    maxPages = 50,
+    /**
+     * Whether the caller needs EVERY row. True for a mirror sync, where a short read would look
+     * like deletions. False for a bounded probe — `{pageSize: 1, maxPages: 1}` asking "does a
+     * customer with this name exist" is complete the moment it has an answer, and treating its
+     * full first page as truncation would turn a successful lookup into a thrown error.
+     */
+    expectAll = true,
+  } = {}
 ): Promise<T[]> {
   const rows: T[] = [];
   for (let page = 0; page < maxPages; page++) {
@@ -288,9 +377,13 @@ export async function queryAll<T>(
     const batch: T[] = found.QueryResponse?.[entity] ?? [];
     rows.push(...batch);
     if (batch.length < pageSize) return rows;
+    if (!expectAll) return rows;
   }
-  logger.warn("QBO pagination hit its page guard", { entity, rows: rows.length });
-  return rows;
+  // Hitting the guard means there was MORE, and we stopped. Previously this returned the partial
+  // list and logged a warning nobody reads, so 50,000 rows were reported as the company's total —
+  // and every row past it looked, to the item registry and the customer picker, like something
+  // QuickBooks does not have. Failing is the honest answer; T-45 records it as a partial sync.
+  throw new QboIncompleteReadError(entity, rows.length);
 }
 
 /** QBO query literals escape single quotes with a backslash. */
@@ -409,7 +502,13 @@ export type QboEstimateLine =
       DetailType: "SalesItemLineDetail";
       Amount: number;
       Description: string;
-      SalesItemLineDetail: { ItemRef: { value: string }; Qty?: number; UnitPrice?: number };
+      SalesItemLineDetail: {
+        ItemRef: { value: string };
+        Qty?: number;
+        UnitPrice?: number;
+        /** "TAX" or "NON" — always set, so a sparse update cannot leave stale tax behind. */
+        TaxCodeRef: { value: "TAX" | "NON" };
+      };
     }
   | {
       DetailType: "DescriptionOnly";
@@ -427,7 +526,19 @@ export type QboEstimateLine =
 export function qboEstimateLines(
   dto: { lineItems: LineItemDto[]; optionTotals: QuoteOptionTotal[] },
   chosenOption: string | null,
-  itemRefFor: (line: LineItemDto) => string
+  itemRefFor: (line: LineItemDto) => string,
+  /**
+   * Whether this estimate declares tax at all.
+   *
+   * Every line carries an explicit `TaxCodeRef` EITHER WAY — TAX only when the estimate is taxed
+   * and the line is taxable, NON otherwise. Omitting it when untaxed looked more conservative
+   * and was in fact the bug: re-completion posts the update with `sparse: true`, under which an
+   * omitted field means "leave what is there". An estimate that once carried Tucson 9.1% and is
+   * then cleared would keep being taxed by QuickBooks while CLARA's document says it is not.
+   * Marking every line NON makes the tax zero whatever the transaction-level code still says,
+   * so the books can never charge tax the signed estimate does not show (T-63).
+   */
+  taxed = false
 ): QboEstimateLine[] {
   const lines: QboEstimateLine[] = dto.lineItems
     .filter((i) => !i.optionGroup || i.optionGroup === chosenOption)
@@ -439,6 +550,7 @@ export function qboEstimateLines(
         ItemRef: { value: itemRefFor(i) },
         ...(i.quantity != null ? { Qty: i.quantity } : {}),
         ...(i.unitPrice != null ? { UnitPrice: i.unitPrice } : {}),
+        TaxCodeRef: { value: taxed && i.taxable ? "TAX" : "NON" },
       },
     }));
   for (const o of dto.optionTotals.filter((o) => o.name !== chosenOption)) {
@@ -469,8 +581,15 @@ export async function syncQuoteToQbo(
     qboEstimateId: string | null;
     chosenOptionGroup: string | null;
     customerId: number | null;
+    /** The snapshotted rate, or null when this estimate declares no tax. */
+    salesTaxId: number | null;
   },
-  dto: { lineItems: LineItemDto[]; optionTotals: QuoteOptionTotal[] },
+  dto: {
+    lineItems: LineItemDto[];
+    optionTotals: QuoteOptionTotal[];
+    /** Payable total, for the post-hoc comparison against QuickBooks' own figure. */
+    totalWithTax?: number;
+  },
   customer: { name: string; email?: string | null; phone?: string | null; address?: string | null },
   deps: { ensureItem: EnsureItem; ensureCustomer: EnsureCustomer }
 ): Promise<{ estimateId: string; updated: boolean }> {
@@ -485,11 +604,27 @@ export async function syncQuoteToQbo(
     dto.lineItems.filter((i) => !i.optionGroup || i.optionGroup === quote.chosenOptionGroup),
     deps.ensureItem
   );
+  // The QuickBooks tax CODE for the rate this estimate was snapshotted with (T-63). A code is
+  // what a transaction references; the rates underneath it are what QuickBooks cascades to reach
+  // a percentage — which is why the code row, not a member rate row, is what goes here.
+  //
+  // Absent means absent: with no snapshot, `TxnTaxDetail` is omitted entirely rather than sent
+  // as zero, preserving the distinction between "no tax configured" and "a deliberate 0%" all
+  // the way into the customer's books (F20).
+  const taxCodeRef = quote.salesTaxId == null ? null : await qboTaxCodeRef(conn, quote.salesTaxId);
+  if (quote.salesTaxId != null && !taxCodeRef)
+    logger.warn("Quote carries a sales-tax rate with no QuickBooks code; posting untaxed", {
+      quoteId: quote.id,
+      salesTaxId: quote.salesTaxId,
+      realmId: conn.realmId,
+    });
+
   const payload = {
     CustomerRef: { value: customerRef },
-    Line: qboEstimateLines(dto, quote.chosenOptionGroup, itemRefFor),
+    Line: qboEstimateLines(dto, quote.chosenOptionGroup, itemRefFor, !!taxCodeRef),
     PrivateNote: `CLARA quote ${quote.id}`,
     ...(customer.email ? { BillEmail: { Address: customer.email } } : {}),
+    ...(taxCodeRef ? { TxnTaxDetail: { TxnTaxCodeRef: { value: taxCodeRef } } } : {}),
   };
 
   // Update-in-place when this quote already posted (US6): QBO updates need the estimate's
@@ -519,9 +654,125 @@ export async function syncQuoteToQbo(
     }
   }
 
+  // Before creating, look for an estimate this quote ALREADY posted (T-48). The id is persisted
+  // only after QBO returns it, so a crash, a timeout, or a retried request in between leaves a
+  // real estimate in the customer's books that CLARA has no record of — and the next completion
+  // creates a second one. `PrivateNote` has always carried the quote id and was never read back;
+  // it is not a filterable field, so the query narrows by customer and matches in memory.
+  const adopted = await findPostedEstimate(conn, quote.id, customerRef);
+  if (adopted) {
+    await prisma.quote.update({ where: { id: quote.id }, data: { qboEstimateId: adopted.id } });
+    logger.warn("Adopted an orphaned QBO estimate instead of creating a duplicate", {
+      quoteId: quote.id,
+      estimateId: adopted.id,
+    });
+    const posted = await qboFetch(conn, "/estimate", {
+      method: "POST",
+      body: JSON.stringify({ ...payload, Id: adopted.id, SyncToken: adopted.syncToken, sparse: true }),
+    });
+    return { estimateId: String(posted.Estimate.Id), updated: true };
+  }
+
   const posted = await qboFetch(conn, "/estimate", { method: "POST", body: JSON.stringify(payload) });
   const estimateId = String(posted.Estimate.Id);
   await prisma.quote.update({ where: { id: quote.id }, data: { qboEstimateId: estimateId } });
   logger.info("QBO estimate posted", { quoteId: quote.id, estimateId });
+  logTotalDelta(quote.id, estimateId, dto, posted);
   return { estimateId, updated: false };
+}
+
+/**
+ * Compare what CLARA printed with what QuickBooks computed, and say so when they differ.
+ *
+ * They legitimately can. QuickBooks cascades a GROUP tax code component by component and rounds
+ * each one, while CLARA applies the combined percentage once — Tucson (7.1 + 2) against a large
+ * subtotal can land a cent apart. That is not worth failing a post over, but it is worth being
+ * able to find later, which is why this is a structured line with both figures rather than a
+ * silent shrug. CLARA's number stays authoritative for the signed document.
+ */
+function logTotalDelta(
+  quoteId: string,
+  estimateId: string,
+  dto: { lineItems: LineItemDto[]; optionTotals: QuoteOptionTotal[]; totalWithTax?: number },
+  posted: any
+) {
+  const qboTotal = Number(posted?.Estimate?.TotalAmt);
+  const claraTotal = dto.totalWithTax;
+  if (!Number.isFinite(qboTotal) || claraTotal == null) return;
+  const delta = Math.round((qboTotal - claraTotal) * 100) / 100;
+  if (delta === 0) return;
+  logger.warn("QBO estimate total differs from CLARA's", {
+    quoteId,
+    estimateId,
+    claraTotal,
+    qboTotal,
+    delta,
+  });
+}
+
+/**
+ * The QuickBooks TaxCode id for one of CLARA's sales-tax rates, in the realm currently connected.
+ *
+ * Realm-scoped deliberately: a company that reconnects to a different QuickBooks file has rates
+ * whose old code ids mean nothing there, and sending one would either fail or — worse — match an
+ * unrelated code in the new file. No row for this realm means this rate cannot be expressed here.
+ */
+async function qboTaxCodeRef(conn: QboConnection, salesTaxId: number): Promise<string | null> {
+  // Under Automated Sales Tax, Intuit ignores TxnTaxCodeRef and computes from the address. Send
+  // one anyway and the estimate silently disagrees with the document CLARA printed, with nothing
+  // to reveal it — so the code is withheld and the lines go out NON, matching what was signed.
+  // `null`/undefined means the preference has not been read yet, which is not evidence of AST.
+  if (conn.partnerTaxEnabled === true) {
+    logger.warn("QBO company uses Automated Sales Tax; posting untaxed rather than a code Intuit would discard", {
+      companyId: conn.companyId,
+      realmId: conn.realmId,
+    });
+    return null;
+  }
+  if (conn.usingSalesTax === false) return null;
+
+  const row = await prisma.salesTaxQb.findFirst({
+    where: {
+      salesTaxId,
+      companyId: conn.companyId,
+      realmId: conn.realmId ?? "",
+      qboType: "TaxCode",
+      isDeleted: false,
+      isActive: true,
+    },
+    select: { qboId: true },
+  });
+  return row?.qboId ?? null;
+}
+
+/**
+ * An estimate already in QuickBooks for this quote, if one is there (T-48).
+ *
+ * Scoped to the customer so the scan stays small, and matched on the exact `PrivateNote` this
+ * module writes. Deliberately best-effort: a failure here must not block a legitimate post, so
+ * it degrades to "not found" and the caller creates — the same behaviour as before this existed.
+ */
+async function findPostedEstimate(
+  conn: QboConnection,
+  quoteId: string,
+  customerRef: string
+): Promise<{ id: string; syncToken: string } | null> {
+  const marker = `CLARA quote ${quoteId}`;
+  try {
+    // Paginated: QBO returns 100 rows by default, and a customer with a long history would hide
+    // the very orphan this exists to find — reporting "no duplicate" and creating a second one.
+    const rows = await queryAll<{ Id: string; SyncToken: string; PrivateNote?: string }>(
+      conn,
+      "Estimate",
+      `CustomerRef = '${esc(customerRef)}'`
+    );
+    const hit = rows.find((r) => r?.PrivateNote === marker);
+    return hit ? { id: String(hit.Id), syncToken: String(hit.SyncToken) } : null;
+  } catch (e) {
+    logger.warn("Could not check for an existing QBO estimate; creating", {
+      quoteId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return null;
+  }
 }

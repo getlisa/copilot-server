@@ -4,6 +4,7 @@ import { RequestWithUser, isAdminRole } from "../middlewares/auth";
 import { DEFAULT_PROPOSAL_EMAIL_TEMPLATE } from "../../copilot/estimating/proposalEmail";
 import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
+import { clientSafeMessage } from "../../lib/clientError";
 import { uploadBufferToS3, publicUrlForKey } from "../../lib/s3";
 import {
   isQboConfigured,
@@ -376,18 +377,30 @@ export class CompanyController {
         .status(400)
         .json({ success: false, error: { status: 400, message: "A customer name is required" } });
     try {
+      // parentId makes this a sub-customer (a Job in QuickBooks). An unparseable value is
+      // treated as absent rather than rejected: the field is optional, and "0" or "" from a
+      // form should mean "no parent", not a 400 the technician cannot interpret.
+      const rawParent = Number(req.body?.parentId);
+      const parentId = Number.isInteger(rawParent) && rawParent > 0 ? rawParent : null;
       const created = await createCustomer(companyId, {
         name,
         email: str(req.body?.email),
         phone: str(req.body?.phone),
         address: str(req.body?.address),
+        parentId,
       }, qboConnected(conn) ? conn : null);
       res.status(201).json({ success: true, data: created });
     } catch (e) {
-      // These messages are written for the person on site — a duplicate name or a malformed
-      // email is theirs to fix, not a server fault, so it comes back as a 400 they can act on.
-      const message = e instanceof Error ? e.message : "Could not create the customer";
-      logger.warn("QBO customer create refused", { companyId, message });
+      // Only messages this codebase wrote for the person on site come back — a duplicate name
+      // or a bad email is theirs to fix. An Intuit fault body or a Prisma constraint message is
+      // logged and replaced (T-53): it carries realm ids and schema detail, and tells them
+      // nothing they can act on.
+      const message = clientSafeMessage(e, "Could not create the customer — please try again");
+      logger.warn("QBO customer create refused", {
+        companyId,
+        message,
+        error: e instanceof Error ? e.message : String(e),
+      });
       res.status(400).json({ success: false, error: { status: 400, message } });
     }
   }
@@ -484,7 +497,7 @@ export class CompanyController {
       logger.info("Sales tax saved", { companyId, id: saved.id, isDefault: saved.isDefault });
       res.json({ success: true, data: { ...saved, ratePercent: Number(saved.ratePercent) } });
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Could not save the rate";
+      const message = clientSafeMessage(e, "Could not save the rate");
       // 409 when the company's state forbids it (tax comes from a connected system); 400 when
       // the request itself is at fault. The client shows the message either way, but the status
       // is what tells it apart.
@@ -520,7 +533,7 @@ export class CompanyController {
         },
       });
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Could not set the default";
+      const message = clientSafeMessage(e, "Could not set the default");
       res.status(400).json({ success: false, error: { status: 400, message } });
     }
   }

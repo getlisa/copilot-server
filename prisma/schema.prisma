@@ -388,7 +388,35 @@ model Customer {
   name      String
   email     String?
   phone     String?
+  /// The address exactly as it was typed or as QuickBooks holds it, joined. Kept alongside the
+  /// structured columns below rather than replaced by them: the parse can be wrong, and the
+  /// original is the only record of what the technician actually entered.
   address   String?
+
+  /// BillAddr, structured (T-65). QuickBooks wants components, not a line of prose, and the
+  /// jurisdiction that decides sales tax lives in `state` + `postalCode`. Populated from
+  /// QuickBooks directly on ingest, or from `addressParse` on text a user typed — that parser
+  /// only ever RESTRUCTURES what is present and never invents a missing ZIP or city, because a
+  /// fabricated ZIP silently moves the tax jurisdiction.
+  addressLine1 String? @map("address_line1")
+  addressLine2 String? @map("address_line2")
+  city         String?
+  /// CountrySubDivisionCode in QuickBooks' vocabulary — "AZ", not "Arizona".
+  state        String?
+  postalCode   String? @map("postal_code")
+  country      String?
+
+  /// Sub-customer parent (QuickBooks calls a child with `Job: true` a Job). Self-referential and
+  /// nullable: most customers are roots. `SetNull` rather than `Cascade` — deleting a parent must
+  /// orphan its children, never delete billable history along with them.
+  ///
+  /// No parent-qualified name scheme: QuickBooks' `DisplayName` is unique across customers,
+  /// vendors and employees for the whole realm, so two children cannot share a name under
+  /// different parents anyway, and `@@unique([companyId, name])` below already matches that rule.
+  /// `CustomerQb.fullyQualifiedName` carries the readable "Parent:Child" chain.
+  parentId Int?       @map("parent_id")
+  parent   Customer?  @relation("CustomerHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children Customer[] @relation("CustomerHierarchy")
 
   /// Audit + soft delete (architecture, 2026-09-08). `isDeleted` hides a row without losing the
   /// history that points at it; `isActive` is the reversible "not in use right now" state — the
@@ -409,6 +437,7 @@ model Customer {
   /// works here cannot fail there for a reason the technician never saw.
   // No separate @@index on the same columns — the unique above already serves the
   // picker's lookup, and a second btree is maintained on every sync write for nothing.
+  @@index([parentId])
   @@unique([companyId, name])
   @@map("customers")
   @@schema("public")
@@ -493,7 +522,8 @@ model SalesTax {
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy BigInt?  @map("updated_by")
 
-  qb SalesTaxQb[]
+  qb     SalesTaxQb[]
+  quotes Quote[]
 
   @@unique([companyId, name])
   @@index([companyId, isActive])
@@ -665,6 +695,33 @@ model QboConnection {
   /// AES-256-GCM blob of { accessToken, refreshToken }. Null until consented.
   encryptedAuth        String?   @map("encrypted_auth")
   accessTokenExpiresAt DateTime? @map("access_token_expires_at")
+
+  /// The last reference sync that finished with every stage succeeding (T-45). Freshness used to
+  /// be derived from the newest `customer_qb.synced_at`, which reports a run that ingested
+  /// customers and then failed on items or tax as a clean success — the mirrors are stale and
+  /// nothing says so. A run is a run: it either completed or it did not.
+  lastSyncAt           DateTime? @map("last_sync_at")
+  /// Which stages failed on the most recent attempt, cleared on the next success. Text rather
+  /// than a code because it is shown to an admin who has to decide whether to retry.
+  lastSyncError        String?   @map("last_sync_error")
+  /// How this QuickBooks company calculates sales tax, read from `Preferences.TaxPrefs` (T-63).
+  ///
+  /// This decides whether CLARA's tax design applies at all. Under MANUAL tax an explicit
+  /// `TxnTaxDetail.TxnTaxCodeRef` is honoured, which is what the snapshot model depends on.
+  /// Under Automated Sales Tax (`PartnerTaxEnabled`) Intuit IGNORES the code and computes from
+  /// the address instead, so a posted estimate would quietly disagree with the signed document.
+  /// Null means it has not been read yet — treated as "not known to be automated".
+  usingSalesTax        Boolean?  @map("using_sales_tax")
+  partnerTaxEnabled    Boolean?  @map("partner_tax_enabled")
+  /// When the currently-running sync claimed this company, or null when none is running (T-44).
+  ///
+  /// A row claim rather than a Postgres advisory lock. Session advisory locks are RE-ENTRANT:
+  /// two concurrent syncs sharing one pooled connection both take the lock, both proceed, and
+  /// the first unlock releases it for both — the guard reads as working and prevents nothing.
+  /// A conditional UPDATE gated on the row count has none of that ambiguity, and it survives a
+  /// crashed task through the staleness window rather than wedging the company forever.
+  syncStartedAt        DateTime? @map("sync_started_at")
+
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 
@@ -673,6 +730,12 @@ model QboConnection {
 }
 
 /// Estimating Agent: one chat = one quote, lifecycle DRAFT -> COMPLETED.
+/// Audit columns (architecture, 2026-09-08): `quotes` and `quote_line_items` are DELIBERATELY
+/// exempt from the created_by/updated_by rule that the customer and sales-tax tables follow.
+/// A quote already carries `user_id` — its author, with a FK's worth of meaning — and quotes are
+/// hard-deleted with their conversation rather than soft-deleted, so `is_deleted`/`is_active`
+/// would be columns nothing ever sets. The rule exists for service-managed reference data that
+/// outlives the person who entered it; a quote is neither.
 model Quote {
   id                String          @id @default(uuid())
   conversationId    String          @unique @map("conversation_id")
@@ -697,6 +760,14 @@ model Quote {
   /// QBO Estimate id once posted (companies with a QboConnection). Posted at completion;
   /// re-completing after a reopen UPDATES this same estimate in place (QBO PRD US6).
   qboEstimateId     String?         @map("qbo_estimate_id")
+  /// When the estimate last reached QuickBooks, and why it last did not (T-17).
+  ///
+  /// The post is fire-and-forget, so a failure used to be a log line and nothing else: the
+  /// technician saw a completed quote, the estimate was never in the books, and the retry
+  /// endpoint existed with nothing to tell anyone to call it. Recorded here so the screen can
+  /// say so and offer the retry. Cleared on the next success.
+  qboSyncedAt       DateTime?       @map("qbo_synced_at")
+  qboSyncError      String?         @map("qbo_sync_error")
   /// The customer this estimate bills to, chosen or created on the estimate screen. Null on
   /// quotes that predate the picker — those still print the free-text customerName below, and
   /// the QuickBooks post falls back to matching on that name.
@@ -705,6 +776,32 @@ model Quote {
   /// reconnect to a different QuickBooks file cannot leave a stale id attached to an estimate.
   customerId        Int?            @map("customer_id")
   customer          Customer?       @relation(fields: [customerId], references: [id])
+  /// The sales-tax rate this estimate was created under — a SNAPSHOT, not a live lookup. The
+  /// tax settings card promises "existing estimates keep the rate they were created with", so
+  /// the rate is resolved once, at creation, and never re-resolved. `SetNull` keeps the estimate
+  /// and its `taxRatePercent` intact if the rate row is later removed.
+  ///
+  /// Null is meaningful and distinct from a 0% rate: null means no tax was ever configured, and
+  /// the QuickBooks post omits `TxnTaxDetail` entirely rather than declaring zero tax (F20).
+  /// Every quote that predates this column is null, by decision — there is no backfill.
+  ///
+  /// `Restrict`, not `SetNull`, and the two are not interchangeable here. Rates are only ever
+  /// SOFT-deleted, so this never fires in normal operation — but if a rate were ever hard-deleted,
+  /// `SetNull` would clear `sales_tax_id` while leaving `tax_rate_percent` set, breaking the
+  /// pairing the CHECK constraint enforces and leaving an estimate quoting a percentage that
+  /// belongs to nothing. Failing the delete is the honest outcome.
+  salesTaxId        Int?            @map("sales_tax_id")
+  salesTax          SalesTax?       @relation(fields: [salesTaxId], references: [id], onDelete: Restrict)
+  /// The percentage as it stood at creation, copied so a later edit to the rate cannot silently
+  /// re-price an estimate that has already been sent.
+  taxRatePercent    Decimal?        @map("tax_rate_percent") @db.Decimal(6, 4)
+  /// This job is deliberately untaxed — someone cleared the rate rather than never having one.
+  ///
+  /// Without this the two states are the same row: `sales_tax_id IS NULL`. Completion fills a
+  /// missing snapshot from the company default (so a quote started before tax existed is not
+  /// completed untaxed by accident), and that gap-fill would otherwise undo an explicit clear
+  /// on the way out — making "not taxable" impossible to express at all.
+  taxExempt         Boolean         @default(false) @map("tax_exempt")
   /// Which option group the customer chose, answered at completion time (QBO PRD US3).
   /// Null = not asked / no options. Cleared on reopen so re-completion asks again.
   chosenOptionGroup String?         @map("chosen_option_group")
@@ -715,6 +812,7 @@ model Quote {
   lineItems         QuoteLineItem[]
 
   @@index([userId, status])
+  @@index([salesTaxId])
   @@map("quotes")
   @@schema("public")
 }
@@ -756,6 +854,10 @@ model QuoteLineItem {
   /// Null = auto: match the company's QBO item list by name at post time, create if missing.
   qboItemId         String?  @map("qbo_item_id")
   qboItemName       String?  @map("qbo_item_name")
+  /// Whether sales tax applies to this line. Defaults true, matching both QuickBooks' own default
+  /// and the common case; the per-line toggle exists for the exceptions (a permit fee, a
+  /// non-taxable service). Maps to `TaxCodeRef` = `TAX` or `NON` on the posted estimate.
+  taxable           Boolean  @default(true)
   sortOrder         Int      @map("sort_order")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")

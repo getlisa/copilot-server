@@ -13,6 +13,13 @@ import {
 } from "docx";
 import PDFDocument from "pdfkit";
 import {
+  payable,
+  optionPayable,
+  taxRowLabel,
+  taxRowAmount,
+  subtotalLabel,
+} from "./proposalTotals";
+import {
   amountInWords,
   loadLogo,
   loadPhotos,
@@ -241,11 +248,21 @@ async function docxDynamic(
           children: [cell("Line Item", { bold: true }), cell("Rate", { bold: true, right: true }), cell("Qty", { bold: true, right: true }), cell("Total", { bold: true, right: true })],
         }),
         ...lines.filter((l) => !l.optionGroup).map(itemRow),
-        totalRow("Total", input.total),
+        // Subtotal / tax / Total once a rate applies — printing "Total" above a tax row and a
+        // larger figure below it reads as an error in the document.
+        totalRow(subtotalLabel(input), input.total),
+        ...(taxRowLabel(input)
+          ? [totalRow(taxRowLabel(input)!, taxRowAmount(input)), totalRow("Total", payable(input))]
+          : []),
       ];
       for (const opt of input.optionTotals ?? []) {
         rows.push(...lines.filter((l) => l.optionGroup === opt.name).map(itemRow));
-        rows.push(totalRow(`Option — ${opt.name} (alternative), base + option ${money(opt.combinedTotal)}`, opt.total));
+        rows.push(
+          totalRow(
+            `Option — ${opt.name} (alternative), base + option ${money(optionPayable(input, opt))}`,
+            opt.total
+          )
+        );
       }
       out.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }));
       if (input.optionTotals?.length)
@@ -278,7 +295,10 @@ async function docxDynamic(
             spacing: { before: 300 },
             children: [
               new TextRun({ text: "BASE SCOPE TOTAL: ", bold: true }),
-              new TextRun({ text: `${amountInWords(input.total)} (${money(input.total)})`, bold: true }),
+              new TextRun({
+                text: `${amountInWords(payable(input))} (${money(payable(input))})`,
+                bold: true,
+              }),
             ],
           })
         );
@@ -294,7 +314,9 @@ async function docxDynamic(
             new Paragraph({
               children: [
                 new TextRun({
-                  text: `Base Scope + ${opt.name} Combined Total: ${money(opt.combinedTotal)}`,
+                  text:
+                    `Base Scope + ${opt.name} Combined Total: ${money(optionPayable(input, opt))}` +
+                    (taxRowLabel(input) ? ` (includes ${money(opt.taxAmount ?? 0)} sales tax)` : ""),
                   bold: true,
                 }),
               ],
@@ -324,7 +346,12 @@ async function docxDynamic(
                   "All the above work to be completed in a substantial and workmanlike manner in " +
                   "accordance with the scope of work for the sum of: ",
               }),
-              new TextRun({ text: `${amountInWords(input.total)} (${money(input.total)}).`, bold: true }),
+              new TextRun({
+                text:
+                  `${amountInWords(payable(input))} (${money(payable(input))})` +
+                  `${taxRowLabel(input) ? ", sales tax included" : ""}.`,
+                bold: true,
+              }),
             ],
           })
         );
@@ -559,7 +586,11 @@ export async function renderTemplatedProposalPdf(
               const c = lineCells(l);
               row(c.item, c.rate, c.qty, c.total);
             }
-            row("Total", "", "", money(input.total), true);
+            row(subtotalLabel(input), "", "", money(input.total), true);
+            if (taxRowLabel(input)) {
+              row(taxRowLabel(input)!, "", "", money(taxRowAmount(input)), true);
+              row("Total", "", "", money(payable(input)), true);
+            }
             for (const opt of input.optionTotals ?? []) {
               for (const l of lines.filter((i) => i.optionGroup === opt.name)) {
                 const c = lineCells(l);
@@ -579,7 +610,7 @@ export async function renderTemplatedProposalPdf(
               write(UNPRICED_NOTE(input.unpricedCount), { bold: true, color: "C00000" });
             if (input.optionTotals?.length) {
               write(
-                `BASE SCOPE TOTAL: ${amountInWords(input.total)} (${money(input.total)})`,
+                `BASE SCOPE TOTAL: ${amountInWords(payable(input))} (${money(payable(input))})`,
                 { bold: true }
               );
               for (const opt of input.optionTotals) {
@@ -600,8 +631,8 @@ export async function renderTemplatedProposalPdf(
             } else {
               write(
                 "COST: All the above work to be completed in a substantial and workmanlike manner " +
-                  `in accordance with the scope of work for the sum of: ${amountInWords(input.total)} ` +
-                  `(${money(input.total)}).`,
+                  `in accordance with the scope of work for the sum of: ${amountInWords(payable(input))} ` +
+                  `(${money(payable(input))})${taxRowLabel(input) ? ", sales tax included" : ""}.`,
                 {}
               );
             }

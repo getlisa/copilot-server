@@ -6,7 +6,7 @@
  * blank/omitted when unset. Pure — no network, no database.
  *   npx tsx scripts/check-customer-details.ts
  */
-import { toQuoteDto } from "../src/copilot/estimating/quoteDto";
+import { toQuoteDto, type QuoteInput } from "../src/copilot/estimating/quoteDto";
 import { buildQuoteDocx } from "../src/copilot/estimating/quoteDocx";
 import { scrubAddressFromTitle } from "../src/copilot/estimating/scrubAddress";
 
@@ -20,20 +20,24 @@ const quote = (customer: {
   ({
     id: "q1",
     conversationId: "c1",
-    userId: 1n,
-    companyId: 1,
     status: "DRAFT",
     markupPercent: 0,
+    customerId: null,
     customerName: customer.customerName ?? null,
     customerAddress: customer.customerAddress ?? null,
     customerPhone: customer.customerPhone ?? null,
+    salesTaxId: null,
+    taxRatePercent: null,
+    chosenOptionGroup: null,
+    qboEstimateId: null,
+    qboSyncedAt: null,
+    qboSyncError: null,
     createdAt: now,
     updatedAt: now,
     completedAt: null,
     lineItems: [
       {
         id: "i1",
-        quoteId: "q1",
         description: "12/2 Romex NM-B wire",
         quantity: 250,
         unit: "ft",
@@ -46,12 +50,14 @@ const quote = (customer: {
         agentSuggested: false,
         manuallyEdited: false,
         ambiguousAction: null,
+        sourcePricebookId: null,
+        qboItemId: null,
+        qboItemName: null,
+        taxable: true,
         sortOrder: 0,
-        createdAt: now,
-        updatedAt: now,
       },
     ],
-  }) as any;
+  }) satisfies QuoteInput;
 
 let checks = 0;
 function eq(actual: unknown, expected: unknown, label: string) {

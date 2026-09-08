@@ -29,6 +29,13 @@ export const lineItemSchema = z.object({
   code: z.string().describe("Pricebook code, e.g. 'SP-010', 'LH-002', 'SV-002', 'LB-030'."),
   description: z.string().describe("Human-readable line description."),
   kind: lineItemKindEnum,
+  /**
+   * Whether sales tax applies. Optional and NOT in the JSON schema the model fills — set from
+   * the quote's per-line toggle by `mapEstimateQuote`. The estimate PDF's "Taxed" column used to
+   * infer this from `kind`, which meant a technician who marked a permit fee non-taxable saw a
+   * tick beside it anyway.
+   */
+  taxable: z.boolean().nullish(),
   quantity: z.number().describe("Quantity, or hours (Mid Hrs) for labor lines."),
   unit: z.string().describe("Unit of measure: EA, HR, RL, DAY, CALL, TRIP, MILE, etc."),
   unitPrice: z.number().describe("Unit price / hourly rate from the pricebook."),
@@ -59,6 +66,14 @@ export const estimateQuoteSchema = z.object({
   materialsServicesSubtotal: z.number().describe("Sum of all non-labor line totals. 0 if needs_info."),
   laborSubtotal: z.number().describe("Sum of labor line totals. 0 if needs_info."),
   taxOther: z.number().describe("Tax / other charges. 0 if none."),
+  /**
+   * The sales-tax rate behind `taxOther`, when one is configured (T-62). Optional and NOT part
+   * of the JSON schema the model fills — it is set by `mapEstimateQuote` from the quote's
+   * snapshot. It exists so the documents can tell a configured 0% (which prints "Sales tax
+   * (0%): $0.00") from no rate at all (which prints nothing). Suppressing on `taxOther` alone
+   * collapses those two into the same silence.
+   */
+  taxRatePercent: z.number().nullish(),
   total: z.number().describe("TOTAL QUOTE = materials+services + labor + tax. 0 if needs_info."),
   currency: z.string().describe("ISO currency code, e.g. 'USD'."),
   assumptions: z

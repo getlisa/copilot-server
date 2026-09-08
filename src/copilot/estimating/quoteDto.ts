@@ -87,6 +87,11 @@ export interface LineItemDto {
   /** QBO item this line bills against (QBO PRD US5). Null = auto match/create by name. */
   qboItemId: string | null;
   qboItemName: string | null;
+  /**
+   * Whether sales tax applies to this line. Defaults true. Drives `TaxCodeRef` (TAX/NON) on the
+   * posted estimate and the per-line toggle on the Invoice tab.
+   */
+  taxable: boolean;
   sortOrder: number;
 }
 
@@ -96,6 +101,10 @@ export interface QuoteOptionTotal {
   total: number;
   /** Base scope + this option — the price if the customer picks it. */
   combinedTotal: number;
+  /** Tax on base scope + this option's taxable lines. 0 when the quote carries no rate. */
+  taxAmount: number;
+  /** What the customer actually pays for this option, tax included. */
+  combinedTotalWithTax: number;
 }
 
 export interface QuoteDto {
@@ -131,6 +140,25 @@ export interface QuoteDto {
    * customer picks between, so they are NEVER part of this sum — see optionTotals.
    */
   total: number;
+  /**
+   * The sales-tax rate this estimate was created under, as a percentage — a snapshot, so it does
+   * not move when the company's default changes. **Null and 0 are different answers**: null means
+   * no rate was ever configured and no tax line should be rendered at all, while 0 is a
+   * deliberate zero-rate that should print as "Tax 0.00". The QuickBooks post relies on the same
+   * distinction to decide whether to declare tax at all.
+   */
+  taxRatePercent: number | null;
+  /** Which configured rate produced it, for the inline editor. Null when untaxed. */
+  salesTaxId: number | null;
+  /**
+   * The part of base scope that tax applies to — base-scope lines with `taxable` set. Distinct
+   * from `total`, which includes non-taxable lines like permit fees.
+   */
+  taxableSubtotal: number;
+  /** Tax on base scope alone. 0 when there is no rate. */
+  taxAmount: number;
+  /** Base scope including tax — what a quote with no option groups actually bills. */
+  totalWithTax: number;
   /** Present (non-empty) only when the quote carries alternative option groups. */
   optionTotals: QuoteOptionTotal[];
   /**
@@ -138,6 +166,15 @@ export interface QuoteDto {
    * undecided or when the quote has no options. Cleared on reopen.
    */
   chosenOptionGroup: string | null;
+  /**
+   * QuickBooks sync state, for the estimate list's QB icon (D-4) and the retry prompt.
+   * `qboEstimateId` set with `qboSyncError` set means it posted once and a later attempt failed;
+   * both null means it was never attempted, which is the normal state for a company that is not
+   * connected.
+   */
+  qboEstimateId: string | null;
+  qboSyncedAt: string | null;
+  qboSyncError: string | null;
   blockingFlagCount: number;
 }
 
@@ -167,7 +204,7 @@ export function isFallbackPrice(item: { pricebookCode: string | null }): boolean
   return item.pricebookCode?.startsWith("HD-") === true;
 }
 
-export function flagsFor(item: QuoteLineItem): LineItemFlag[] {
+export function flagsFor(item: LineItemInput): LineItemFlag[] {
   if (item.ambiguousAction) return ["ambiguous"];
   const flags: LineItemFlag[] = [];
   if (item.agentSuggested) flags.push("agent_suggested");
@@ -183,7 +220,7 @@ export function flagsFor(item: QuoteLineItem): LineItemFlag[] {
 }
 
 /** Manually entered total wins; otherwise qty × unit price; otherwise nothing to add. */
-export function effectiveTotal(item: QuoteLineItem): number | null {
+export function effectiveTotal(item: LineItemInput): number | null {
   const total = num(item.totalPrice);
   if (total != null) return total;
   const qty = num(item.quantity);
@@ -210,7 +247,7 @@ export function effectiveTotal(item: QuoteLineItem): number | null {
  * return exactly what `effectiveTotal` does, so the pair cannot drift apart unnoticed.
  */
 export function markedUpPrices(
-  item: QuoteLineItem,
+  item: LineItemInput,
   markupPercent: number
 ): { unitPrice: number | null; totalPrice: number | null } {
   // One labor flag, by design: `is_labor` is the single boundary both the markup feature and
@@ -249,7 +286,7 @@ export function stripMarkup(value: number, markupPercent: number, isLabor = fals
  */
 export type CatalogIndex = Map<string, PricebookItem>;
 
-function productFor(item: QuoteLineItem, catalog?: CatalogIndex): LineItemProduct | null {
+function productFor(item: LineItemInput, catalog?: CatalogIndex): LineItemProduct | null {
   if (!item.pricebookCode || !catalog) return null;
   const row = catalog.get(item.pricebookCode);
   if (!row || row.source !== "HOME_DEPOT") return null;
@@ -266,7 +303,7 @@ function productFor(item: QuoteLineItem, catalog?: CatalogIndex): LineItemProduc
 /** Pricebook names keyed by id, for the priceSource display. */
 export type PricebookNameIndex = Map<number, string>;
 
-function priceSourceFor(item: QuoteLineItem, bookNames?: PricebookNameIndex): string | null {
+function priceSourceFor(item: LineItemInput, bookNames?: PricebookNameIndex): string | null {
   // A technician's own number has no external source — the manually_edited flag carries
   // that signal; the source display stays blank (US8's one exception).
   if (item.manuallyEdited) return null;
@@ -287,8 +324,61 @@ function priceSourceFor(item: QuoteLineItem, bookNames?: PricebookNameIndex): st
  * `bookNames` is display-only (the review screen's price-source label) and never affects a
  * price, so callers that don't have the index simply get `priceSource: null`.
  */
+/**
+ * Exactly what this module reads off a line item, and nothing else (T-49).
+ *
+ * Declared structurally rather than as `QuoteLineItem` so a test fixture can be TYPED instead of
+ * cast to `any`. The casts were not laziness — a fixture had to invent every column of the table
+ * to satisfy the Prisma type — but their cost was that `typecheck:scripts` could not see a DTO
+ * change reach them, which is the one thing that config exists to catch. Numerics are widened to
+ * accept plain numbers as well as Prisma `Decimal`, because that is what the code already does
+ * with them (`num`, `markedUpPrices`) and what a fixture naturally writes.
+ */
+export type LineItemInput = {
+  id: string;
+  description: string;
+  quantity: unknown;
+  unit: string | null;
+  unitPrice: unknown;
+  totalPrice: unknown;
+  pricebookCode: string | null;
+  searchTerm: string | null;
+  optionGroup: string | null;
+  isLabor: boolean;
+  agentSuggested: boolean;
+  manuallyEdited: boolean;
+  ambiguousAction: unknown;
+  sourcePricebookId: number | null;
+  qboItemId: string | null;
+  qboItemName: string | null;
+  taxable: boolean;
+  sortOrder: number;
+};
+
+/** Likewise for the quote itself. */
+export type QuoteInput = {
+  id: string;
+  conversationId: string;
+  status: "DRAFT" | "COMPLETED";
+  createdAt: Date;
+  updatedAt: Date;
+  completedAt: Date | null;
+  markupPercent: unknown;
+  customerId: number | null;
+  customerName: string | null;
+  customerAddress: string | null;
+  customerPhone: string | null;
+  salesTaxId: number | null;
+  taxRatePercent: unknown;
+  chosenOptionGroup: string | null;
+  qboEstimateId: string | null;
+  qboSyncedAt: Date | null;
+  qboSyncError: string | null;
+  lineItems: LineItemInput[];
+};
+
 export function toLineItemDto(
-  item: QuoteLineItem,
+  item: LineItemInput,
   catalog?: CatalogIndex,
   markupPercent = 0,
   bookNames?: PricebookNameIndex
@@ -315,12 +405,13 @@ export function toLineItemDto(
     searchTerm: item.searchTerm ?? null,
     qboItemId: item.qboItemId ?? null,
     qboItemName: item.qboItemName ?? null,
+    taxable: item.taxable,
     sortOrder: item.sortOrder,
   };
 }
 
 export function toQuoteDto(
-  quote: Quote & { lineItems: QuoteLineItem[] },
+  quote: QuoteInput,
   catalog?: CatalogIndex,
   bookNames?: PricebookNameIndex
 ): QuoteDto {
@@ -337,11 +428,37 @@ export function toQuoteDto(
     dtos.filter((d) => !d.optionGroup).reduce((sum, d) => sum + (d.totalPrice ?? 0), 0)
   );
   const groups = [...new Set(dtos.map((d) => d.optionGroup).filter((g): g is string => !!g))];
+
+  // Tax is a SNAPSHOT read off the quote, never a live lookup of the company's current default —
+  // the tax settings card promises that an estimate keeps the rate it was created with, and an
+  // estimate that has already been sent must not silently re-price. Null stays null: it means no
+  // rate was ever configured, which is not the same as a rate of 0% and must not render as one.
+  const taxRatePercent = quote.taxRatePercent == null ? null : Number(quote.taxRatePercent);
+  // Tax applies to the marked-up price, because that is the price being charged.
+  const taxableOf = (ds: LineItemDto[]) =>
+    round2(ds.filter((d) => d.taxable).reduce((sum, d) => sum + (d.totalPrice ?? 0), 0));
+  const taxOn = (amount: number) =>
+    taxRatePercent == null ? 0 : round2((amount * taxRatePercent) / 100);
+
+  const baseDtos = dtos.filter((d) => !d.optionGroup);
+  const taxableSubtotal = taxableOf(baseDtos);
+  const taxAmount = taxOn(taxableSubtotal);
+
   const optionTotals = groups.map((name) => {
-    const total = round2(
-      dtos.filter((d) => d.optionGroup === name).reduce((sum, d) => sum + (d.totalPrice ?? 0), 0)
-    );
-    return { name, total, combinedTotal: round2(baseTotal + total) };
+    const inGroup = dtos.filter((d) => d.optionGroup === name);
+    const total = round2(inGroup.reduce((sum, d) => sum + (d.totalPrice ?? 0), 0));
+    // Tax is computed on base + this option TOGETHER rather than added from two separately
+    // rounded halves: rounding each and summing drifts a cent against the single figure the
+    // customer is charged, and against what QuickBooks computes for the posted estimate.
+    const combinedTax = taxOn(round2(taxableSubtotal + taxableOf(inGroup)));
+    const combinedTotal = round2(baseTotal + total);
+    return {
+      name,
+      total,
+      combinedTotal,
+      taxAmount: combinedTax,
+      combinedTotalWithTax: round2(combinedTotal + combinedTax),
+    };
   });
   return {
     id: quote.id,
@@ -359,8 +476,16 @@ export function toQuoteDto(
     customerAddress: quote.customerAddress ?? null,
     customerPhone: quote.customerPhone ?? null,
     total: baseTotal,
+    taxRatePercent,
+    salesTaxId: quote.salesTaxId ?? null,
+    taxableSubtotal,
+    taxAmount,
+    totalWithTax: round2(baseTotal + taxAmount),
     optionTotals,
     chosenOptionGroup: quote.chosenOptionGroup ?? null,
+    qboEstimateId: quote.qboEstimateId ?? null,
+    qboSyncedAt: quote.qboSyncedAt?.toISOString() ?? null,
+    qboSyncError: quote.qboSyncError ?? null,
     blockingFlagCount: dtos.filter((d) =>
       d.flags.some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
     ).length,

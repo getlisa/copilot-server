@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { payable, optionPayable, taxRowLabel, taxRowAmount } from "./proposalTotals";
 import {
   amountInWords,
   loadLogo,
@@ -134,12 +135,22 @@ export async function buildProposalPdf(input: ProposalInput): Promise<Buffer> {
         );
         doc.moveDown(0.5);
       }
+      // Every contractual figure below is the amount PAYABLE — tax included once a rate applies.
+      // `amountInWords` above a signature line makes this load-bearing: a pre-tax number spelled
+      // out there is what the customer agreed to, whatever the QuickBooks estimate later bills.
+      const taxLabel = taxRowLabel(input);
       if (input.optionTotals?.length) {
-        para(`BASE SCOPE TOTAL: ${amountInWords(input.total)} (${money(input.total)})`, { bold: true });
+        para(`BASE SCOPE TOTAL: ${amountInWords(payable(input))} (${money(payable(input))})`, { bold: true });
+        if (taxLabel)
+          para(`(Base scope ${money(input.total)} + ${taxLabel} ${money(taxRowAmount(input))})`);
         for (const opt of input.optionTotals) {
           doc.moveDown(0.4);
           para(`${opt.name.toUpperCase()} TOTAL: ${amountInWords(opt.total)} (${money(opt.total)})`, { bold: true });
-          para(`Base Scope + ${opt.name} Combined Total: ${money(opt.combinedTotal)}`, { bold: true });
+          para(
+            `Base Scope + ${opt.name} Combined Total: ${money(optionPayable(input, opt))}` +
+              (taxLabel ? ` (includes ${money(opt.taxAmount ?? 0)} sales tax)` : ""),
+            { bold: true }
+          );
         }
         doc.moveDown(0.4);
         para(
@@ -149,10 +160,16 @@ export async function buildProposalPdf(input: ProposalInput): Promise<Buffer> {
             "on all Credit Card payments."
         );
       } else {
+        if (taxLabel)
+          para(
+            `Subtotal: ${money(input.total)} — ${taxLabel}: ${money(taxRowAmount(input))}`,
+            { bold: true }
+          );
         para(
           "COST: All the above work to be completed in a substantial and workmanlike manner in " +
-            `accordance with the scope of work for the sum of: ${amountInWords(input.total)} ` +
-            `(${money(input.total)}). A 3% service fee required on all Credit Card payments.`
+            `accordance with the scope of work for the sum of: ${amountInWords(payable(input))} ` +
+            `(${money(payable(input))})${taxLabel ? ", sales tax included" : ""}. ` +
+            "A 3% service fee required on all Credit Card payments."
         );
       }
       doc.moveDown(0.6);

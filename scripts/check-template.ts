@@ -43,6 +43,8 @@ async function main() {
     "QUOTE from {companyName} {website}",
     "{#lineItems}{description}: {quantity} {unit} @ {unitPrice} = {totalPrice}",
     "{/lineItems}",
+    "Subtotal: {subtotal}",
+    "Sales tax ({taxRatePercent}%): {taxAmount}",
     "Total: {total}",
     "{footerTerms}",
   ]);
@@ -71,18 +73,28 @@ async function main() {
         totalPrice: 17, pricebookCode: "B1:X", product: null, priceEstimated: false,
         estimateLink: null, priceSource: "Supplier A", isLabor: false, flags: [],
         ambiguousAction: null, optionGroup: null, sortOrder: 0,
-        searchTerm: null, qboItemId: null, qboItemName: null,
+        searchTerm: null, qboItemId: null, qboItemName: null, taxable: true,
       },
       {
         id: "l2", description: "Standard labor", quantity: 3, unit: "hr", unitPrice: 105,
         totalPrice: 315, pricebookCode: null, product: null, priceEstimated: false,
         estimateLink: null, priceSource: null, isLabor: true, flags: [],
         ambiguousAction: null, optionGroup: null, sortOrder: 1,
-        searchTerm: null, qboItemId: null, qboItemName: null,
+        searchTerm: null, qboItemId: null, qboItemName: null, taxable: true,
       },
     ],
     total: 332,
+    // A real taxed quote, not a zeroed placeholder: 332 taxable at 9.1% is 30.21, so a template
+    // that renders tax is actually exercised rather than passing on empty strings.
+    taxRatePercent: 9.1,
+    salesTaxId: 7,
+    taxableSubtotal: 332,
+    taxAmount: 30.21,
+    totalWithTax: 362.21,
     optionTotals: [],
+    qboEstimateId: null,
+    qboSyncedAt: null,
+    qboSyncError: null,
     blockingFlagCount: 0,
   };
   const branding: InvoiceBranding = {
@@ -104,7 +116,14 @@ async function main() {
     text.includes("20A breaker: 2 EA @ $8.50 = $17.00"),
     text.includes("Standard labor: 3 hr @ $105.00 = $315.00"),
   ], [true, true]);
-  expect("total formatted", text.includes("Total: $332.00"), true);
+  // `{total}` is the amount PAYABLE — tax included. Deliberate: client templates are .docx
+  // files in S3 that already say "Total: {total}" beside a signature line, and no migration can
+  // reach inside them, so leaving it pre-tax would have turned every existing template into a
+  // silent undercharge the day a company configured a rate. `{subtotal}` carries the pre-tax
+  // figure for a template that wants the breakdown.
+  expect("total is tax-inclusive", text.includes("Total: $362.21"), true);
+  expect("subtotal is the pre-tax figure", text.includes("Subtotal: $332.00"), true);
+  expect("tax row renders", text.includes("Sales tax (9.1%): $30.21"), true);
   expect("unset branding renders blank, not a placeholder", text.includes("{footerTerms}"), false);
 
   if (failures > 0) {

@@ -67,6 +67,8 @@ export function mapEstimateQuote(input: ProposalInput): EstimateQuote {
     code: l.code ?? (l.unmatched ? "PENDING" : ""),
     description: l.description,
     kind: (l.isLabor ? "labor" : "material") as EstimateQuote["lineItems"][number]["kind"],
+    // Falls back to the old kind-derived guess only when the caller did not say.
+    taxable: l.taxable ?? !l.isLabor,
     quantity: l.quantity ?? 1,
     unit: l.unit ?? "EA",
     unitPrice: l.unitPrice ?? 0,
@@ -82,8 +84,13 @@ export function mapEstimateQuote(input: ProposalInput): EstimateQuote {
     lineItems,
     materialsServicesSubtotal: Math.round((input.total - laborSubtotal) * 100) / 100,
     laborSubtotal,
-    taxOther: 0,
-    total: input.total,
+    // Was hardcoded 0, which both document builders then suppressed on falsy — so tax was
+    // invisible on the estimate PDF and the estimate email no matter what the quote carried.
+    taxOther: input.taxAmount ?? 0,
+    taxRatePercent: input.taxRatePercent ?? null,
+    // `total` is what the documents print as the amount payable and spell out in words above
+    // the signature, so it has to be the taxed figure once a rate applies.
+    total: input.totalWithTax ?? input.total,
     currency: "USD",
     assumptions: input.assumptions?.length
       ? input.assumptions
@@ -275,7 +282,12 @@ export async function buildEstimateStyleDocx(input: ProposalInput): Promise<Buff
     borders: NO_BORDERS,
     rows: [
       totalRow("Subtotal", money(subtotal)),
-      ...(quote.taxOther ? [totalRow("Tax / Other", money(quote.taxOther))] : []),
+      // On rate presence, not on a non-zero amount: a configured 0% must still print.
+      ...(quote.taxRatePercent != null
+        ? [totalRow(`Sales tax (${quote.taxRatePercent}%)`, money(quote.taxOther))]
+        : quote.taxOther
+          ? [totalRow("Tax / Other", money(quote.taxOther))]
+          : []),
       totalRow("Total", money(quote.total)),
       totalRow("Net Amount", money(quote.total)),
     ],

@@ -95,11 +95,36 @@ export async function buildQuoteDocx(quote: QuoteDto, branding?: InvoiceBranding
           ],
         })
     ),
+    // With tax, the untaxed figure is labelled Subtotal and Total is the amount payable —
+    // printing "Total" above a tax line and a larger number below it reads as a mistake.
     new TableRow({
-      children: [cell("Total", true), cell(""), cell(""), cell(money(quote.total), true)],
+      children: [
+        cell(quote.taxRatePercent == null ? "Total" : "Subtotal", true),
+        cell(""),
+        cell(""),
+        cell(money(quote.total), true),
+      ],
     }),
+    // Rendered only when a rate was configured. A quote with no rate shows no tax line at all,
+    // rather than "Tax 0.00" — that would state a zero rate nobody chose.
+    ...(quote.taxRatePercent == null
+      ? []
+      : [
+          new TableRow({
+            children: [
+              cell(`Sales tax (${quote.taxRatePercent}%)`, true),
+              cell(""),
+              cell(""),
+              cell(money(quote.taxAmount), true),
+            ],
+          }),
+          new TableRow({
+            children: [cell("Total", true), cell(""), cell(""), cell(money(quote.totalWithTax), true)],
+          }),
+        ]),
     // Option groups are mutually exclusive alternatives: their totals are shown per option
-    // (base + option), never folded into the total above.
+    // (base + option), never folded into the total above. Tax-inclusive when a rate applies,
+    // so the figures beside each option are comparable with the Total above them.
     ...quote.optionTotals.map(
       (opt) =>
         new TableRow({
@@ -107,7 +132,10 @@ export async function buildQuoteDocx(quote: QuoteDto, branding?: InvoiceBranding
             cell(`${opt.name} (with base scope)`, true),
             cell(""),
             cell(""),
-            cell(money(opt.combinedTotal), true),
+            cell(
+              money(quote.taxRatePercent == null ? opt.combinedTotal : opt.combinedTotalWithTax),
+              true
+            ),
           ],
         })
     ),
