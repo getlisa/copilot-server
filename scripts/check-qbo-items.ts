@@ -1,6 +1,6 @@
 import assert from "assert";
 import { autoItemName } from "../src/lib/qbo";
-import { itemKey, customerDisplayName } from "../src/lib/qboIngest";
+import { itemKey, customerDisplayName, taxGroupEffectiveRate } from "../src/lib/qboIngest";
 
 /**
  * Pins the item-identity contract behind "sync an item once, then reuse its id".
@@ -69,5 +69,58 @@ assert.strictEqual(customerDisplayName("Acme\nWest"), "Acme West", "newlines are
 assert.strictEqual(customerDisplayName("  Acme   West  "), "Acme West", "runs of space collapse");
 assert.strictEqual(customerDisplayName(""), "", "empty stays empty so the caller can refuse it");
 assert.strictEqual(customerDisplayName("x".repeat(160)).length, 100, "capped at QBO's limit");
+
+// ---- a tax code's effective rate is the CASCADE of its group, not any one member ----
+// Real sandbox data (company 9): the code "Tucson" is a group of AZ State tax 7.1% and Tucson
+// City 2%. Matching a code to a rate of the same name would have charged 2% instead of 9.1% —
+// a 7.1-point understatement, in customer money, with nothing to reveal it.
+{
+  const rates = new Map([["1", 7.1], ["2", 2], ["3", 8]]);
+  const on = (value: string, order = 0) => ({
+    TaxRateRef: { value },
+    TaxTypeApplicable: "TaxOnAmount",
+    TaxOrder: order,
+  });
+
+  assert.strictEqual(
+    taxGroupEffectiveRate([on("1"), on("2")], rates),
+    9.1,
+    "Tucson = AZ State 7.1 + Tucson City 2"
+  );
+  assert.strictEqual(taxGroupEffectiveRate([on("3")], rates), 8, "California = 8");
+  assert.strictEqual(taxGroupEffectiveRate([], rates), 0, "an empty group charges nothing");
+
+  // A member referring to a rate we do not have is skipped, not treated as zero-and-counted:
+  // silently charging less is worse than charging the part we can prove.
+  assert.strictEqual(taxGroupEffectiveRate([on("1"), on("999")], rates), 7.1);
+
+  // Compounding: 10% then 5% applied on net-plus-tax is 15.5%, not 15%. Every sandbox rate is
+  // TaxOnAmount so this path is unexercised there — which is exactly why it needs a test.
+  const compound = new Map([["a", 10], ["b", 5]]);
+  assert.strictEqual(
+    taxGroupEffectiveRate(
+      [
+        { TaxRateRef: { value: "a" }, TaxTypeApplicable: "TaxOnAmount", TaxOrder: 0 },
+        { TaxRateRef: { value: "b" }, TaxTypeApplicable: "TaxOnAmountPlusTax", TaxOrder: 1 },
+      ],
+      compound
+    ),
+    15.5,
+    "TaxOnAmountPlusTax compounds on net + tax so far"
+  );
+
+  // TaxOrder decides the cascade, so an out-of-order list must not change the answer.
+  assert.strictEqual(
+    taxGroupEffectiveRate(
+      [
+        { TaxRateRef: { value: "b" }, TaxTypeApplicable: "TaxOnAmountPlusTax", TaxOrder: 1 },
+        { TaxRateRef: { value: "a" }, TaxTypeApplicable: "TaxOnAmount", TaxOrder: 0 },
+      ],
+      compound
+    ),
+    15.5,
+    "members are cascaded in TaxOrder, whatever order they arrive in"
+  );
+}
 
 console.log("check-qbo-items: OK");

@@ -163,18 +163,77 @@ async function ingestItems(conn: QboConnection, companyId: number): Promise<numb
 
 // ---------- sales tax: entity + sales_tax_qb ----------
 
-interface QboTaxCodeRow { Id: string; Name?: string; Taxable?: boolean; Active?: boolean }
-interface QboTaxRateRow { Id: string; Name?: string; RateValue?: number | string; Active?: boolean }
+interface QboTaxRateRow {
+  Id: string;
+  Name?: string;
+  RateValue?: number | string;
+  Active?: boolean;
+}
+
+interface QboTaxRateDetail {
+  TaxRateRef?: { value?: string; name?: string };
+  /** "TaxOnAmount" (on the net) or "TaxOnAmountPlusTax" (compounded on net + tax so far). */
+  TaxTypeApplicable?: string;
+  TaxOrder?: number;
+}
+
+interface QboTaxCodeRow {
+  Id: string;
+  Name?: string;
+  /** True when this code is a GROUP of rates. False for the pseudo codes TAX and NON. */
+  TaxGroup?: boolean;
+  /** "False or null means non-taxable. Always true, except for the pseudo taxcode NON." */
+  Taxable?: boolean;
+  Active?: boolean;
+  SalesTaxRateList?: { TaxRateDetail?: QboTaxRateDetail[] };
+}
 
 /**
- * Ingest QuickBooks tax into `sales_tax` (the rate CLARA applies) and `sales_tax_qb`.
+ * The percentage a tax CODE actually charges.
  *
- * TaxRate carries the percentage; TaxCode is what a transaction line references. They are
- * separate entities in Intuit's model, so a single CLARA rate can hold one `_qb` row of each —
- * which is why `qboType` is part of that table's key.
+ * A code is what a transaction line references, and in QuickBooks it is usually a group of
+ * rates — so the rate that matters is the group's, not any one member's. Measured on the
+ * sandbox: the code "Tucson" is AZ State tax 7.1% + Tucson City 2%, i.e. 9.1%. Matching a code
+ * to a rate of the same name would have linked it to Tucson City alone and understated tax by
+ * 7.1 points.
  *
- * Rates arrive as candidates, never as the default. Which rate an estimate uses is a decision an
- * admin makes in tax settings; importing one silently would start taxing every new estimate the
+ * Members are cascaded in `TaxOrder`: "TaxOnAmount" adds to the net, while
+ * "TaxOnAmountPlusTax" compounds on the net plus the tax accumulated before it. Every rate in
+ * the sandbox is TaxOnAmount, so the cascade is a plain sum there — it is implemented properly
+ * anyway, because getting it wrong is silent and lands in customer money.
+ */
+export function taxGroupEffectiveRate(
+  details: QboTaxRateDetail[],
+  rateById: Map<string, number>
+): number {
+  let effective = 0;
+  const ordered = [...details].sort((a, b) => (a.TaxOrder ?? 0) - (b.TaxOrder ?? 0));
+  for (const d of ordered) {
+    const value = rateById.get(String(d.TaxRateRef?.value ?? ""));
+    if (value == null || !Number.isFinite(value)) continue;
+    effective +=
+      d.TaxTypeApplicable === "TaxOnAmountPlusTax" ? value * (1 + effective / 100) : value;
+  }
+  // Four decimals: the column's precision, and enough for a compounded cascade.
+  return Math.round(effective * 10000) / 10000;
+}
+
+/**
+ * Ingest QuickBooks tax into `sales_tax` (what CLARA applies) and `sales_tax_qb`.
+ *
+ * Driven by tax CODES, because a code is the thing a transaction line can reference. Each code
+ * becomes one CLARA rate carrying the group's effective percentage, and gets `_qb` rows for the
+ * code itself plus every rate it is built from — which is why `qboType` is part of that table's
+ * key, and what lets a later feature reconstruct the breakdown.
+ *
+ * Skipped on purpose:
+ *  - the pseudo codes TAX and NON (`TaxGroup: false`) — they carry no rate of their own;
+ *  - non-taxable codes;
+ *  - groups with no members, like the sandbox's "CustomSalesTax" — importing a 0% candidate
+ *    named after a real jurisdiction is worse than not offering it.
+ *
+ * Rates arrive as candidates, never as the default. Which rate an estimate uses is an admin's
+ * decision in tax settings; importing one silently would start taxing every new estimate the
  * moment someone connected QuickBooks.
  */
 async function ingestSalesTax(
@@ -183,68 +242,80 @@ async function ingestSalesTax(
   realmId: string
 ): Promise<{ taxCodes: number; taxRates: number }> {
   const rates = await queryAll<QboTaxRateRow>(conn, "TaxRate");
+  const rateById = new Map<string, number>();
+  const rateNameById = new Map<string, string>();
   for (const r of rates) {
     const value = r.RateValue == null ? null : Number(r.RateValue);
-    // A non-finite rate is skipped rather than stored — this becomes a percentage applied to
-    // real money, and NaN would propagate silently through every total.
     if (value == null || !Number.isFinite(value)) continue;
-    const name = str(r.Name) ?? `TaxRate ${id(r.Id)}`;
+    rateById.set(id(r.Id), value);
+    rateNameById.set(id(r.Id), str(r.Name) ?? `TaxRate ${id(r.Id)}`);
+  }
+
+  const codes = await queryAll<QboTaxCodeRow>(conn, "TaxCode");
+  let imported = 0;
+  for (const c of codes) {
+    if (c.Active === false || c.Taxable === false || c.TaxGroup !== true) continue;
+    const details = c.SalesTaxRateList?.TaxRateDetail ?? [];
+    if (details.length === 0) continue;
+
+    const effective = taxGroupEffectiveRate(details, rateById);
+    const name = str(c.Name) ?? `TaxCode ${id(c.Id)}`;
 
     const existing = await prisma.salesTax.findUnique({
       where: { companyId_name: { companyId, name } },
       select: { id: true },
     });
-    const salesTaxId =
-      existing?.id ??
-      (
-        await prisma.salesTax.create({
-          data: { companyId, name, ratePercent: value, active: r.Active !== false },
-        })
-      ).id;
+    // An existing rate has its percentage refreshed — a jurisdiction changing its rate is the
+    // normal case — but `isDefault` is never touched here. That is the admin's choice.
+    const salesTaxId = existing
+      ? (
+          await prisma.salesTax.update({
+            where: { id: existing.id },
+            data: { ratePercent: effective, active: true },
+          })
+        ).id
+      : (
+          await prisma.salesTax.create({
+            data: { companyId, name, ratePercent: effective },
+          })
+        ).id;
 
-    const qb = { name, raw: r as object, syncedAt: new Date() };
+    const codeQb = { name, raw: c as object, syncedAt: new Date() };
     await prisma.salesTaxQb.upsert({
       where: {
-        companyId_realmId_qboType_qboId: {
-          companyId,
-          realmId,
-          qboType: "TaxRate",
-          qboId: id(r.Id),
-        },
+        companyId_realmId_qboType_qboId: { companyId, realmId, qboType: "TaxCode", qboId: id(c.Id) },
       },
-      create: { salesTaxId, companyId, realmId, qboType: "TaxRate", qboId: id(r.Id), ...qb },
-      update: qb,
+      create: { salesTaxId, companyId, realmId, qboType: "TaxCode", qboId: id(c.Id), ...codeQb },
+      update: codeQb,
     });
+
+    // The members, so the breakdown behind the number is recoverable without a re-sync.
+    for (const d of details) {
+      const rid = String(d.TaxRateRef?.value ?? "");
+      if (!rateById.has(rid)) continue;
+      const rateQb = {
+        name: rateNameById.get(rid) ?? rid,
+        raw: d as object,
+        syncedAt: new Date(),
+      };
+      await prisma.salesTaxQb.upsert({
+        where: {
+          companyId_realmId_qboType_qboId: {
+            companyId,
+            realmId,
+            qboType: "TaxRate",
+            qboId: rid,
+          },
+        },
+        create: { salesTaxId, companyId, realmId, qboType: "TaxRate", qboId: rid, ...rateQb },
+        update: rateQb,
+      });
+    }
+    imported++;
   }
 
-  // Tax codes attach to a rate of the same name where one exists; a code with no matching rate
-  // (the well-known TAX / NON, for instance) has no percentage of its own to record.
-  const codes = await queryAll<QboTaxCodeRow>(conn, "TaxCode");
-  let codesLinked = 0;
-  for (const c of codes) {
-    const name = str(c.Name) ?? `TaxCode ${id(c.Id)}`;
-    const rate = await prisma.salesTax.findUnique({
-      where: { companyId_name: { companyId, name } },
-      select: { id: true },
-    });
-    if (!rate) continue;
-    const qb = { name, raw: c as object, syncedAt: new Date() };
-    await prisma.salesTaxQb.upsert({
-      where: {
-        companyId_realmId_qboType_qboId: {
-          companyId,
-          realmId,
-          qboType: "TaxCode",
-          qboId: id(c.Id),
-        },
-      },
-      create: { salesTaxId: rate.id, companyId, realmId, qboType: "TaxCode", qboId: id(c.Id), ...qb },
-      update: qb,
-    });
-    codesLinked++;
-  }
-
-  return { taxCodes: codesLinked, taxRates: rates.length };
+  logger.info("QBO sales tax ingested", { companyId, codes: imported, rates: rateById.size });
+  return { taxCodes: imported, taxRates: rateById.size };
 }
 
 // ---------- accounts (fixes G10: no more "first Income account found") ----------
