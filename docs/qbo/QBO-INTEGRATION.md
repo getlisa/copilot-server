@@ -934,3 +934,77 @@ One decision each, then one owner:
 | T-36 | CS | `addItem` returns `toLineItemDto(item, catalog, markup)` with no tax context (`quote.controller.ts:669`), so a just-added line renders untaxed against a quote showing 8.25% until the next refetch. | TODO |
 | T-37 | CS | `admin.controller.ts:103-105` reads `companies` and `company_configs` with no `select`, so Prisma requests every scalar column and the console 500s the moment a new schema ships against an unmigrated DB. Migration must precede the image, again. | TODO |
 | T-38 | BOTH | Frozen state for Screens 3-5: `QuoteInvoiceTab` already threads `frozen`, and the server rejects writes on COMPLETED quotes — the wireframe describes no read-only variant. | TODO |
+
+---
+
+## 12. Finalised architecture: entity + `<entity>_qb` (2026-09-08)
+
+Product owner's decision. **CLARA owns the entity; a sibling `_qb` row holds what QuickBooks
+knows about it.**
+
+| Entity | `_qb` sibling | Notes |
+|---|---|---|
+| `customers` | `customer_qb` | one row per customer **per realm** |
+| `sales_tax` | `sales_tax_qb` | `qboType` distinguishes TaxRate (carries the %) from TaxCode (what a line references) |
+| `pricebook_items` | `qbo_item_links` | already followed this pattern; name kept because it also links lines with **no** pricebook row |
+| — | `raw_item_qb`, `raw_account_qb` | reference-only mirrors; accounts have no CLARA-side counterpart |
+
+Three reasons the split earns its keep: the entity must work for a company with no accounting
+integration at all; a QuickBooks id is only meaningful inside the realm that issued it; and
+re-syncing Intuit's data must never be able to lose the record itself.
+
+### Why "which company is connected to which CRM" is two tables
+
+`crm_connections` already exists and covers the field-service CRMs (`SERVICETITAN`, `BUILDOPS`,
+`HOUSECALL_PRO`, `SERVICETRADE`). It **cannot** hold QuickBooks:
+
+- it is owned by the **platform backend**, and this schema already records that extending its
+  `crm_provider` enum breaks that service's generated client on read;
+- it is `@unique` on `company_id`, so a company on ServiceTitan could not also connect QBO.
+
+`qbo_connections` is the QuickBooks counterpart. Same architecture, split by ownership — not an
+oversight, and not something to "unify" later without the platform team.
+
+### Ingestion rules
+
+- Customers match on the **QBO id first**, so a rename in QuickBooks moves the existing row
+  rather than creating a second customer. The name is the fallback, and it is what adopts
+  customers CLARA already had before the company connected.
+- Our own email / phone / address are filled **only where empty**. A technician who corrected a
+  phone number must not have it overwritten by whatever the books hold.
+- Tax arrives as **candidate rates, never as the default**. Importing one silently would start
+  taxing every new estimate the moment someone connected QuickBooks.
+- Exactly **one default rate per company**, enforced by a partial unique index *and* moved inside
+  a transaction. Two defaults means a new estimate picking one arbitrarily — arbitrarily, in money.
+- **"No default" is distinct from "0%"**: untaxed-by-omission vs a deliberate zero-rate
+  jurisdiction. The server uses the difference to decide whether to declare tax to QuickBooks
+  (D-14).
+
+### Ingestion proved against the sandbox, 2026-09-08
+
+Ran for company 9 (realm `9341455474664217`) before the entity refactor:
+
+```
+customers 39   items 43   taxCodes 5   taxRates 3   accounts 90 (21 Income)
+tax rates:  AZ State tax 7.1%   California 8%   Tucson City 2%
+tax codes:  California, CustomSalesTax, NON, TAX, Tucson
+item taxability: 34 taxable, 9 non-taxable, 0 unknown
+```
+
+Re-sync after the entity migration — that run wrote to the now-dropped `raw_*_qb` tables.
+
+### Verification correction — the frontend typecheck was vacuous
+
+`technician-copilot/tsconfig.json` has `"files": []` and only project **references**, so
+`npx tsc --noEmit` compiles **nothing**. Every "typecheck clean" claimed for that repo in this
+document's earlier entries was meaningless.
+
+- The real check is **`tsc -b`**, now available as `npm run typecheck`.
+- It is **not** wired into `build`: it also reports two pre-existing errors in `src/lib/api.ts`
+  (an undiscriminated event union, present on `main`). Asserting them away would hide a real
+  typing bug; once whoever owns that code fixes them, wire the gate in.
+- `vite build` does fail on a missing *value* export, so those checks were not worthless — but
+  esbuild strips types without checking them, so a green build says nothing about types.
+
+Together with the backend's excluded `scripts/` directory (§11.2), that is **two** verification
+gates in this codebase that reported success while checking nothing. Both are now real.
