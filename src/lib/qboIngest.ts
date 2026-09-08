@@ -117,12 +117,24 @@ async function ingestCustomers(
       where: { companyId_realmId_qboId: { companyId, realmId, qboId } },
       select: { customerId: true },
     });
-    const byName = linked
-      ? null
-      : await prisma.customer.findUnique({
-          where: { companyId_name: { companyId, name: displayName } },
+    // The name fallback exists to adopt a customer CLARA created locally before it synced. Now
+    // that names repeat across parents, a name alone can match more than one row — and adopting
+    // the wrong one re-points every quote that bills it. So it adopts only when the match is
+    // UNAMBIGUOUS; two candidates means create a fresh row and let pass 2 sort out the parent.
+    const nameMatches = linked
+      ? []
+      : await prisma.customer.findMany({
+          where: { companyId, name: displayName, isDeleted: false },
           select: { id: true },
+          take: 2,
         });
+    if (nameMatches.length > 1)
+      logger.info("QBO customer name matches more than one local customer; not adopting", {
+        companyId,
+        name: displayName,
+        qboId,
+      });
+    const byName = nameMatches.length === 1 ? nameMatches[0] : null;
 
     // The name fallback may adopt a customer that is ALREADY linked to a different QuickBooks
     // customer in this realm — rename "Acme" to "Acme LLC" there, create a new "Acme", and the
@@ -153,9 +165,11 @@ async function ingestCustomers(
         await prisma.customer.create({
           data: {
             companyId,
-            // Suffixed when the plain name is taken by a differently-linked customer: the
-            // (company, name) unique would otherwise reject the row and abort the sync.
-            name: adopt === null && byName ? `${displayName} (${qboId})` : displayName,
+            // Suffixed when the plain name is taken by a differently-linked customer at the
+            // SAME level: the (company, parent, name) unique would otherwise reject the row and
+            // abort the sync. Parents are linked in pass 2, so at this point every new row is
+            // still parent-less and a same-name sibling is a real collision.
+            name: adopt === null && nameMatches.length > 0 ? `${displayName} (${qboId})` : displayName,
             email,
             phone,
             address,
@@ -282,6 +296,29 @@ async function linkParents(companyId: number, realmId: string, rows: QboCustomer
     // self-referential and a cycle here would make any later hierarchy walk non-terminating.
     if (childId === parentId) continue;
     await prisma.customer.update({ where: { id: childId }, data: { parentId } });
+
+    // Heal the suffix pass 1 had to add. Two jobs called "Building 1" under different properties
+    // both arrive parent-less, so the second collides on (company, NULL, name) and is stored as
+    // "Building 1 (62)". Once the parent is known that collision is gone — and without this the
+    // suffix would stick forever, because every later sync matches on qboId and never revisits
+    // the name. Best-effort: a name still taken under the new parent simply keeps its suffix.
+    const suffix = new RegExp(` \\(${id(r.Id)}\\)$`);
+    const row = await prisma.customer.findUnique({ where: { id: childId }, select: { name: true } });
+    if (row && suffix.test(row.name)) {
+      const plain = row.name.replace(suffix, "");
+      const clash = await prisma.customer.findFirst({
+        where: { companyId, parentId, name: plain, id: { not: childId }, isDeleted: false },
+        select: { id: true },
+      });
+      if (!clash) {
+        await prisma.customer.update({ where: { id: childId }, data: { name: plain } });
+        logger.info("Dropped the disambiguating suffix once the parent was known", {
+          companyId,
+          customerId: childId,
+          name: plain,
+        });
+      }
+    }
   }
   logger.info("Linked QBO sub-customers to their parents", {
     companyId,
@@ -1220,11 +1257,23 @@ export async function createCustomer(
   // it, and repeating a customer's email into a log line is the leak, not the help.
   if (email && !EMAIL_OK.test(email)) throw new UserFacingError("That email address is not valid");
 
-  // Matched the way the picker searches. A row hidden from search (inactive or soft-deleted)
-  // used to refuse the name while being absent from the list it told the technician to pick
-  // from — a dead end with no third option on that screen. A hidden match is revived instead.
-  const existing = await prisma.customer.findUnique({
-    where: { companyId_name: { companyId, name } },
+  // The parent is resolved BEFORE anything else, because it scopes the duplicate check below and
+  // because a bad one should fail with a message about the parent rather than leave a half-made
+  // customer behind.
+  const parent = await resolveParent(companyId, input.parentId ?? null, conn);
+  const parentId = parent?.customerId ?? null;
+
+  // Scoped to the same parent. QuickBooks' DisplayName is SIBLING-unique, not realm-unique —
+  // proved against the sandbox, which accepted "Mark Cho:Building 1" while
+  // "Mahee Zentrades:Building 1" already existed. An unscoped check refused a second
+  // "Building 1" that QuickBooks would have taken, and the technician was told to pick the
+  // existing one, which is a different building on a different site.
+  //
+  // A row hidden from search (inactive or soft-deleted) still matches: it used to refuse the
+  // name while being absent from the list it told the technician to pick from — a dead end with
+  // no third option on that screen. A hidden match is revived instead.
+  const existing = await prisma.customer.findFirst({
+    where: { companyId, parentId, name },
     select: { id: true, isActive: true, isDeleted: true },
   });
   if (existing?.isActive && !existing.isDeleted)
@@ -1232,11 +1281,10 @@ export async function createCustomer(
       `"${name}" is already one of your customers — pick them from the list instead`
     );
   if (existing) {
-    // The parent and the address the technician just entered are applied to the revived row too.
-    // Reviving used to flip the flags and return, silently discarding both — so a sub-customer
-    // whose name had been used before came back as a root with the old address, and nothing on
-    // screen said so.
-    const revivedParent = await resolveParent(companyId, input.parentId ?? null, conn);
+    // The address the technician just entered is applied to the revived row too. Reviving used to
+    // flip the flags and return, silently discarding it — so a customer whose name had been used
+    // before came back with the old address and nothing on screen said so. The parent already
+    // matches by construction: `existing` was looked up under it.
     const revivedAddr = await parseAddress(input.address);
     const revived = await prisma.customer.update({
       where: { id: existing.id },
@@ -1244,7 +1292,6 @@ export async function createCustomer(
         isActive: true,
         isDeleted: false,
         updatedBy: null,
-        ...(revivedParent ? { parentId: revivedParent.customerId } : {}),
         ...(str(input.address)
           ? {
               address: str(input.address),
@@ -1265,10 +1312,6 @@ export async function createCustomer(
     return { customerId: revived.id, name, qboId: null };
   }
 
-  // A parent is resolved BEFORE anything is written, so a bad one fails with a message about the
-  // parent rather than leaving a half-made customer behind.
-  const parent = await resolveParent(companyId, input.parentId ?? null, conn);
-
   // Structure the typed address so QuickBooks gets components rather than a line of prose. The
   // freeform text is stored either way — the parse is an addition, never a replacement, and it
   // degrades to nulls rather than failing the create.
@@ -1281,7 +1324,7 @@ export async function createCustomer(
       email,
       phone: str(input.phone),
       address: str(input.address),
-      parentId: parent?.customerId ?? null,
+      parentId,
       addressLine1: parsed.line1,
       addressLine2: parsed.line2,
       city: parsed.city,
@@ -1469,8 +1512,11 @@ export async function ensureQboCustomer(
       "This quote has no customer. Choose or add one on the estimate before sending it to QuickBooks."
     );
   const customer =
-    (await prisma.customer.findUnique({
-      where: { companyId_name: { companyId, name } },
+    // Scoped to top-level: this path has only a free-text name off the quote, no parent, so the
+    // customer it adopts or creates is a root one. Without the scope it could adopt a JOB that
+    // happens to share the name with an unrelated property's building.
+    (await prisma.customer.findFirst({
+      where: { companyId, parentId: null, name },
       select: { id: true },
     })) ??
     (await prisma.customer.create({

@@ -1233,3 +1233,47 @@ person to run because it is the documented point of no return — after it, roll
 requires re-adding the two columns first, and that recovery is in the file's header. The three
 `raw_*` tables it drops are `app_user`-owned; only the two column drops need master credentials.
 `raw_item_qb` and `raw_account_qb` are deliberately kept, and the SQL asserts they survive.
+
+### 2026-09-08 — Phase 2 applied, and the premise that turned out to be wrong
+
+**Phase 2 applied** — 6/6 statements, credentialed revision `:103` deregistered on exit. Verified
+as `app_user`: `qbo_customer_id` and `qbo_customer_name` gone, the three superseded mirrors
+dropped, and — the check that matters — `raw_item_qb` and `raw_account_qb` still present. A DROP
+typo there would have been silent until every estimate started creating duplicate items. A quote
+still reads (3 lines, `taxable` populated), 39 customers, 2 rates, `/health` 200.
+
+Rolling back to `:98` now requires re-adding the two columns first; the recipe is in
+`docs/sql/phase2.sql`'s header.
+
+**Finding 14 probed, and the answer was the inconvenient one.** The open question was whether
+QuickBooks' `DisplayName` is unique across the whole realm or only among siblings — the premise
+`customers.@@unique([companyId, name])` rested on. One call settled it: posting `Building 1` with
+`ParentRef` to a *different* parent, while `Mahee Zentrades:Building 1` already existed, **was
+accepted** as `Mark Cho:Building 1` (probe customer deactivated afterwards).
+
+So DisplayName is **sibling**-unique, and the key was too strict — a technician adding
+"Building 1" to a second property was told it already existed, when it is a different building on
+a different site. Fixed in **Phase 3**:
+
+- `UNIQUE NULLS NOT DISTINCT (company_id, parent_id, name)` replaces `(company_id, name)`.
+  `NULLS NOT DISTINCT` is the load-bearing half: every root customer has `parent_id IS NULL`, and
+  Postgres compares NULLs as distinct by default, so a plain three-column unique would allow two
+  top-level "Acme"s and lose the guarantee exactly where it matters most. Postgres 17.6 supports
+  it; Prisma cannot express it, so `schema.prisma` records the divergence in a comment — the same
+  arrangement `sales_tax_one_default_per_company` already has.
+- `createCustomer` resolves the parent **first** and scopes the duplicate check to it.
+- `ensureQboCustomer`'s legacy free-text path is scoped to `parentId: null`, so it cannot adopt a
+  *job* that happens to share a name with an unrelated property's building.
+- The ingest name fallback adopts only when the match is **unambiguous**. Names repeat across
+  parents now, so a single name can match two rows, and adopting the wrong one re-points every
+  quote that bills it.
+- Pass 2 **heals the disambiguating suffix**. Two jobs called "Building 1" both arrive parent-less
+  in pass 1, so the second is stored as "Building 1 (62)"; once the parent is known that collision
+  is gone, and without this the suffix would stick forever because every later sync matches on
+  `qboId` and never revisits the name.
+
+Verified before applying: zero collisions under the new key, zero names already carrying a suffix.
+The SQL asserts `indnullsnotdistinct` on the created index rather than trusting the DDL ran.
+
+**Also fixed:** `build-runner.py` hardcoded `PHASE1B_APPLIED`, so the Phase 2 run announced the
+wrong migration in its own success line. The label is derived from the filename now.

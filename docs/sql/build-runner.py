@@ -67,6 +67,7 @@ RUNNER = """// The app's URL points at app_user, which cannot ALTER a postgres-o
 }
 const { PrismaClient } = require('@prisma/client');
 const S = __STMTS__;
+const LABEL = __LABEL__;
 (async () => {
   const p = new PrismaClient();
   console.log('statements:', S.length);
@@ -82,7 +83,7 @@ const S = __STMTS__;
     }
   }
   await p.$disconnect();
-  console.log('PHASE1B_APPLIED');
+  console.log(LABEL + '_APPLIED');
 })().catch((e) => { console.error('ERR', e.message); process.exit(1); });
 """
 
@@ -91,5 +92,9 @@ if __name__ == "__main__":
     stmts = statements(open(sql_path).read())
     if not stmts:
         raise SystemExit(f"no statements found in {sql_path}")
-    open(out_path, "w").write(RUNNER.replace("__STMTS__", json.dumps(stmts)))
+    # Derive the success label from the file, so a run can never announce the wrong migration.
+    label = re.sub(r"[^A-Za-z0-9]", "_", sql_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]).upper()
+    open(out_path, "w").write(
+        RUNNER.replace("__STMTS__", json.dumps(stmts)).replace("__LABEL__", json.dumps(label))
+    )
     print("statements:", len(stmts))
