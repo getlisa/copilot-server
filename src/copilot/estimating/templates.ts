@@ -90,7 +90,28 @@ export function templateData(quote: QuoteDto, branding: InvoiceBranding) {
     footerTerms: branding.footerTerms ?? "",
     date: new Date(quote.createdAt).toLocaleDateString("en-US", { dateStyle: "medium" }),
     status: quote.status,
-    total: money(quote.total),
+    /**
+     * `{total}` is the amount PAYABLE — tax included once a rate applies.
+     *
+     * This is a deliberate redefinition, and the alternative was worse. Client templates are
+     * uploaded .docx files sitting in S3; there is no migration path that can reach inside one
+     * and add a tax row. Every one of them already says "Total: {total}" next to a signature
+     * line, so leaving `{total}` pre-tax would silently turn each into an undercharge the moment
+     * a company configured a rate. Redefining it keeps every existing template correct with no
+     * re-upload, and `{subtotal}` is there for a template that wants to show the breakdown.
+     */
+    total: money(quote.taxRatePercent == null ? quote.total : quote.totalWithTax),
+    subtotal: money(quote.total),
+    /**
+     * Tax tags. Empty strings rather than "0.00" when no rate is configured, so a template that
+     * prints {taxAmount} unconditionally shows nothing instead of asserting a zero rate nobody
+     * chose — `taxed` is the flag a template should branch on.
+     */
+    taxed: quote.taxRatePercent != null,
+    taxRatePercent: quote.taxRatePercent == null ? "" : String(quote.taxRatePercent),
+    taxableSubtotal: quote.taxRatePercent == null ? "" : money(quote.taxableSubtotal),
+    taxAmount: quote.taxRatePercent == null ? "" : money(quote.taxAmount),
+    totalWithTax: money(quote.taxRatePercent == null ? quote.total : quote.totalWithTax),
     lineItems: quote.lineItems.map((item) => ({
       description: item.description,
       quantity: item.quantity == null ? "" : String(item.quantity),
@@ -101,7 +122,15 @@ export function templateData(quote: QuoteDto, branding: InvoiceBranding) {
     optionTotals: quote.optionTotals.map((opt) => ({
       name: opt.name,
       total: money(opt.total),
-      combinedTotal: money(opt.combinedTotal),
+      // Tax-inclusive for the same reason `total` is: this is the figure a customer compares.
+      combinedTotal: money(
+        quote.taxRatePercent == null ? opt.combinedTotal : opt.combinedTotalWithTax
+      ),
+      combinedSubtotal: money(opt.combinedTotal),
+      taxAmount: quote.taxRatePercent == null ? "" : money(opt.taxAmount),
+      combinedTotalWithTax: money(
+        quote.taxRatePercent == null ? opt.combinedTotal : opt.combinedTotalWithTax
+      ),
     })),
   };
 }
@@ -136,8 +165,19 @@ export function validateDocxTemplate(templateBuffer: Buffer): string | null {
     customerAddress: null,
     customerPhone: null,
     total: 0,
+    // A non-null rate on purpose: a template that references a tax tag must be exercised by the
+    // compile check, and a null rate would render every tax tag empty and validate a template
+    // that later fails on a real taxed quote.
+    taxRatePercent: 0,
+    salesTaxId: null,
+    taxableSubtotal: 0,
+    taxAmount: 0,
+    totalWithTax: 0,
     optionTotals: [],
     chosenOptionGroup: null,
+    qboEstimateId: null,
+    qboSyncedAt: null,
+    qboSyncError: null,
     blockingFlagCount: 0,
   };
   const branding: InvoiceBranding = {

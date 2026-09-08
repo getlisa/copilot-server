@@ -25,15 +25,32 @@ export async function authMiddleware(req: RequestWithUser, res: Response, next: 
     ip: req.ip 
   };
 
-  // DEV BYPASS: Skip auth in development when X-Dev-Bypass header is set
-  if (process.env.NODE_ENV !== 'production' && req.headers['x-dev-bypass'] === 'true') {
+  // DEV BYPASS: skip auth entirely when the header is set — local development only.
+  //
+  // This is armed by an EXPLICIT opt-in (T-52). It used to be armed by the mere ABSENCE of
+  // NODE_ENV=production, which is fail-open: one deploy that forgets the variable turns
+  // `X-Dev-Bypass: true` plus `X-Company-Id: 9` into admin of any tenant, and this server now
+  // holds QuickBooks tokens for real companies. Requiring both an affirmative flag and a
+  // non-production NODE_ENV means a missing or mistyped variable fails CLOSED.
+  if (
+    process.env.ALLOW_DEV_AUTH_BYPASS === 'true' &&
+    process.env.NODE_ENV !== 'production' &&
+    req.headers['x-dev-bypass'] === 'true'
+  ) {
     req.user = {
       userId: req.headers['x-user-id'] as string || 'dev-user-123',
       email: req.headers['x-user-email'] as string || 'dev@test.com',
       role: req.headers['x-user-role'] as string || 'technician',
       companyId: parseInt(req.headers['x-company-id'] as string) || 1,
     };
-    logger.info('Auth bypassed (dev mode)', { ...logContext, user: req.user });
+    // warn, not info: an authentication bypass should be conspicuous in any log it reaches,
+    // and the email is omitted rather than echoed (T-53).
+    logger.warn('Auth bypassed (dev mode)', {
+      ...logContext,
+      userId: req.user.userId,
+      role: req.user.role,
+      companyId: req.user.companyId,
+    });
     return next();
   }
 

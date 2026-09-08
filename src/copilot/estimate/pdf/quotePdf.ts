@@ -115,7 +115,9 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
       };
 
       for (const li of quote.lineItems) {
-        const taxed = li.kind === "material" || li.kind === "service";
+        // The stored per-line flag when it is known; the old kind-based guess only as a
+        // fallback for a quote that predates the toggle.
+        const taxed = li.taxable ?? (li.kind === "material" || li.kind === "service");
         const showThumb = !!thumbnail && li.isIdentifiedEquipment;
         const rowPad = 8;
 
@@ -169,7 +171,11 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
         doc.moveTo(totalsX, y - 4).lineTo(RIGHT, y - 4).strokeColor(LINE).lineWidth(0.5).stroke();
       };
       totalRow("Subtotal", money(subtotal, quote.currency), true);
-      if (quote.taxOther) totalRow("Tax / Other", money(quote.taxOther, quote.currency), true);
+      // Rendered on rate presence, not on a non-zero amount (T-62): a company that configured a
+      // 0% rate has decided something, and printing nothing says the opposite.
+      if (quote.taxRatePercent != null)
+        totalRow(`Sales tax (${quote.taxRatePercent}%)`, money(quote.taxOther, quote.currency), true);
+      else if (quote.taxOther) totalRow("Tax / Other", money(quote.taxOther, quote.currency), true);
       totalRow("Total", money(quote.total, quote.currency), true);
       totalRow("Net Amount", money(quote.total, quote.currency), true);
 

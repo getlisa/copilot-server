@@ -1,7 +1,17 @@
 import type { QboConnection } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import prisma from "./prisma";
 import logger from "./logger";
 import { queryAll, qboFetch, qboConnectionFor, qboConnected } from "./qbo";
+import { parseAddress, toBillAddr, fromBillAddr } from "./addressParse";
+import { UserFacingError } from "./clientError";
+
+/**
+ * Postgres 23505 — the row is already there. Narrow on purpose: it is the ONE database error
+ * that means "someone else got here first", and every other one has to keep propagating.
+ */
+const isUniqueViolation = (e: unknown): boolean =>
+  e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
 
 /**
  * Ingest QuickBooks reference data into the raw_<entity>_qb tables.
@@ -56,7 +66,21 @@ interface QboCustomerRow {
   FullyQualifiedName?: string;
   PrimaryEmailAddr?: { Address?: string };
   PrimaryPhone?: { FreeFormNumber?: string };
-  BillAddr?: { Line1?: string; City?: string; CountrySubDivisionCode?: string; PostalCode?: string };
+  BillAddr?: {
+    Line1?: string;
+    Line2?: string;
+    /** QuickBooks allows five address lines; 3-5 are collapsed into line2 on ingest. */
+    Line3?: string;
+    Line4?: string;
+    Line5?: string;
+    City?: string;
+    CountrySubDivisionCode?: string;
+    PostalCode?: string;
+    Country?: string;
+  };
+  /** Set on a sub-customer (a Job); its value is the parent's QuickBooks id. */
+  ParentRef?: { value?: string };
+  Job?: boolean;
   Active?: boolean;
 }
 
@@ -84,7 +108,10 @@ async function ingestCustomers(
     const displayName = str(r.DisplayName) ?? `Customer ${qboId}`;
     const email = str(r.PrimaryEmailAddr?.Address);
     const phone = str(r.PrimaryPhone?.FreeFormNumber);
-    const address = addrLine(r.BillAddr);
+    // QuickBooks already holds the address in components, so this path never calls the LLM —
+    // there is nothing to infer, only to copy across (T-65).
+    const addr = fromBillAddr(r.BillAddr);
+    const address = addr.address ?? addrLine(r.BillAddr);
 
     const linked = await prisma.customerQb.findUnique({
       where: { companyId_realmId_qboId: { companyId, realmId, qboId } },
@@ -132,6 +159,12 @@ async function ingestCustomers(
             email,
             phone,
             address,
+            addressLine1: addr.addressLine1,
+            addressLine2: addr.addressLine2,
+            city: addr.city,
+            state: addr.state,
+            postalCode: addr.postalCode,
+            country: addr.country,
             isActive: r.Active !== false,
           },
         })
@@ -140,7 +173,7 @@ async function ingestCustomers(
     // Fill gaps only — never clobber what someone typed here.
     const current = await prisma.customer.findUnique({
       where: { id: customerId },
-      select: { email: true, phone: true, address: true },
+      select: { email: true, phone: true, address: true, addressLine1: true },
     });
     await prisma.customer.update({
       where: { id: customerId },
@@ -148,6 +181,19 @@ async function ingestCustomers(
         email: current?.email ?? email,
         phone: current?.phone ?? phone,
         address: current?.address ?? address,
+        // The structured columns fill as a set, keyed off line1: filling them field-by-field
+        // could splice a QuickBooks city onto a locally-typed street and produce an address
+        // that exists in neither system.
+        ...(current?.addressLine1
+          ? {}
+          : {
+              addressLine1: addr.addressLine1,
+              addressLine2: addr.addressLine2,
+              city: addr.city,
+              state: addr.state,
+              postalCode: addr.postalCode,
+              country: addr.country,
+            }),
         // Refreshed every sync, unlike the contact fields: a customer deactivated in QuickBooks
         // must stop being offered here, or a technician links an estimate that QBO then rejects.
         isActive: r.Active !== false,
@@ -167,7 +213,82 @@ async function ingestCustomers(
       update: qb,
     });
   }
+
+  await linkParents(companyId, realmId, rows);
+
+  // Customers QuickBooks no longer returns — deleted there, or deactivated — are deactivated
+  // here too (T-46). Without this the mirror only ever grows: the picker keeps offering someone
+  // who is gone from the books, and the estimate that bills them is rejected at post time, long
+  // after the technician chose them.
+  //
+  // Scoped to rows that came FROM this realm: a customer created in CLARA for a company with no
+  // QuickBooks connection has no link and must never be touched by a QuickBooks sync. Safe to
+  // run unconditionally now that `queryAll` throws rather than returning a truncated page — a
+  // partial read cannot reach this line and mass-deactivate a live customer list.
+  const seenIds = rows.map((r) => id(r.Id));
+  const stale = await prisma.customer.updateMany({
+    where: {
+      companyId,
+      isActive: true,
+      qb: { some: { realmId, qboId: { notIn: seenIds } } },
+    },
+    data: { isActive: false },
+  });
+  if (stale.count > 0)
+    logger.info("QBO customers no longer present were deactivated", {
+      companyId,
+      realmId,
+      count: stale.count,
+    });
+
   return rows.length;
+}
+
+/**
+ * Second pass: hang each sub-customer under its parent (T-64).
+ *
+ * Separate from the first pass because the query can return a child BEFORE its parent, and a
+ * parent that has not been inserted yet has no local id to point at. Doing it afterwards means
+ * every row exists, so one map resolves the whole hierarchy however deep it goes — QuickBooks
+ * allows five levels — with no recursion and no ordering assumption.
+ */
+async function linkParents(companyId: number, realmId: string, rows: QboCustomerRow[]) {
+  const withParent = rows.filter((r) => str(r.ParentRef?.value));
+  if (!withParent.length) return;
+
+  const links = await prisma.customerQb.findMany({
+    where: { companyId, realmId, isDeleted: false },
+    select: { customerId: true, qboId: true },
+  });
+  const localIdOf = new Map(links.map((l) => [l.qboId, l.customerId]));
+
+  let unresolved = 0;
+  // Assignment is UNCONDITIONAL and covers every ingested row, not just the ones with a parent:
+  // QuickBooks owns this hierarchy (it computes FullyQualifiedName and enforces the depth cap),
+  // so a job moved to the top level there must lose its parent here. Linking only ever forward
+  // would leave the mirror permanently claiming a parent QuickBooks has dropped.
+  for (const r of rows) {
+    const childId = localIdOf.get(id(r.Id));
+    if (childId == null) continue;
+    const parentRef = str(r.ParentRef?.value);
+    const parentId = parentRef ? (localIdOf.get(parentRef) ?? null) : null;
+    if (parentRef && parentId == null) {
+      unresolved++;
+      // Do not null the existing link on a parent we simply could not see this pass — that
+      // would drop a real hierarchy because of a partial read.
+      continue;
+    }
+    // A row cannot be its own parent. QuickBooks should never send this, but the column is
+    // self-referential and a cycle here would make any later hierarchy walk non-terminating.
+    if (childId === parentId) continue;
+    await prisma.customer.update({ where: { id: childId }, data: { parentId } });
+  }
+  logger.info("Linked QBO sub-customers to their parents", {
+    companyId,
+    realmId,
+    children: withParent.length,
+    unresolved,
+  });
 }
 
 // ---------- items (US5, and the registry) ----------
@@ -200,6 +321,18 @@ async function ingestItems(conn: QboConnection, companyId: number): Promise<numb
       update: data,
     });
   }
+
+  // Items deleted in QuickBooks stop being returned rather than coming back inactive, so the
+  // mirror has to be told (T-46). It matters more here than it looks: the registry resolves a
+  // line to a stored item id, and an id that no longer exists makes the whole estimate post
+  // fail with a reference error naming a part nobody recognises.
+  const gone = await prisma.rawQbItem.updateMany({
+    where: { companyId, active: true, qboId: { notIn: rows.map((r) => id(r.Id)) } },
+    data: { active: false },
+  });
+  if (gone.count > 0)
+    logger.info("QBO items no longer present were deactivated", { companyId, count: gone.count });
+
   return rows.length;
 }
 
@@ -406,11 +539,19 @@ async function ingestSalesTax(
       where: { companyId, source: "QBO", isActive: true, id: { notIn: seen } },
       data: { isActive: false, isDefault: false },
     });
-    if (stale.count > 0)
+    if (stale.count > 0) {
+      // The mirror rows go with it. Left active, `qboTaxCodeRef` would keep resolving a TaxCode
+      // Intuit has retired, and the post would fail on a code the settings screen already shows
+      // as inactive — the two mirrors disagreeing about the same rate.
+      await prisma.salesTaxQb.updateMany({
+        where: { companyId, realmId, salesTaxId: { notIn: seen } },
+        data: { isActive: false },
+      });
       logger.info("QBO tax codes no longer present were deactivated", {
         companyId,
         count: stale.count,
       });
+    }
   }
   if (skipped.length > 0)
     logger.warn("QBO tax codes skipped — a member rate could not be resolved", {
@@ -461,20 +602,100 @@ async function ingestAccounts(conn: QboConnection, companyId: number): Promise<n
  *
  * Throws if the company is not connected. Callers decide whether that is a 409 or a no-op.
  */
+/**
+ * How long a sync may hold its claim before another run may take it (T-44). A task killed
+ * mid-sync cannot release its own claim, so without an expiry the company could never sync
+ * again; ten minutes is far longer than the observed run (about four seconds for 39 customers,
+ * 43 items and 90 accounts) and far shorter than a person's patience.
+ */
+const SYNC_CLAIM_STALE_MS = 10 * 60 * 1000;
+
 export async function syncQboReferenceData(companyId: number): Promise<IngestCounts> {
   const conn = await qboConnectionFor(companyId);
-  if (!qboConnected(conn)) throw new Error("QuickBooks is not connected for this company");
+  if (!qboConnected(conn))
+    throw new UserFacingError("QuickBooks is not connected for this company");
   const realmId = conn.realmId;
-  if (!realmId) throw new Error("QuickBooks connection has no realm — reconnect from Settings");
+  if (!realmId) throw new UserFacingError("QuickBooks connection has no realm — reconnect from Settings");
 
-  const customers = await ingestCustomers(conn, companyId, realmId);
-  const items = await ingestItems(conn, companyId);
-  const tax = await ingestSalesTax(conn, companyId, realmId);
-  const accounts = await ingestAccounts(conn, companyId);
+  // One sync per company at a time (T-44). A sync takes long enough to invite a second click,
+  // and two concurrent runs race the same upserts *and* the unserialised token refresh — the
+  // second refresh invalidates the first's refresh token and both runs die holding a connection
+  // that now needs reconnecting.
+  //
+  // The claim is a conditional UPDATE, and the row count is the answer. Deliberately not a
+  // `pg_try_advisory_lock`: session-scoped advisory locks are re-entrant, so two runs sharing a
+  // pooled connection would both "acquire" it and the first unlock would free it for both.
+  const claim = await prisma.qboConnection.updateMany({
+    where: {
+      companyId,
+      OR: [
+        { syncStartedAt: null },
+        { syncStartedAt: { lt: new Date(Date.now() - SYNC_CLAIM_STALE_MS) } },
+      ],
+    },
+    data: { syncStartedAt: new Date() },
+  });
+  if (claim.count === 0)
+    throw new UserFacingError("A QuickBooks sync is already running for this company");
 
-  const counts: IngestCounts = { customers, items, accounts, ...tax };
-  logger.info("QBO reference data synced", { companyId, realmId, ...counts });
-  return counts;
+  // Each stage is attempted even when an earlier one failed: the stages are independent mirrors,
+  // upserts are idempotent, and refusing to ingest tax because items timed out helps nobody.
+  // What must NOT happen is the run then counting as fresh (T-45).
+  const counts: IngestCounts = { customers: 0, items: 0, accounts: 0, taxCodes: 0, taxRates: 0 };
+  const failures: string[] = [];
+  const stage = async (name: string, run: () => Promise<void>) => {
+    try {
+      await run();
+    } catch (e) {
+      failures.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+      logger.error("QBO sync stage failed", { companyId, realmId, stage: name, error: e });
+    }
+  };
+
+  try {
+    await stage("taxPrefs", async () => {
+      await ingestTaxPrefs(conn, companyId);
+    });
+    await stage("customers", async () => {
+      counts.customers = await ingestCustomers(conn, companyId, realmId);
+    });
+    await stage("items", async () => {
+      counts.items = await ingestItems(conn, companyId);
+    });
+    await stage("salesTax", async () => {
+      Object.assign(counts, await ingestSalesTax(conn, companyId, realmId));
+    });
+    await stage("accounts", async () => {
+      counts.accounts = await ingestAccounts(conn, companyId);
+    });
+
+    if (failures.length) {
+      // Record the failure and keep whatever did land. `lastSyncAt` is deliberately NOT advanced:
+      // "last synced" must mean "last complete sync", or it is a claim the mirrors cannot back.
+      await prisma.qboConnection.update({
+        where: { companyId },
+        data: { lastSyncError: failures.join("; ").slice(0, 1000) },
+      });
+      throw new Error(`QuickBooks sync incomplete — ${failures.join("; ")}`);
+    }
+
+    await prisma.qboConnection.update({
+      where: { companyId },
+      data: { lastSyncAt: new Date(), lastSyncError: null },
+    });
+    logger.info("QBO reference data synced", { companyId, realmId, ...counts });
+    return counts;
+  } finally {
+    // Released whatever happened — a failed sync must not block the retry it is asking for.
+    await prisma.qboConnection
+      .update({ where: { companyId }, data: { syncStartedAt: null } })
+      .catch((e) =>
+        logger.error("Could not release the QuickBooks sync claim", {
+          companyId,
+          error: e instanceof Error ? e.message : String(e),
+        })
+      );
+  }
 }
 
 // ---------- reads for the UI ----------
@@ -501,7 +722,23 @@ export async function searchCustomers(
       companyId,
       isActive: true,
       isDeleted: false,
-      ...(term ? { name: { contains: term, mode: "insensitive" as const } } : {}),
+      // Matched against the qualified name too, so typing a property's name surfaces the jobs
+      // under it. A leaf-only match hid every sub-customer behind a name nobody searches for.
+      ...(term
+        ? {
+            OR: [
+              { name: { contains: term, mode: "insensitive" as const } },
+              {
+                qb: {
+                  some: {
+                    ...(realmId ? { realmId } : {}),
+                    fullyQualifiedName: { contains: term, mode: "insensitive" as const },
+                  },
+                },
+              },
+            ],
+          }
+        : {}),
     },
     select: {
       id: true,
@@ -631,13 +868,18 @@ export async function defaultSalesTax(companyId: number) {
 }
 
 /** When reference data was last pulled, so the UI can offer a refresh instead of guessing. */
+/**
+ * When this company last completed a FULL reference sync — every stage succeeding (T-45).
+ *
+ * Previously the newest `customer_qb.synced_at`, which meant a run that ingested 39 customers
+ * and then failed on tax reported itself as freshly synced while the tax mirror was hours stale.
+ */
 export async function qboSyncedAt(companyId: number): Promise<Date | null> {
-  const newest = await prisma.customerQb.findFirst({
+  const conn = await prisma.qboConnection.findUnique({
     where: { companyId },
-    select: { syncedAt: true },
-    orderBy: { syncedAt: "desc" },
+    select: { lastSyncAt: true },
   });
-  return newest?.syncedAt ?? null;
+  return conn?.lastSyncAt ?? null;
 }
 
 // ---------- the item registry ----------
@@ -677,7 +919,7 @@ export async function ensureQboItem(
   identity: ItemIdentity
 ): Promise<string> {
   const realmId = conn.realmId;
-  if (!realmId) throw new Error("QuickBooks connection has no realm — reconnect from Settings");
+  if (!realmId) throw new UserFacingError("QuickBooks connection has no realm — reconnect from Settings");
   const key = itemKey(identity.name);
   const scope = { companyId, realmId };
 
@@ -710,7 +952,8 @@ export async function ensureQboItem(
     conn,
     "Item",
     `Name = '${esc(key)}'`,
-    { pageSize: 1, maxPages: 1 }
+    // Bounded existence probe — one row answers it.
+    { pageSize: 1, maxPages: 1, expectAll: false }
   );
   if (found[0]) {
     await linkItem(scope, identity, key, String(found[0].Id), false);
@@ -772,11 +1015,15 @@ async function linkItem(
       },
     });
   } catch (e) {
-    logger.warn("Could not link QBO item; continuing with the id we have", {
+    // Only the unique violation is benign — it means a concurrent sync linked the same item
+    // first, and the row we wanted already exists with the same id. Everything else (a bad FK,
+    // a dropped column, a connection failure) was being swallowed too, so the registry silently
+    // stopped recording links and every later estimate re-resolved the item from scratch (T-50).
+    if (!isUniqueViolation(e)) throw e;
+    logger.info("QBO item already linked by a concurrent sync; reusing it", {
       ...scope,
       qboItemId,
       name: key,
-      error: e instanceof Error ? e.message : String(e),
     });
   }
 }
@@ -798,8 +1045,10 @@ async function firstIncomeAccountId(
   if (local) return local.qboId;
 
   const rows = await queryAll<{ Id: string }>(conn, "Account", "AccountType = 'Income'", {
+    // Bounded: any one Income account will do.
     pageSize: 1,
     maxPages: 1,
+    expectAll: false,
   });
   return rows[0] ? String(rows[0].Id) : null;
 }
@@ -852,6 +1101,84 @@ export interface NewQboCustomer {
   email?: string | null;
   phone?: string | null;
   address?: string | null;
+  /**
+   * Make this a sub-customer of an existing one (T-64) — QuickBooks calls the child a Job. The
+   * parent must already exist in the connected QuickBooks file: a child cannot be created before
+   * its parent has an id there, the same ordering rule as customer-before-estimate.
+   */
+  parentId?: number | null;
+}
+
+/**
+ * How this QuickBooks company calculates tax, recorded on the connection (T-63).
+ *
+ * Read every sync rather than once at connect: an admin can switch a company to Automated Sales
+ * Tax at any time, and the switch silently changes whether the tax code CLARA sends means
+ * anything. A stale "manual" would keep posting codes Intuit discards while the estimate CLARA
+ * printed says otherwise.
+ */
+async function ingestTaxPrefs(conn: QboConnection, companyId: number) {
+  const prefs = await qboFetch(conn, "/preferences");
+  const tp = (prefs?.Preferences?.TaxPrefs ?? {}) as {
+    UsingSalesTax?: boolean;
+    PartnerTaxEnabled?: boolean;
+  };
+  await prisma.qboConnection.update({
+    where: { companyId },
+    data: {
+      usingSalesTax: tp.UsingSalesTax ?? null,
+      partnerTaxEnabled: tp.PartnerTaxEnabled ?? null,
+    },
+  });
+  logger.info("QBO tax preferences read", {
+    companyId,
+    usingSalesTax: tp.UsingSalesTax ?? null,
+    partnerTaxEnabled: tp.PartnerTaxEnabled ?? null,
+  });
+}
+
+/**
+ * The parent a new sub-customer will hang under, or null when it is a root customer (T-64).
+ *
+ * Refuses a parent that QuickBooks does not know about in the CONNECTED realm. QuickBooks needs
+ * a `ParentRef` id at creation time, so a parent that has never synced cannot have a child — and
+ * failing here, naming the parent, beats failing inside Intuit's API with a reference error the
+ * technician cannot act on. Same ordering rule as customer-before-estimate.
+ */
+async function resolveParent(
+  companyId: number,
+  parentId: number | null,
+  conn: QboConnection | null
+): Promise<{ customerId: number; qboId: string | null } | null> {
+  if (parentId == null) return null;
+  const parent = await prisma.customer.findFirst({
+    where: { id: parentId, companyId, isDeleted: false },
+    select: { id: true, name: true },
+  });
+  if (!parent) throw new UserFacingError("That parent customer does not exist");
+
+  if (!conn?.realmId) return { customerId: parent.id, qboId: null };
+
+  const link = await prisma.customerQb.findUnique({
+    where: { customerId_realmId: { customerId: parent.id, realmId: conn.realmId } },
+    select: { qboId: true, raw: true },
+  });
+  if (!link)
+    throw new UserFacingError(
+      `"${parent.name}" has not been synced to QuickBooks yet, so nothing can be added under it. Sync QuickBooks from Settings first.`
+    );
+
+  // QuickBooks caps the chain at five levels and rejects the sixth with a fault the technician
+  // cannot interpret. `Level` is read-only but present on every row we mirror, so this is a JSON
+  // read rather than an ancestor walk — and it fails here, naming the parent, before anything
+  // is written locally.
+  const level = Number((link.raw as { Level?: unknown } | null)?.Level);
+  if (Number.isFinite(level) && level >= 4)
+    throw new UserFacingError(
+      `"${parent.name}" is already as deep as QuickBooks allows (five levels). Choose a customer higher up.`
+    );
+
+  return { customerId: parent.id, qboId: link.qboId };
 }
 
 /** What the picker and the create path both return, so callers treat them alike. */
@@ -859,6 +1186,12 @@ export interface LinkedCustomer {
   customerId: number;
   name: string;
   qboId: string | null;
+  /**
+   * Address components the parse could not find in what was typed (T-65). The parser never
+   * invents one — a guessed ZIP silently moves the tax jurisdiction — so this is how the UI
+   * knows to ask. Empty when the address was complete, absent, or unparseable.
+   */
+  addressMissing?: string[];
 }
 
 /**
@@ -880,10 +1213,12 @@ export async function createCustomer(
   conn: QboConnection | null
 ): Promise<LinkedCustomer> {
   const name = customerDisplayName(input.name);
-  if (!name) throw new Error("A customer name is required");
+  if (!name) throw new UserFacingError("A customer name is required");
 
   const email = str(input.email);
-  if (email && !EMAIL_OK.test(email)) throw new Error(`"${email}" is not a valid email address`);
+  // The address itself is NOT echoed back or logged (T-53): the person typed it, they can see
+  // it, and repeating a customer's email into a log line is the leak, not the help.
+  if (email && !EMAIL_OK.test(email)) throw new UserFacingError("That email address is not valid");
 
   // Matched the way the picker searches. A row hidden from search (inactive or soft-deleted)
   // used to refuse the name while being absent from the list it told the technician to pick
@@ -893,11 +1228,35 @@ export async function createCustomer(
     select: { id: true, isActive: true, isDeleted: true },
   });
   if (existing?.isActive && !existing.isDeleted)
-    throw new Error(`"${name}" is already one of your customers — pick them from the list instead`);
+    throw new UserFacingError(
+      `"${name}" is already one of your customers — pick them from the list instead`
+    );
   if (existing) {
+    // The parent and the address the technician just entered are applied to the revived row too.
+    // Reviving used to flip the flags and return, silently discarding both — so a sub-customer
+    // whose name had been used before came back as a root with the old address, and nothing on
+    // screen said so.
+    const revivedParent = await resolveParent(companyId, input.parentId ?? null, conn);
+    const revivedAddr = await parseAddress(input.address);
     const revived = await prisma.customer.update({
       where: { id: existing.id },
-      data: { isActive: true, isDeleted: false, updatedBy: null },
+      data: {
+        isActive: true,
+        isDeleted: false,
+        updatedBy: null,
+        ...(revivedParent ? { parentId: revivedParent.customerId } : {}),
+        ...(str(input.address)
+          ? {
+              address: str(input.address),
+              addressLine1: revivedAddr.line1,
+              addressLine2: revivedAddr.line2,
+              city: revivedAddr.city,
+              state: revivedAddr.state,
+              postalCode: revivedAddr.postalCode,
+              country: revivedAddr.country,
+            }
+          : {}),
+      },
     });
     logger.info("Revived a hidden customer rather than refusing the name", {
       companyId,
@@ -906,18 +1265,50 @@ export async function createCustomer(
     return { customerId: revived.id, name, qboId: null };
   }
 
+  // A parent is resolved BEFORE anything is written, so a bad one fails with a message about the
+  // parent rather than leaving a half-made customer behind.
+  const parent = await resolveParent(companyId, input.parentId ?? null, conn);
+
+  // Structure the typed address so QuickBooks gets components rather than a line of prose. The
+  // freeform text is stored either way — the parse is an addition, never a replacement, and it
+  // degrades to nulls rather than failing the create.
+  const parsed = await parseAddress(input.address);
+
   const customer = await prisma.customer.create({
-    data: { companyId, name, email, phone: str(input.phone), address: str(input.address) },
+    data: {
+      companyId,
+      name,
+      email,
+      phone: str(input.phone),
+      address: str(input.address),
+      parentId: parent?.customerId ?? null,
+      addressLine1: parsed.line1,
+      addressLine2: parsed.line2,
+      city: parsed.city,
+      state: parsed.state,
+      postalCode: parsed.postalCode,
+      country: parsed.country,
+    },
   });
 
-  if (!conn?.realmId) return { customerId: customer.id, name, qboId: null };
+  if (!conn?.realmId)
+    return { customerId: customer.id, name, qboId: null, addressMissing: parsed.missing };
 
   try {
     const qboId = await pushCustomerToQbo(conn, companyId, conn.realmId, customer.id, {
       ...input,
       name,
+      parentQboId: parent?.qboId ?? null,
+      addr: toBillAddr({
+        addressLine1: parsed.line1,
+        addressLine2: parsed.line2,
+        city: parsed.city,
+        state: parsed.state,
+        postalCode: parsed.postalCode,
+        country: parsed.country,
+      }) ?? (str(input.address) ? { Line1: str(input.address)! } : undefined),
     });
-    return { customerId: customer.id, name, qboId };
+    return { customerId: customer.id, name, qboId, addressMissing: parsed.missing };
   } catch (e) {
     // Undo the local row. Left behind, it wedges the name: the retry hits the "already one of
     // your customers" guard above, the picker offers a customer QuickBooks has never heard of,
@@ -943,10 +1334,54 @@ async function pushCustomerToQbo(
   companyId: number,
   realmId: string,
   customerId: number,
-  input: NewQboCustomer
+  input: NewQboCustomer & { parentQboId?: string | null; addr?: Record<string, string> }
 ): Promise<string> {
   const displayName = customerDisplayName(input.name);
   const email = str(input.email);
+
+  // The address and the parent are resolved HERE, not at the call site. Both used to be passed
+  // in by `createCustomer` alone, so the completion-time path — the one that runs when a quote
+  // is posted for a customer QuickBooks has not seen — created the customer with no address at
+  // all and, for a sub-customer, as a TOP-LEVEL customer detached from its property. The
+  // estimate posts fine, so nothing surfaces it. Owning both in one place means no caller can
+  // drop them by omission.
+  const own = await prisma.customer.findUnique({
+    where: { id: customerId },
+    select: {
+      parentId: true,
+      address: true,
+      addressLine1: true,
+      addressLine2: true,
+      city: true,
+      state: true,
+      postalCode: true,
+      country: true,
+    },
+  });
+  const addr =
+    input.addr ??
+    toBillAddr(own ?? {}) ??
+    // Freeform is the last resort, so a customer typed before the structured columns existed
+    // still reaches QuickBooks with the address someone entered.
+    ((str(own?.address) ?? str(input.address))
+      ? { Line1: (str(own?.address) ?? str(input.address))! }
+      : undefined);
+
+  let parentQboId = input.parentQboId ?? null;
+  if (parentQboId == null && own?.parentId != null) {
+    const parentLink = await prisma.customerQb.findUnique({
+      where: { customerId_realmId: { customerId: own.parentId, realmId } },
+      select: { qboId: true },
+    });
+    // A parent that has not synced cannot be referenced. Creating the child as a root anyway
+    // would put a job in the books under nothing, so this refuses instead — the same ordering
+    // rule the create path enforces, applied where it actually matters.
+    if (!parentLink)
+      throw new UserFacingError(
+        "This customer sits under a parent that has not been synced to QuickBooks yet. Sync QuickBooks from Settings, then try again."
+      );
+    parentQboId = parentLink.qboId;
+  }
   let created: { Customer: { Id: string; FullyQualifiedName?: string } };
   try {
     created = await qboFetch(conn, "/customer", {
@@ -955,13 +1390,18 @@ async function pushCustomerToQbo(
         DisplayName: displayName,
         ...(email ? { PrimaryEmailAddr: { Address: email } } : {}),
         ...(str(input.phone) ? { PrimaryPhone: { FreeFormNumber: str(input.phone) } } : {}),
-        ...(str(input.address) ? { BillAddr: { Line1: str(input.address) } } : {}),
+        ...(addr ? { BillAddr: addr } : {}),
+        // A sub-customer in QuickBooks is a Job under a parent (T-64). Both fields are required
+        // together: ParentRef alone leaves a plain customer nested oddly, and Job alone is
+        // rejected. FullyQualifiedName then comes back as "Parent:Child", which is what the
+        // picker shows to tell two same-named jobs apart.
+        ...(parentQboId ? { ParentRef: { value: parentQboId }, Job: true } : {}),
       }),
     });
   } catch (e) {
     const body = e instanceof Error ? e.message : String(e);
     if (/6240|Duplicate Name/i.test(body))
-      throw new Error(
+      throw new UserFacingError(
         `"${displayName}" already exists in QuickBooks (names are shared with vendors and employees). Pick the existing customer, or use a different name.`
       );
     throw e;
@@ -1001,7 +1441,7 @@ export async function ensureQboCustomer(
   fallback: NewQboCustomer
 ): Promise<string> {
   const realmId = conn.realmId;
-  if (!realmId) throw new Error("QuickBooks connection has no realm — reconnect from Settings");
+  if (!realmId) throw new UserFacingError("QuickBooks connection has no realm — reconnect from Settings");
 
   if (quote.customerId != null) {
     const link = await prisma.customerQb.findUnique({
@@ -1056,7 +1496,8 @@ export async function ensureQboCustomer(
     conn,
     "Customer",
     `DisplayName = '${escLiteral(name)}'`,
-    { pageSize: 1, maxPages: 1 }
+    // A bounded existence probe, not a mirror read: one row is a complete answer.
+    { pageSize: 1, maxPages: 1, expectAll: false }
   );
   let qboId: string;
   if (found[0]) {
@@ -1104,7 +1545,7 @@ export async function upsertSalesTax(
   // is then quietly never applied.
   const { external } = await taxSourceIsExternal(companyId);
   if (external)
-    throw new Error(
+    throw new UserFacingError(
       "Your sales tax comes from QuickBooks while it is connected. Add or change the rate in QuickBooks, then sync."
     );
 
@@ -1115,7 +1556,7 @@ export async function upsertSalesTax(
     select: { id: true },
   });
   if (clash && clash.id !== input.id)
-    throw new Error(`You already have a rate called "${input.name}"`);
+    throw new UserFacingError(`You already have a rate called "${input.name}"`);
 
   return prisma.$transaction(async (tx) => {
     // Clear first, then set. `sales_tax_one_default_per_company` is a NON-DEFERRABLE partial
@@ -1145,7 +1586,7 @@ export async function upsertSalesTax(
       where: { id: input.id, companyId, isDeleted: false },
       select: { id: true },
     });
-    if (!owned) throw new Error("That rate does not belong to this company");
+    if (!owned) throw new UserFacingError("That rate does not belong to this company");
     return tx.salesTax.update({
       where: { id: input.id },
       data: {
@@ -1171,11 +1612,12 @@ export async function setDefaultSalesTax(companyId: number, id: number | null) {
         where: { id, companyId, isActive: true, isDeleted: false },
         select: { id: true, source: true },
       });
-      if (!owned) throw new Error("That rate does not belong to this company, or is inactive");
+      if (!owned)
+        throw new UserFacingError("That rate does not belong to this company, or is inactive");
       // Refuse to make an unusable rate the default: it would show as the default in settings
       // and then be ignored on every estimate.
       if (external && owned.source === "MANUAL")
-        throw new Error(
+        throw new UserFacingError(
           "That rate was created here, and your tax comes from QuickBooks while it is connected."
         );
     }

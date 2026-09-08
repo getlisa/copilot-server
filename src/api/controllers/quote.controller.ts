@@ -27,7 +27,13 @@ import { draftProposalEmail, renderProposalHtml } from "../../copilot/estimating
 import { loadQuoteHeader } from "../../copilot/estimate/pdf/quoteHeader";
 import { sendEmail, isEmailConfigured, SENDGRID_FROM_EMAIL, SENDGRID_FROM_NAME } from "../../lib/email";
 import { qboConnectionFor, qboConnected, syncQuoteToQbo } from "../../lib/qbo";
-import { ensureQboItem, ensureQboCustomer } from "../../lib/qboIngest";
+import {
+  ensureQboItem,
+  ensureQboCustomer,
+  defaultSalesTax,
+  taxSourceIsExternal,
+  listSalesTax,
+} from "../../lib/qboIngest";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
@@ -130,10 +136,19 @@ function alignAnswers(
   }));
 }
 
-/** Load the quote with items, enforcing ownership. */
-async function loadOwnedQuote(quoteId: string, userId: bigint) {
+/**
+ * Load the quote with items, enforcing ownership — by user AND by company (T-54).
+ *
+ * The company clause is not redundant. Every downstream effect resolves its tenant from
+ * `quote.companyId`, not from the caller: the QuickBooks post writes into the books of
+ * `quote.companyId`, and pricebook and template lookups read that company's configuration. If a
+ * user is ever moved between companies, the two diverge — the caller acts as company B while the
+ * estimate posts into company A's QuickBooks. Requiring both means such a quote is simply not
+ * found, rather than found and acted on across a tenant boundary.
+ */
+async function loadOwnedQuote(quoteId: string, userId: bigint, companyId: number) {
   return prisma.quote.findFirst({
-    where: { id: quoteId, userId },
+    where: { id: quoteId, userId, companyId },
     include: { lineItems: true },
   });
 }
@@ -257,6 +272,7 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
       totalPrice: i.totalPrice,
       optionGroup: i.optionGroup,
       isLabor: i.isLabor,
+      taxable: i.taxable,
       priceSource: i.priceSource,
       unmatched: i.flags.includes("unmatched"),
     })),
@@ -277,6 +293,12 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     exclusions: narrative?.exclusions,
     coordination: narrative?.coordination,
     total: dto.total,
+    // Tax travels with the total, always together. Passing one without the other is how a
+    // proposal comes to print a pre-tax figure above a signature line while the QuickBooks
+    // estimate bills the taxed one.
+    taxRatePercent: dto.taxRatePercent,
+    taxAmount: dto.taxAmount,
+    totalWithTax: dto.totalWithTax,
     optionTotals: dto.optionTotals,
     unpricedCount,
     photos,
@@ -348,6 +370,10 @@ export class QuoteController {
         select: { default_markup_percent: true },
       }),
     ]);
+    // Sales tax is snapshotted here, exactly like the template and the markup above: the value in
+    // force when the estimate was created, frozen against later changes to the company's default.
+    // Null when nothing is configured — and null is not 0%, it means no tax is declared at all.
+    const tax = await defaultSalesTax(user.companyId);
     const quote = await prisma.quote.create({
       data: {
         conversationId: conversation.id,
@@ -355,6 +381,8 @@ export class QuoteController {
         companyId: user.companyId,
         templateId: activeTemplate?.id ?? null,
         markupPercent: config?.default_markup_percent ?? 0,
+        salesTaxId: tax?.id ?? null,
+        taxRatePercent: tax?.ratePercent ?? null,
       },
       include: { lineItems: true },
     });
@@ -378,7 +406,7 @@ export class QuoteController {
   static async get(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     const messages = await prisma.message.findMany({
       where: { conversationId: quote.conversationId },
@@ -425,7 +453,7 @@ export class QuoteController {
       ? req.body.imageUrls.filter((u: unknown) => typeof u === "string").slice(0, 4)
       : [];
     const submitted = parseAnswers(req.body?.answers);
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED")
       return fail(res, 409, "Quote is Completed and frozen — move it back to Draft to edit");
@@ -551,7 +579,7 @@ export class QuoteController {
       },
     });
 
-    const updated = await loadOwnedQuote(quote.id, user.userId);
+    const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({
       success: true,
       data: {
@@ -582,7 +610,7 @@ export class QuoteController {
   static async updateQuote(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
 
@@ -643,9 +671,50 @@ export class QuoteController {
       }
     }
 
+    /**
+     * Change which sales-tax rate this estimate uses — the inline pencil on the totals block.
+     *
+     * Only a DRAFT reaches here (COMPLETED is refused above), which is the whole reason this is
+     * allowed to move at all: the snapshot exists so a SENT estimate cannot be re-priced, not to
+     * stop someone correcting a draft. The percentage is copied across with the id, so the quote
+     * keeps behaving as a snapshot afterwards.
+     *
+     * Validated against this company's USABLE rates, not merely its rows: a rate the company
+     * typed before connecting QuickBooks still exists but is not applied anywhere else, and
+     * accepting it here would put a number on the estimate that the QuickBooks post then drops.
+     */
+    if (body.salesTaxId !== undefined) {
+      if (body.salesTaxId === null) {
+        // Clearing is a DECISION, recorded as one. Without the flag this row is
+        // indistinguishable from a quote that never had a rate, and completion's gap-fill would
+        // put the company default straight back on a job someone deliberately marked untaxed.
+        data.salesTaxId = null;
+        data.taxRatePercent = null;
+        data.taxExempt = true;
+      } else {
+        const salesTaxId = Number(body.salesTaxId);
+        if (!Number.isInteger(salesTaxId)) return fail(res, 400, "salesTaxId must be an integer");
+        const { external } = await taxSourceIsExternal(user.companyId);
+        const rate = await prisma.salesTax.findFirst({
+          where: {
+            id: salesTaxId,
+            companyId: user.companyId,
+            isActive: true,
+            isDeleted: false,
+            ...(external ? { source: { not: "MANUAL" } } : {}),
+          },
+          select: { ratePercent: true },
+        });
+        if (!rate) return fail(res, 400, "That sales-tax rate is not available to this company");
+        data.salesTaxId = salesTaxId;
+        data.taxRatePercent = rate.ratePercent;
+        data.taxExempt = false;
+      }
+    }
+
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
     await prisma.quote.update({ where: { id: quote.id }, data });
-    const updated = await loadOwnedQuote(quote.id, user.userId);
+    const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
 
@@ -653,7 +722,7 @@ export class QuoteController {
   static async addItem(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
     const { description, quantity, unit, unitPrice, totalPrice } = req.body ?? {};
@@ -690,6 +759,10 @@ export class QuoteController {
         totalPrice: basePrice(totalPrice),
         pricebookCode: match?.code ?? null,
         isLabor,
+        // Labor is not taxed by default — the estimate PDF's "Taxed" column has always shown
+        // labor unticked, so a blanket `default(true)` would have made the document contradict
+        // the total printed beneath it. The per-line toggle overrides either way.
+        taxable: !isLabor,
         sourcePricebookId: match?.sourcePricebookId ?? null,
         manuallyEdited: manualPrice,
         sortOrder: nextSort,
@@ -716,7 +789,7 @@ export class QuoteController {
   static async updateItem(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
     const item = quote.lineItems.find((i) => i.id === req.params.itemId);
@@ -742,12 +815,15 @@ export class QuoteController {
         });
       }
       await prisma.quoteLineItem.delete({ where: { id: item.id } }); // drop placeholder
-      const updated = await loadOwnedQuote(quote.id, user.userId);
+      const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
       return res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
     }
 
     const data: Record<string, unknown> = {};
     if (body.confirm === true) data.agentSuggested = false;
+    // Per-line Taxable toggle. Strict `=== boolean` rather than truthiness: a client sending
+    // "false" as a string would otherwise turn tax ON for a line the technician just turned off.
+    if (typeof body.taxable === "boolean") data.taxable = body.taxable;
     // A misclassified line is correctable here: markup skips labor, so getting this wrong is
     // the difference between a marked-up and a cost-price line.
     if (typeof body.isLabor === "boolean") data.isLabor = body.isLabor;
@@ -797,7 +873,7 @@ export class QuoteController {
     }
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
     await prisma.quoteLineItem.update({ where: { id: item.id }, data });
-    const updated = await loadOwnedQuote(quote.id, user.userId);
+    const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
 
@@ -805,13 +881,13 @@ export class QuoteController {
   static async removeItem(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
     const item = quote.lineItems.find((i) => i.id === req.params.itemId);
     if (!item) return fail(res, 404, "Line item not found");
     await prisma.quoteLineItem.delete({ where: { id: item.id } });
-    const updated = await loadOwnedQuote(quote.id, user.userId);
+    const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
 
@@ -824,7 +900,7 @@ export class QuoteController {
   static async priceItem(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
     const item = quote.lineItems.find((i) => i.id === req.params.itemId);
@@ -880,7 +956,7 @@ export class QuoteController {
         ...(packed.rounded ? { quantity: packed.quantity } : {}),
       },
     });
-    const updated = await loadOwnedQuote(quote.id, user.userId);
+    const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
 
@@ -894,7 +970,7 @@ export class QuoteController {
   static async complete(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     const dto = await quoteDtoWithProducts(quote);
     if (dto.blockingFlagCount > 0)
@@ -923,9 +999,67 @@ export class QuoteController {
           },
         });
     }
+    // A DRAFT that never received a snapshot gets one now — quotes created before tax existed,
+    // or before the company configured a default. This is not a re-resolution: a quote that
+    // already carries a rate keeps it, which is the promise the tax settings card makes. A DRAFT
+    // has been sent to nobody, so filling the gap rewrites nothing, whereas completing untaxed
+    // produces an invoice indistinguishable from a deliberate 0%.
+    const lateTax =
+      quote.salesTaxId == null && !quote.taxExempt ? await defaultSalesTax(quote.companyId) : null;
+    if (lateTax)
+      logger.info("Resolved the sales-tax snapshot at completion", {
+        quoteId: quote.id,
+        salesTaxId: lateTax.id,
+      });
+
+    /**
+     * Refuse to complete on a rate QuickBooks cannot honour.
+     *
+     * The rate is a snapshot, so it survives the code behind it being retired in QuickBooks or
+     * deactivated by a later sync. Left alone, the estimate prints tax, the post drops it
+     * because no TaxCode resolves, and the whole thing fails — or worse, succeeds untaxed — in a
+     * background job whose only output is a log line. Better to stop here, where the person who
+     * can fix it is still looking at the screen. Same 409 shape as OPTION_CHOICE_REQUIRED.
+     */
+    const effectiveTaxId = lateTax?.id ?? quote.salesTaxId;
+    if (effectiveTaxId != null) {
+      const conn = await qboConnectionFor(quote.companyId);
+      if (qboConnected(conn) && conn.realmId) {
+        const code = await prisma.salesTaxQb.findFirst({
+          where: {
+            salesTaxId: effectiveTaxId,
+            companyId: quote.companyId,
+            realmId: conn.realmId,
+            qboType: "TaxCode",
+            isActive: true,
+            isDeleted: false,
+          },
+          select: { id: true },
+        });
+        if (!code) {
+          const { rates } = await listSalesTax(quote.companyId);
+          return res.status(409).json({
+            success: false,
+            error: {
+              status: 409,
+              code: "TAX_RATE_UNAVAILABLE",
+              message:
+                "This estimate's sales-tax rate no longer exists in QuickBooks. Pick another rate before completing it.",
+              rates: rates.filter((r) => r.usable),
+            },
+          });
+        }
+      }
+    }
+
     const updated = await prisma.quote.update({
       where: { id: quote.id },
-      data: { status: "COMPLETED", completedAt: new Date(), chosenOptionGroup: chosenOption },
+      data: {
+        status: "COMPLETED",
+        completedAt: new Date(),
+        chosenOptionGroup: chosenOption,
+        ...(lateTax ? { salesTaxId: lateTax.id, taxRatePercent: lateTax.ratePercent } : {}),
+      },
       include: { lineItems: true },
     });
     QuoteController.postToQboInBackground(updated);
@@ -940,7 +1074,7 @@ export class QuoteController {
   static async reopen(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     const updated = await prisma.quote.update({
       where: { id: quote.id },
@@ -981,12 +1115,25 @@ export class QuoteController {
         },
         { ensureItem: ensureQboItem, ensureCustomer: ensureQboCustomer }
       );
-    })().catch((e) =>
-      logger.error("QBO estimate sync failed", {
-        quoteId: quote.id,
-        error: e instanceof Error ? e.message : String(e),
-      })
-    );
+      await prisma.quote.update({
+        where: { id: quote.id },
+        data: { qboSyncedAt: new Date(), qboSyncError: null },
+      });
+    })().catch(async (e) => {
+      const message = e instanceof Error ? e.message : String(e);
+      logger.error("QBO estimate sync failed", { quoteId: quote.id, error: message });
+      // Recorded on the quote, not only in the log (T-17). This path can fail AFTER a customer
+      // has been created in the client's books, so "nothing happened" is not a safe reading —
+      // the screen has to be able to say the estimate did not land, and offer the retry.
+      await prisma.quote
+        .update({ where: { id: quote.id }, data: { qboSyncError: message.slice(0, 500) } })
+        .catch((err) =>
+          logger.error("Could not record the QBO sync failure on the quote", {
+            quoteId: quote.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        );
+    });
   }
 
   /**
@@ -996,7 +1143,7 @@ export class QuoteController {
   static async listImages(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     res.json({ success: true, data: await quoteImagesDto(quote.conversationId) });
   }
@@ -1010,7 +1157,7 @@ export class QuoteController {
   static async uploadImages(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
     // imageUpload.array() puts an array here; the object shape belongs to .fields(), unused.
@@ -1086,7 +1233,7 @@ export class QuoteController {
   static async removeImage(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
     // Scoped to quote-attached rows: a chat-message image is part of the conversation record
@@ -1110,7 +1257,7 @@ export class QuoteController {
   static async downloadDocx(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     const dto = await quoteDtoWithProducts(quote);
     const buffer = await renderQuoteDocument(dto, quote.companyId, quote.templateId);
@@ -1131,7 +1278,7 @@ export class QuoteController {
   static async downloadProposalDocx(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     const { input, proposalTemplate } = await buildProposalParts(quote);
     const buffer = await renderProposalDocx(input, proposalTemplate);
@@ -1149,7 +1296,7 @@ export class QuoteController {
   static async downloadProposalPdf(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     const { input, proposalTemplate } = await buildProposalParts(quote);
     const buffer = await renderProposalPdf(input, proposalTemplate);
@@ -1164,7 +1311,7 @@ export class QuoteController {
   static async emailDraft(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     const [{ header, dto, projectTitle }, company] = await Promise.all([
       buildProposalParts(quote),
@@ -1178,6 +1325,9 @@ export class QuoteController {
       projectTitle,
       lineItems: dto.lineItems,
       total: dto.total,
+      taxRatePercent: dto.taxRatePercent,
+      taxAmount: dto.taxAmount,
+      totalWithTax: dto.totalWithTax,
       optionTotals: dto.optionTotals,
       template: company?.proposal_email_template,
     });
@@ -1201,7 +1351,7 @@ export class QuoteController {
     const subject = String(req.body?.subject ?? "").trim();
     const body = String(req.body?.body ?? "").trim();
     if (!subject || !body) return fail(res, 400, "Subject and body are required");
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
 
     const { header, input, proposalTemplate } = await buildProposalParts(quote);
@@ -1236,7 +1386,7 @@ export class QuoteController {
   static async syncQbo(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
-    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId);
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status !== "COMPLETED")
       return fail(res, 409, "Only a Completed quote posts to QuickBooks — mark it Completed first");
@@ -1264,6 +1414,12 @@ export class QuoteController {
       },
       { ensureItem: ensureQboItem, ensureCustomer: ensureQboCustomer }
     );
+    // This is the retry path, so a success here has to clear the recorded failure — otherwise
+    // the estimate is in QuickBooks and the screen still says it is not (T-17).
+    await prisma.quote.update({
+      where: { id: quote.id },
+      data: { qboSyncedAt: new Date(), qboSyncError: null },
+    });
     res.json({ success: true, data: result });
   }
 }

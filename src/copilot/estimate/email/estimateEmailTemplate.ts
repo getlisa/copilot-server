@@ -103,7 +103,7 @@ export function buildEstimateEmail(input: EstimateEmailInput): BuiltEmail {
     <table style="width:100%;border-collapse:collapse;margin-top:8px;">
       <tbody>
         ${totalsRow("Subtotal", money(subtotal, currency))}
-        ${quote.taxOther ? totalsRow("Tax / Other", money(quote.taxOther, currency)) : ""}
+        ${quote.taxRatePercent != null ? totalsRow(`Sales tax (${quote.taxRatePercent}%)`, money(quote.taxOther, currency)) : quote.taxOther ? totalsRow("Tax / Other", money(quote.taxOther, currency)) : ""}
         ${totalsRow("Total", money(quote.total, currency), true)}
       </tbody>
     </table>
@@ -129,7 +129,11 @@ export function buildEstimateEmail(input: EstimateEmailInput): BuiltEmail {
     ...quote.lineItems.map((li) => `- ${li.code} ${li.description}: ${money(li.lineTotal, currency)}`),
     "",
     `Subtotal: ${money(subtotal, currency)}`,
-    ...(quote.taxOther ? [`Tax / Other: ${money(quote.taxOther, currency)}`] : []),
+    ...(quote.taxRatePercent != null
+      ? [`Sales tax (${quote.taxRatePercent}%): ${money(quote.taxOther, currency)}`]
+      : quote.taxOther
+        ? [`Tax / Other: ${money(quote.taxOther, currency)}`]
+        : []),
     `Total: ${money(quote.total, currency)}`,
     ...(quote.customerNotes && quote.customerNotes.length
       ? ["", "Notes:", ...quote.customerNotes.map((n) => `- ${n}`)]

@@ -615,6 +615,9 @@ export async function runEstimatingTurn(opts: {
               unit: "hr",
               unitPrice: rate,
               isLabor: true,
+              // Labor is not taxed by default, matching the "Taxed" column the estimate PDF has
+              // always printed. Correctable per line on the Invoice tab.
+              taxable: false,
               laborRateId: configured?.id ?? null,
               // An ad-hoc technician-stated rate is an ordinary priced line (US5), not a
               // manual override of configured data — manuallyEdited stays false either way.

@@ -28,8 +28,11 @@ export interface ProposalOptionTotal {
   /** As shown to the customer, e.g. "OPTION A – Shed Trench and Empty Raceway". */
   name: string;
   total: number;
-  /** Base scope + this option — what the customer pays if they choose it. */
+  /** Base scope + this option — what the customer pays if they choose it, before tax. */
   combinedTotal: number;
+  /** Tax on base + this option, and the two together. Absent when no rate is configured. */
+  taxAmount?: number;
+  combinedTotalWithTax?: number;
 }
 
 /** One row of the templated lineItems table. Prices are the marked-up display prices. */
@@ -44,6 +47,12 @@ export interface ProposalLineItem {
   optionGroup?: string | null;
   /** Labor lines print under the labor subtotal in the estimate-style document. */
   isLabor?: boolean;
+  /**
+   * Whether sales tax applies to this line. The estimate layout has always printed a "Taxed"
+   * column, and it inferred the tick from the line's KIND — so a per-line toggle the technician
+   * set would have been contradicted by the document's own tick marks.
+   */
+  taxable?: boolean;
   /** Where the price came from (pricebook name / HD fallback), shown as the row's sub-line. */
   priceSource?: string | null;
   /** No price found yet — the estimate layout prints these as "PENDING" rows at $0.00. */
@@ -66,8 +75,21 @@ export interface ProposalInput {
   exclusions?: string[];
   /** Job-specific Coordination bullets; falls back to job-neutral defaults. */
   coordination?: string[];
-  /** Base-scope total. With optionTotals present this is the base alone, never a grand sum. */
+  /** Base-scope total, BEFORE tax. With optionTotals present this is the base alone. */
   total: number;
+  /**
+   * Sales tax on the base scope (T-62). `taxRatePercent` null means no rate was ever configured
+   * and no tax line renders anywhere; a rate of 0 is a deliberate zero and DOES render, because
+   * "we checked and it is zero" and "we never asked" are different statements to put in front of
+   * a customer who is about to sign.
+   *
+   * These are not optional conveniences. The documents built from this type are the ones the
+   * customer signs, and a proposal that omits tax the QuickBooks estimate charges is a signed
+   * undercharge — so every renderer reading `total` has to be able to reach these too.
+   */
+  taxRatePercent?: number | null;
+  taxAmount?: number;
+  totalWithTax?: number;
   /**
    * Alternative option groups priced independently. Mutually exclusive by definition —
    * the document never adds them together; each renders its own combined total.
