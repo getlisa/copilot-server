@@ -36,8 +36,25 @@ trap 'rm -rf "$WORK"' EXIT
 # every DO $$ ... $$ block in half at its first inner semicolon — hence the dollar-quote-aware
 # splitter rather than `sql.split(';')`.
 cat > "$WORK/runsql.js" <<'JS'
-const { PrismaClient } = require('@prisma/client');
 const fs = require('fs');
+
+// The app's own URL points at app_user, which cannot ALTER a postgres-owned table. Swap in the
+// master credentials, keeping host, port and database exactly as configured.
+//
+// Done through the ENVIRONMENT, before @prisma/client is required, rather than through the
+// PrismaClient({datasources}) constructor: the env path is what Prisma reads by default and has
+// no API surface to get wrong across versions. This runs blind against production, where a
+// mistake costs a full ECS round-trip to discover.
+{
+  const u = new URL(process.env.DIRECT_URL || process.env.DATABASE_URL);
+  u.username = encodeURIComponent(process.env.PGMASTER_USER);
+  u.password = encodeURIComponent(process.env.PGMASTER_PASSWORD);
+  process.env.DATABASE_URL = u.toString();
+  process.env.DIRECT_URL = u.toString();
+  console.log('connecting as', process.env.PGMASTER_USER, 'to', u.host + u.pathname);
+}
+
+const { PrismaClient } = require('@prisma/client');
 
 function statements(sql) {
   const out = [];
@@ -62,20 +79,10 @@ function statements(sql) {
   return out;
 }
 
-// The app's own URL points at app_user, which cannot ALTER a postgres-owned table. Swap in the
-// master credentials while keeping the host, port and database exactly as configured.
-function masterUrl() {
-  const u = new URL(process.env.DIRECT_URL || process.env.DATABASE_URL);
-  u.username = encodeURIComponent(process.env.PGMASTER_USER);
-  u.password = encodeURIComponent(process.env.PGMASTER_PASSWORD);
-  return u.toString();
-}
-
 (async () => {
   const stmts = statements(fs.readFileSync(process.argv[2], 'utf8'));
   console.log('statements:', stmts.length);
-  const url = masterUrl();
-  const p = new PrismaClient({ datasources: { db: { url } } });
+  const p = new PrismaClient();
   for (const [n, s] of stmts.entries()) {
     try {
       await p.$executeRawUnsafe(s);

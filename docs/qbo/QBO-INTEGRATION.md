@@ -505,7 +505,7 @@ written, because this task outlives a context window and this file is what survi
 | T-46 | CS | Converge the mirrors downward: rows deleted or deactivated in QuickBooks must stop being offered. | — | **DONE** |
 | T-47 | CS | `queryAll` truncates at 50,000 and reports the partial count as the total. | — | **DONE** |
 | T-48 | CS | Persist a pending marker **before** the QBO create — a crash between create and persist duplicates the customer's estimate. `PrivateNote` already carries `CLARA quote <id>` and is never read back. | — | **DONE** |
-| T-49 | CS | Three check-script fixtures cast `as any`, defeating the very config added to catch DTO drift. | — | **DONE** |
+| T-49 | CS | Three check-script fixtures cast `as any`, defeating the very config added to catch DTO drift. | — | **DONE** — the three that feed `toQuoteDto` are typed against `QuoteInput` now. One cast remains, in `check-qbo-auth.ts:43`: it builds a partial `QboConnection` for `qboConnected`, whose signature is a type guard over the full Prisma row, so narrowing it would cost the guard. It does not touch the DTO, so it is outside what T-49 was about. |
 | T-50 | CS | `linkItem` swallows every error, not just the unique violation it documents. | — | **DONE** |
 | T-52 | CS | The dev auth bypass is armed by the *absence* of `NODE_ENV=production` — fail-open. Make it a positive opt-in. | — | **DONE** |
 | T-53 | CS | Raw Intuit/Prisma text reflected to clients; a customer email address written to a log line. | — | **DONE** |
