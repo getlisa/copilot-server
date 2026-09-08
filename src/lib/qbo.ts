@@ -304,7 +304,7 @@ const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 export type EnsureCustomer = (
   conn: QboConnection,
   companyId: number,
-  quote: { id: string; qboCustomerId: string | null },
+  quote: { id: string; customerId: number | null },
   fallback: { name: string; email?: string | null; phone?: string | null; address?: string | null }
 ) => Promise<string>;
 
@@ -465,7 +465,7 @@ export async function syncQuoteToQbo(
     id: string;
     qboEstimateId: string | null;
     chosenOptionGroup: string | null;
-    qboCustomerId: string | null;
+    customerId: number | null;
   },
   dto: { lineItems: LineItemDto[]; optionTotals: QuoteOptionTotal[] },
   customer: { name: string; email?: string | null; phone?: string | null; address?: string | null },

@@ -620,28 +620,24 @@ export class QuoteController {
      *
      * Null clears the link and the posting path falls back to matching on the customer name.
      */
-    if (body.qboCustomerId !== undefined) {
-      if (body.qboCustomerId === null) {
-        data.qboCustomerId = null;
-        data.qboCustomerName = null;
+    if (body.customerId !== undefined) {
+      if (body.customerId === null) {
+        data.customerId = null;
       } else {
-        const qboCustomerId = String(body.qboCustomerId);
-        const known = await prisma.rawQbCustomer.findUnique({
-          where: { companyId_qboId: { companyId: user.companyId, qboId: qboCustomerId } },
-          select: { displayName: true },
+        const customerId = Number(body.customerId);
+        if (!Number.isInteger(customerId)) return fail(res, 400, "customerId must be an integer");
+        // Validated against THIS company's customers rather than trusted from the client:
+        // otherwise a caller could bill this estimate to another company's customer, and — once
+        // the customer is pushed to QuickBooks — into another company's books.
+        const known = await prisma.customer.findFirst({
+          where: { id: customerId, companyId: user.companyId },
+          select: { name: true },
         });
-        if (!known)
-          return fail(
-            res,
-            400,
-            "That QuickBooks customer is not in this company's synced customers — sync QuickBooks, or add the customer as new"
-          );
-        data.qboCustomerId = qboCustomerId;
-        data.qboCustomerName = known.displayName;
-        // Keep the quote's own customer name in step, so the proposal and the books agree on
-        // who this is for. Only when the quote has no name of its own — never overwrite what a
-        // technician typed.
-        if (!quote.customerName) data.customerName = known.displayName;
+        if (!known) return fail(res, 400, "That customer does not belong to this company");
+        data.customerId = customerId;
+        // Keep the quote's own name in step so the proposal and the books agree on who this is
+        // for — but only when the quote has none, never overwriting what a technician typed.
+        if (!quote.customerName) data.customerName = known.name;
       }
     }
 

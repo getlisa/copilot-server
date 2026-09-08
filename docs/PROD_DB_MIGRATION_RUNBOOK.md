@@ -111,7 +111,116 @@ Zero-risk to the app — it connects as `app_user`, not `postgres`.
 | Connection string auth fails with correct password | Password has `: # ? ] *` etc. — URL-encode it (step 4) |
 | Which DB is prod? | NOT the Supabase URLs in local `.env` — prod is the Aurora us-east-1 instance |
 
-## Pending migration: QuickBooks reference-data ingestion (2026-09-07)
+## Pending migration: customers + sales tax as entities (2026-09-08)
+
+The entity + `<entity>_qb` architecture. CLARA owns the entity; a sibling `_qb` row holds what
+QuickBooks knows about it. Three reasons the split matters: the entity must work for a company
+with no accounting integration, a QuickBooks id is only meaningful inside the realm that issued
+it, and re-syncing Intuit's data must never be able to lose the record itself.
+
+Supersedes three tables from the 2026-09-07 block — `raw_customer_qb`, `raw_taxcode_qb` and
+`raw_taxrate_qb`. They are dropped, not left behind: they carried only re-syncable reference
+data, they are one day old, and two tables claiming to hold the same customers is how they drift.
+`raw_item_qb` and `raw_account_qb` stay — items already have their entity (`pricebook_items`,
+linked through `qbo_item_links`) and accounts have no CLARA-side counterpart.
+
+Run BEFORE the image ships: Prisma selects every scalar column.
+
+```sql
+CREATE TABLE IF NOT EXISTS public.customers (
+  id         SERIAL PRIMARY KEY,
+  company_id INT     NOT NULL,
+  name       TEXT    NOT NULL,
+  email      TEXT,
+  phone      TEXT,
+  address    TEXT,
+  active     BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+-- Mirrors QuickBooks' own DisplayName uniqueness, so a name that works here cannot fail there
+-- for a reason the technician never saw.
+CREATE UNIQUE INDEX IF NOT EXISTS customers_company_id_name_key ON public.customers (company_id, name);
+CREATE INDEX IF NOT EXISTS customers_company_id_name_idx ON public.customers (company_id, name);
+
+CREATE TABLE IF NOT EXISTS public.customer_qb (
+  id           SERIAL PRIMARY KEY,
+  customer_id  INT  NOT NULL REFERENCES public.customers(id) ON DELETE CASCADE,
+  company_id   INT  NOT NULL,
+  realm_id     TEXT NOT NULL,
+  qbo_id       TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  raw          JSONB,
+  synced_at    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+-- One row per customer per realm: reconnect to a different QuickBooks file and the old row stays
+-- inert rather than being overwritten with an id belonging to someone else's books.
+CREATE UNIQUE INDEX IF NOT EXISTS customer_qb_customer_id_realm_id_key ON public.customer_qb (customer_id, realm_id);
+CREATE UNIQUE INDEX IF NOT EXISTS customer_qb_company_realm_qbo_key ON public.customer_qb (company_id, realm_id, qbo_id);
+CREATE INDEX IF NOT EXISTS customer_qb_company_realm_idx ON public.customer_qb (company_id, realm_id);
+
+CREATE TABLE IF NOT EXISTS public.sales_tax (
+  id           SERIAL PRIMARY KEY,
+  company_id   INT     NOT NULL,
+  name         TEXT    NOT NULL,
+  rate_percent DECIMAL(6,4) NOT NULL,
+  is_default   BOOLEAN NOT NULL DEFAULT FALSE,
+  active       BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_company_id_name_key ON public.sales_tax (company_id, name);
+CREATE INDEX IF NOT EXISTS sales_tax_company_id_active_idx ON public.sales_tax (company_id, active);
+-- At most ONE default per company. Partial unique indexes cannot be expressed in schema.prisma,
+-- so this is the only place the rule is enforced by the database — the controller also moves the
+-- default inside a transaction. Two defaults would mean a new estimate picking one arbitrarily,
+-- and picking arbitrarily in money.
+CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_one_default_per_company
+  ON public.sales_tax (company_id) WHERE is_default;
+
+CREATE TABLE IF NOT EXISTS public.sales_tax_qb (
+  id           SERIAL PRIMARY KEY,
+  sales_tax_id INT  NOT NULL REFERENCES public.sales_tax(id) ON DELETE CASCADE,
+  company_id   INT  NOT NULL,
+  realm_id     TEXT NOT NULL,
+  -- "TaxRate" carries the percentage; "TaxCode" is what a transaction line references. Intuit
+  -- models them separately, so one CLARA rate can hold a row of each.
+  qbo_type     TEXT NOT NULL,
+  qbo_id       TEXT NOT NULL,
+  name         TEXT NOT NULL,
+  raw          JSONB,
+  synced_at    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_qb_company_realm_type_qbo_key ON public.sales_tax_qb (company_id, realm_id, qbo_type, qbo_id);
+CREATE INDEX IF NOT EXISTS sales_tax_qb_sales_tax_id_idx ON public.sales_tax_qb (sales_tax_id);
+
+-- Quotes point at the customer ENTITY. The QuickBooks id is not duplicated here — it lives on
+-- customer_qb, keyed by realm, so a reconnect cannot leave a stale id attached to an estimate.
+ALTER TABLE public.quotes ADD COLUMN IF NOT EXISTS customer_id INT;
+ALTER TABLE public.quotes DROP COLUMN IF EXISTS qbo_customer_id;
+ALTER TABLE public.quotes DROP COLUMN IF EXISTS qbo_customer_name;
+
+-- Superseded by customers / customer_qb / sales_tax / sales_tax_qb. Reference data only, one day
+-- old, and re-syncable — leaving them would leave two tables claiming the same customers.
+DROP TABLE IF EXISTS public.raw_customer_qb;
+DROP TABLE IF EXISTS public.raw_taxcode_qb;
+DROP TABLE IF EXISTS public.raw_taxrate_qb;
+
+ALTER TABLE public.customers    OWNER TO app_user;
+ALTER TABLE public.customer_qb  OWNER TO app_user;
+ALTER TABLE public.sales_tax    OWNER TO app_user;
+ALTER TABLE public.sales_tax_qb OWNER TO app_user;
+GRANT USAGE ON SEQUENCE public.customers_id_seq    TO app_user;
+GRANT USAGE ON SEQUENCE public.customer_qb_id_seq  TO app_user;
+GRANT USAGE ON SEQUENCE public.sales_tax_id_seq    TO app_user;
+GRANT USAGE ON SEQUENCE public.sales_tax_qb_id_seq TO app_user;
+```
+
+Run as the Aurora master via a one-off ECS task — `app_user` cannot DDL. Recipe in
+`docs/qbo/QBO-INTEGRATION.md` §10. Re-sync afterwards to repopulate customers and sales tax
+(the 2026-09-07 sync wrote to the dropped tables).
+
+## APPLIED 2026-09-07: QuickBooks reference-data ingestion (2026-09-07)
 
 Five mirror tables for QuickBooks reference data, plus our own item-id mapping. Additive and
 idempotent; no existing table or column is touched, so nothing changes behaviour for a company

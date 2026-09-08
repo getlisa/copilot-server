@@ -1,6 +1,6 @@
 import assert from "assert";
 import { autoItemName } from "../src/lib/qbo";
-import { itemKey } from "../src/lib/qboIngest";
+import { itemKey, customerDisplayName } from "../src/lib/qboIngest";
 
 /**
  * Pins the item-identity contract behind "sync an item once, then reuse its id".
@@ -58,5 +58,16 @@ assert.strictEqual(
   itemKey(autoItemName(line({ isLabor: true, description: "Panel swap labour, 10 hrs" }))),
   "labor"
 );
+
+// ---- customer display names (Intuit's rules, ~/clara/customerqbo.md) ----
+// A colon is QuickBooks' sub-customer separator, and tabs/newlines are rejected outright — so a
+// name carrying any of them must be normalised here rather than failing at the API with a
+// message nobody can act on.
+assert.strictEqual(customerDisplayName("Acme: West"), "Acme West", "colon is the sub-customer separator");
+assert.strictEqual(customerDisplayName("Acme\tWest"), "Acme West", "tabs are rejected by QBO");
+assert.strictEqual(customerDisplayName("Acme\nWest"), "Acme West", "newlines are rejected by QBO");
+assert.strictEqual(customerDisplayName("  Acme   West  "), "Acme West", "runs of space collapse");
+assert.strictEqual(customerDisplayName(""), "", "empty stays empty so the caller can refuse it");
+assert.strictEqual(customerDisplayName("x".repeat(160)).length, 100, "capped at QBO's limit");
 
 console.log("check-qbo-items: OK");

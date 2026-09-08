@@ -47,31 +47,82 @@ const id = (v: unknown): string => String(v ?? "").trim();
  */
 export const itemKey = (name: string) => name.trim().toLowerCase().slice(0, 100);
 
-// ---------- customers (US4, and the picker) ----------
+// ---------- customers: entity + customer_qb ----------
 
 interface QboCustomerRow {
   Id: string;
   DisplayName?: string;
   PrimaryEmailAddr?: { Address?: string };
   PrimaryPhone?: { FreeFormNumber?: string };
+  BillAddr?: { Line1?: string; City?: string; CountrySubDivisionCode?: string; PostalCode?: string };
   Active?: boolean;
 }
 
-async function ingestCustomers(conn: QboConnection, companyId: number): Promise<number> {
+const addrLine = (a?: QboCustomerRow["BillAddr"]): string | null =>
+  a ? str([a.Line1, a.City, a.CountrySubDivisionCode, a.PostalCode].filter(Boolean).join(", ")) : null;
+
+/**
+ * Ingest customers into `customers` (the entity) and `customer_qb` (what QuickBooks knows).
+ *
+ * Matched on the QBO id first, so a rename in QuickBooks moves the existing row rather than
+ * creating a second customer. Falling back to the name is what adopts a customer CLARA already
+ * had before the company connected — otherwise the first sync would duplicate every one of them.
+ *
+ * Our own name/email/phone are only filled in where they are EMPTY. A technician who corrected a
+ * phone number here should not have it overwritten by whatever the books happen to hold.
+ */
+async function ingestCustomers(
+  conn: QboConnection,
+  companyId: number,
+  realmId: string
+): Promise<number> {
   const rows = await queryAll<QboCustomerRow>(conn, "Customer");
   for (const r of rows) {
-    const data = {
-      displayName: str(r.DisplayName) ?? `Customer ${id(r.Id)}`,
-      email: str(r.PrimaryEmailAddr?.Address),
-      phone: str(r.PrimaryPhone?.FreeFormNumber),
-      active: r.Active !== false,
-      raw: r as object,
-      syncedAt: new Date(),
-    };
-    await prisma.rawQbCustomer.upsert({
-      where: { companyId_qboId: { companyId, qboId: id(r.Id) } },
-      create: { companyId, qboId: id(r.Id), ...data },
-      update: data,
+    const qboId = id(r.Id);
+    const displayName = str(r.DisplayName) ?? `Customer ${qboId}`;
+    const email = str(r.PrimaryEmailAddr?.Address);
+    const phone = str(r.PrimaryPhone?.FreeFormNumber);
+    const address = addrLine(r.BillAddr);
+
+    const linked = await prisma.customerQb.findUnique({
+      where: { companyId_realmId_qboId: { companyId, realmId, qboId } },
+      select: { customerId: true },
+    });
+    const byName = linked
+      ? null
+      : await prisma.customer.findUnique({
+          where: { companyId_name: { companyId, name: displayName } },
+          select: { id: true },
+        });
+
+    const customerId =
+      linked?.customerId ??
+      byName?.id ??
+      (
+        await prisma.customer.create({
+          data: { companyId, name: displayName, email, phone, address, active: r.Active !== false },
+        })
+      ).id;
+
+    // Fill gaps only — never clobber what someone typed here.
+    const current = await prisma.customer.findUnique({
+      where: { id: customerId },
+      select: { email: true, phone: true, address: true },
+    });
+    await prisma.customer.update({
+      where: { id: customerId },
+      data: {
+        email: current?.email ?? email,
+        phone: current?.phone ?? phone,
+        address: current?.address ?? address,
+      },
+    });
+
+    const qb = { qboId, displayName, raw: r as object, syncedAt: new Date() };
+    await prisma.customerQb.upsert({
+      where: { customerId_realmId: { customerId, realmId } },
+      create: { customerId, companyId, realmId, ...qb },
+      update: qb,
     });
   }
   return rows.length;
@@ -110,60 +161,90 @@ async function ingestItems(conn: QboConnection, companyId: number): Promise<numb
   return rows.length;
 }
 
-// ---------- sales tax ----------
+// ---------- sales tax: entity + sales_tax_qb ----------
 
-interface QboTaxCodeRow {
-  Id: string;
-  Name?: string;
-  Taxable?: boolean;
-  Active?: boolean;
-}
-interface QboTaxRateRow {
-  Id: string;
-  Name?: string;
-  RateValue?: number | string;
-  Active?: boolean;
-}
+interface QboTaxCodeRow { Id: string; Name?: string; Taxable?: boolean; Active?: boolean }
+interface QboTaxRateRow { Id: string; Name?: string; RateValue?: number | string; Active?: boolean }
 
-async function ingestTaxCodes(conn: QboConnection, companyId: number): Promise<number> {
-  const rows = await queryAll<QboTaxCodeRow>(conn, "TaxCode");
-  for (const r of rows) {
-    const data = {
-      name: str(r.Name) ?? `TaxCode ${id(r.Id)}`,
-      taxable: r.Taxable !== false,
-      active: r.Active !== false,
-      raw: r as object,
-      syncedAt: new Date(),
-    };
-    await prisma.rawQbTaxCode.upsert({
-      where: { companyId_qboId: { companyId, qboId: id(r.Id) } },
-      create: { companyId, qboId: id(r.Id), ...data },
-      update: data,
+/**
+ * Ingest QuickBooks tax into `sales_tax` (the rate CLARA applies) and `sales_tax_qb`.
+ *
+ * TaxRate carries the percentage; TaxCode is what a transaction line references. They are
+ * separate entities in Intuit's model, so a single CLARA rate can hold one `_qb` row of each —
+ * which is why `qboType` is part of that table's key.
+ *
+ * Rates arrive as candidates, never as the default. Which rate an estimate uses is a decision an
+ * admin makes in tax settings; importing one silently would start taxing every new estimate the
+ * moment someone connected QuickBooks.
+ */
+async function ingestSalesTax(
+  conn: QboConnection,
+  companyId: number,
+  realmId: string
+): Promise<{ taxCodes: number; taxRates: number }> {
+  const rates = await queryAll<QboTaxRateRow>(conn, "TaxRate");
+  for (const r of rates) {
+    const value = r.RateValue == null ? null : Number(r.RateValue);
+    // A non-finite rate is skipped rather than stored — this becomes a percentage applied to
+    // real money, and NaN would propagate silently through every total.
+    if (value == null || !Number.isFinite(value)) continue;
+    const name = str(r.Name) ?? `TaxRate ${id(r.Id)}`;
+
+    const existing = await prisma.salesTax.findUnique({
+      where: { companyId_name: { companyId, name } },
+      select: { id: true },
+    });
+    const salesTaxId =
+      existing?.id ??
+      (
+        await prisma.salesTax.create({
+          data: { companyId, name, ratePercent: value, active: r.Active !== false },
+        })
+      ).id;
+
+    const qb = { name, raw: r as object, syncedAt: new Date() };
+    await prisma.salesTaxQb.upsert({
+      where: {
+        companyId_realmId_qboType_qboId: {
+          companyId,
+          realmId,
+          qboType: "TaxRate",
+          qboId: id(r.Id),
+        },
+      },
+      create: { salesTaxId, companyId, realmId, qboType: "TaxRate", qboId: id(r.Id), ...qb },
+      update: qb,
     });
   }
-  return rows.length;
-}
 
-async function ingestTaxRates(conn: QboConnection, companyId: number): Promise<number> {
-  const rows = await queryAll<QboTaxRateRow>(conn, "TaxRate");
-  for (const r of rows) {
-    const rate = r.RateValue == null ? null : Number(r.RateValue);
-    const data = {
-      name: str(r.Name) ?? `TaxRate ${id(r.Id)}`,
-      // A non-finite rate is dropped rather than stored as NaN — this value pre-fills the org
-      // default, so a junk number here would become a junk tax rate on real estimates.
-      rateValue: rate != null && Number.isFinite(rate) ? rate : null,
-      active: r.Active !== false,
-      raw: r as object,
-      syncedAt: new Date(),
-    };
-    await prisma.rawQbTaxRate.upsert({
-      where: { companyId_qboId: { companyId, qboId: id(r.Id) } },
-      create: { companyId, qboId: id(r.Id), ...data },
-      update: data,
+  // Tax codes attach to a rate of the same name where one exists; a code with no matching rate
+  // (the well-known TAX / NON, for instance) has no percentage of its own to record.
+  const codes = await queryAll<QboTaxCodeRow>(conn, "TaxCode");
+  let codesLinked = 0;
+  for (const c of codes) {
+    const name = str(c.Name) ?? `TaxCode ${id(c.Id)}`;
+    const rate = await prisma.salesTax.findUnique({
+      where: { companyId_name: { companyId, name } },
+      select: { id: true },
     });
+    if (!rate) continue;
+    const qb = { name, raw: c as object, syncedAt: new Date() };
+    await prisma.salesTaxQb.upsert({
+      where: {
+        companyId_realmId_qboType_qboId: {
+          companyId,
+          realmId,
+          qboType: "TaxCode",
+          qboId: id(c.Id),
+        },
+      },
+      create: { salesTaxId: rate.id, companyId, realmId, qboType: "TaxCode", qboId: id(c.Id), ...qb },
+      update: qb,
+    });
+    codesLinked++;
   }
-  return rows.length;
+
+  return { taxCodes: codesLinked, taxRates: rates.length };
 }
 
 // ---------- accounts (fixes G10: no more "first Income account found") ----------
@@ -208,15 +289,16 @@ async function ingestAccounts(conn: QboConnection, companyId: number): Promise<n
 export async function syncQboReferenceData(companyId: number): Promise<IngestCounts> {
   const conn = await qboConnectionFor(companyId);
   if (!qboConnected(conn)) throw new Error("QuickBooks is not connected for this company");
+  const realmId = conn.realmId;
+  if (!realmId) throw new Error("QuickBooks connection has no realm — reconnect from Settings");
 
-  const counts: IngestCounts = {
-    customers: await ingestCustomers(conn, companyId),
-    items: await ingestItems(conn, companyId),
-    taxCodes: await ingestTaxCodes(conn, companyId),
-    taxRates: await ingestTaxRates(conn, companyId),
-    accounts: await ingestAccounts(conn, companyId),
-  };
-  logger.info("QBO reference data synced", { companyId, ...counts });
+  const customers = await ingestCustomers(conn, companyId, realmId);
+  const items = await ingestItems(conn, companyId);
+  const tax = await ingestSalesTax(conn, companyId, realmId);
+  const accounts = await ingestAccounts(conn, companyId);
+
+  const counts: IngestCounts = { customers, items, accounts, ...tax };
+  logger.info("QBO reference data synced", { companyId, realmId, ...counts });
   return counts;
 }
 
@@ -226,18 +308,30 @@ export async function syncQboReferenceData(companyId: number): Promise<IngestCou
  * Customer typeahead. Empty query returns the first page so the picker has something to show
  * before anyone types. Inactive customers are excluded: they cannot be billed.
  */
-export function searchQboCustomers(companyId: number, q: string, limit = 20) {
+/**
+ * Customer typeahead. Reads the `customers` entity, not the QuickBooks mirror, so the picker
+ * works identically for a company with no accounting integration at all. Whether a customer is
+ * synced is reported alongside, because that is what the estimate screen needs to show.
+ */
+export async function searchCustomers(companyId: number, q: string, limit = 20) {
   const term = q.trim();
-  return prisma.rawQbCustomer.findMany({
+  const rows = await prisma.customer.findMany({
     where: {
       companyId,
       active: true,
-      ...(term ? { displayName: { contains: term, mode: "insensitive" as const } } : {}),
+      ...(term ? { name: { contains: term, mode: "insensitive" as const } } : {}),
     },
-    select: { qboId: true, displayName: true, email: true, phone: true },
-    orderBy: { displayName: "asc" },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+      qb: { select: { qboId: true, realmId: true }, take: 1 },
+    },
+    orderBy: { name: "asc" },
     take: Math.min(limit, 50),
   });
+  return rows.map(({ qb, ...c }) => ({ ...c, qboId: qb[0]?.qboId ?? null }));
 }
 
 /** Income accounts, for the admin to choose what created items bill against (G10). */
@@ -249,18 +343,37 @@ export function qboIncomeAccounts(companyId: number) {
   });
 }
 
-/** Tax rates, to pre-fill the organisation's default rate rather than have an admin type it. */
-export function qboTaxRateOptions(companyId: number) {
-  return prisma.rawQbTaxRate.findMany({
-    where: { companyId, active: true, rateValue: { not: null } },
-    select: { qboId: true, name: true, rateValue: true },
-    orderBy: { name: "asc" },
+/**
+ * The company's sales-tax rates and which one is the default. Readable by every role: an
+ * estimate has to show the rate it is applying, and gating this would blank the totals for
+ * technicians.
+ */
+export function listSalesTax(companyId: number) {
+  return prisma.salesTax.findMany({
+    where: { companyId },
+    select: {
+      id: true,
+      name: true,
+      ratePercent: true,
+      isDefault: true,
+      active: true,
+      qb: { select: { qboType: true, qboId: true }, orderBy: { qboType: "asc" } },
+    },
+    orderBy: [{ isDefault: "desc" }, { name: "asc" }],
   });
 }
 
-/** When the company last synced, so the UI can offer a refresh instead of guessing. */
+/** The rate a new estimate starts with, or null when the company has not chosen one. */
+export function defaultSalesTax(companyId: number) {
+  return prisma.salesTax.findFirst({
+    where: { companyId, isDefault: true, active: true },
+    select: { id: true, name: true, ratePercent: true },
+  });
+}
+
+/** When reference data was last pulled, so the UI can offer a refresh instead of guessing. */
 export async function qboSyncedAt(companyId: number): Promise<Date | null> {
-  const newest = await prisma.rawQbCustomer.findFirst({
+  const newest = await prisma.customerQb.findFirst({
     where: { companyId },
     select: { syncedAt: true },
     orderBy: { syncedAt: "desc" },
@@ -455,33 +568,71 @@ export interface NewQboCustomer {
   address?: string | null;
 }
 
-/** What the picker and the create path both return, so the caller treats them alike. */
-export interface LinkedQboCustomer {
-  qboId: string;
-  displayName: string;
+/** What the picker and the create path both return, so callers treat them alike. */
+export interface LinkedCustomer {
+  customerId: number;
+  name: string;
+  qboId: string | null;
 }
 
 /**
- * Create a customer in QuickBooks and mirror it locally.
+ * Create a customer — in CLARA always, and in QuickBooks too when the company is connected.
  *
- * Thrown errors carry a message meant for a technician standing in someone's kitchen, because
- * that is where this gets called from. The duplicate case is the one worth naming: QuickBooks
- * enforces DisplayName uniqueness across customers, vendors and employees, so "already exists"
- * can be true even when the customer list looks clear.
+ * The entity comes first on purpose: a company with no accounting integration still needs
+ * customers, and a QuickBooks outage must not stop someone taking down a new customer's details
+ * on site. When QBO is connected the two are created together, because the estimate cannot be
+ * posted until the customer exists there (product rule, 2026-09-07).
+ *
+ * Errors are written for a technician standing in someone's kitchen, which is where this is
+ * called from. The duplicate case is the one worth naming: QuickBooks enforces DisplayName
+ * uniqueness across customers, VENDORS and employees, so "already exists" can be true even when
+ * the customer list looks clear.
  */
-export async function createQboCustomer(
-  conn: QboConnection,
+export async function createCustomer(
   companyId: number,
-  input: NewQboCustomer
-): Promise<LinkedQboCustomer> {
-  const displayName = customerDisplayName(input.name);
-  if (!displayName) throw new Error("A customer name is required");
+  input: NewQboCustomer,
+  conn: QboConnection | null
+): Promise<LinkedCustomer> {
+  const name = customerDisplayName(input.name);
+  if (!name) throw new Error("A customer name is required");
 
   const email = str(input.email);
-  if (email && !EMAIL_OK.test(email))
-    throw new Error(`"${email}" is not a valid email address`);
+  if (email && !EMAIL_OK.test(email)) throw new Error(`"${email}" is not a valid email address`);
 
-  let created: { Customer: { Id: string; DisplayName?: string } };
+  const existing = await prisma.customer.findUnique({
+    where: { companyId_name: { companyId, name } },
+    select: { id: true },
+  });
+  if (existing)
+    throw new Error(`"${name}" is already one of your customers — pick them from the list instead`);
+
+  const customer = await prisma.customer.create({
+    data: { companyId, name, email, phone: str(input.phone), address: str(input.address) },
+  });
+
+  if (!conn?.realmId) return { customerId: customer.id, name, qboId: null };
+
+  const qboId = await pushCustomerToQbo(conn, companyId, conn.realmId, customer.id, {
+    ...input,
+    name,
+  });
+  return { customerId: customer.id, name, qboId };
+}
+
+/**
+ * Create one of our customers in QuickBooks and record the link. Split out so it can also run
+ * later for a customer created while the company was disconnected.
+ */
+async function pushCustomerToQbo(
+  conn: QboConnection,
+  companyId: number,
+  realmId: string,
+  customerId: number,
+  input: NewQboCustomer
+): Promise<string> {
+  const displayName = customerDisplayName(input.name);
+  const email = str(input.email);
+  let created: { Customer: { Id: string } };
   try {
     created = await qboFetch(conn, "/customer", {
       method: "POST",
@@ -494,109 +645,177 @@ export async function createQboCustomer(
     });
   } catch (e) {
     const body = e instanceof Error ? e.message : String(e);
-    // QBO fault 6240 / "Duplicate Name Exists Error" — the name is taken by a customer, vendor
-    // or employee. Say which name, since the UI cannot know why an unused-looking name failed.
     if (/6240|Duplicate Name/i.test(body))
       throw new Error(
         `"${displayName}" already exists in QuickBooks (names are shared with vendors and employees). Pick the existing customer, or use a different name.`
       );
     throw e;
   }
-
   const qboId = String(created.Customer.Id);
-  await mirrorCustomer(companyId, qboId, displayName, input, created.Customer);
-  logger.info("QBO customer created", { companyId, qboId, displayName });
-  return { qboId, displayName };
-}
-
-/** Write a customer into the mirror so the picker sees it without waiting for a full re-sync. */
-async function mirrorCustomer(
-  companyId: number,
-  qboId: string,
-  displayName: string,
-  input: NewQboCustomer,
-  raw: object
-) {
-  const data = {
-    displayName,
-    email: str(input.email),
-    phone: str(input.phone),
-    active: true,
-    raw,
-    syncedAt: new Date(),
-  };
-  try {
-    await prisma.rawQbCustomer.upsert({
-      where: { companyId_qboId: { companyId, qboId } },
-      create: { companyId, qboId, ...data },
-      update: data,
-    });
-  } catch (e) {
-    // The id is already in hand; a mirror miss costs a picker refresh, not the estimate.
-    logger.warn("Could not mirror QBO customer", {
-      companyId,
-      qboId,
-      error: e instanceof Error ? e.message : String(e),
-    });
-  }
+  const qb = { qboId, displayName, raw: created.Customer as object, syncedAt: new Date() };
+  await prisma.customerQb.upsert({
+    where: { customerId_realmId: { customerId, realmId } },
+    create: { customerId, companyId, realmId, ...qb },
+    update: qb,
+  });
+  logger.info("QBO customer created", { companyId, customerId, qboId, displayName });
+  return qboId;
 }
 
 /**
- * The customer an estimate bills to, guaranteed to exist in QuickBooks before the estimate does.
+ * The QuickBooks customer id an estimate bills to, guaranteed to exist before the estimate does.
  *
  * Preference order:
- *  1. the customer explicitly linked to this quote — what the estimate screen's picker sets;
- *  2. an exact DisplayName match, from the mirror first and then live, so we adopt rather than
- *     duplicate (US4: never a second record, never a suffix, never an overwrite);
- *  3. create one from the quote's own customer details.
- *
- * Whichever path runs, the id is written back to the quote, so re-completing later reuses it
- * instead of matching by name again.
+ *  1. the customer linked to this quote, already synced to this realm;
+ *  2. that customer, not yet synced — pushed now, because the estimate cannot reference it
+ *     otherwise (this is the "sync the customer, then the estimate" rule);
+ *  3. no linked customer (a quote predating the picker) — adopt an exact DisplayName match in
+ *     QuickBooks if there is one, so we never create a duplicate, else create.
  */
 export async function ensureQboCustomer(
   conn: QboConnection,
   companyId: number,
-  quote: { id: string; qboCustomerId: string | null },
+  quote: { id: string; customerId: number | null },
   fallback: NewQboCustomer
 ): Promise<string> {
-  if (quote.qboCustomerId) return quote.qboCustomerId;
+  const realmId = conn.realmId;
+  if (!realmId) throw new Error("QuickBooks connection has no realm — reconnect from Settings");
 
-  const displayName = customerDisplayName(fallback.name) || "Customer";
+  if (quote.customerId != null) {
+    const link = await prisma.customerQb.findUnique({
+      where: { customerId_realmId: { customerId: quote.customerId, realmId } },
+      select: { qboId: true },
+    });
+    if (link) return link.qboId;
 
-  const mirrored = await prisma.rawQbCustomer.findFirst({
-    where: { companyId, displayName, active: true },
-    select: { qboId: true, displayName: true },
-  });
-  let linked: LinkedQboCustomer | null = mirrored
-    ? { qboId: mirrored.qboId, displayName: mirrored.displayName }
-    : null;
-
-  if (!linked) {
-    const found = await queryAll<{ Id: string; DisplayName?: string }>(
-      conn,
-      "Customer",
-      `DisplayName = '${escLiteral(displayName)}'`,
-      { pageSize: 1, maxPages: 1 }
-    );
-    if (found[0]) {
-      linked = { qboId: String(found[0].Id), displayName };
-      await mirrorCustomer(companyId, linked.qboId, displayName, fallback, found[0]);
-    }
+    const c = await prisma.customer.findUnique({
+      where: { id: quote.customerId },
+      select: { name: true, email: true, phone: true, address: true },
+    });
+    if (c) return pushCustomerToQbo(conn, companyId, realmId, quote.customerId, c);
   }
 
-  if (!linked) linked = await createQboCustomer(conn, companyId, { ...fallback, name: displayName });
+  // Legacy path: the quote carries only free text. Adopt rather than duplicate (US4).
+  const name = customerDisplayName(fallback.name) || "Customer";
+  const customer =
+    (await prisma.customer.findUnique({
+      where: { companyId_name: { companyId, name } },
+      select: { id: true },
+    })) ??
+    (await prisma.customer.create({
+      data: {
+        companyId,
+        name,
+        email: str(fallback.email),
+        phone: str(fallback.phone),
+        address: str(fallback.address),
+      },
+    }));
 
-  await linkCustomerToQuote(quote.id, linked);
-  return linked.qboId;
-}
-
-/** Record the choice on the quote. The estimate payload reads it; the UI displays the name. */
-export async function linkCustomerToQuote(quoteId: string, customer: LinkedQboCustomer) {
-  await prisma.quote.update({
-    where: { id: quoteId },
-    data: { qboCustomerId: customer.qboId, qboCustomerName: customer.displayName },
+  const link = await prisma.customerQb.findUnique({
+    where: { customerId_realmId: { customerId: customer.id, realmId } },
+    select: { qboId: true },
   });
+  if (link) {
+    await prisma.quote.update({ where: { id: quote.id }, data: { customerId: customer.id } });
+    return link.qboId;
+  }
+
+  const found = await queryAll<{ Id: string }>(
+    conn,
+    "Customer",
+    `DisplayName = '${escLiteral(name)}'`,
+    { pageSize: 1, maxPages: 1 }
+  );
+  let qboId: string;
+  if (found[0]) {
+    qboId = String(found[0].Id);
+    const qb = { qboId, displayName: name, raw: found[0] as object, syncedAt: new Date() };
+    await prisma.customerQb.upsert({
+      where: { customerId_realmId: { customerId: customer.id, realmId } },
+      create: { customerId: customer.id, companyId, realmId, ...qb },
+      update: qb,
+    });
+  } else {
+    qboId = await pushCustomerToQbo(conn, companyId, realmId, customer.id, { ...fallback, name });
+  }
+
+  await prisma.quote.update({ where: { id: quote.id }, data: { customerId: customer.id } });
+  return qboId;
 }
 
 /** QBO query literals escape single quotes with a backslash. */
 const escLiteral = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+
+// ---------- sales-tax settings ----------
+
+/**
+ * Add or update one of the company's sales-tax rates.
+ *
+ * The default is moved inside a transaction rather than with two writes: a company must never
+ * be observable with two defaults, because whichever one a new estimate happened to read would
+ * be arbitrary — and it would be arbitrary in money.
+ */
+export async function upsertSalesTax(
+  companyId: number,
+  input: { id: number | null; name: string; ratePercent: number; active: boolean; isDefault: boolean }
+) {
+  const clash = await prisma.salesTax.findUnique({
+    where: { companyId_name: { companyId, name: input.name } },
+    select: { id: true },
+  });
+  if (clash && clash.id !== input.id)
+    throw new Error(`You already have a rate called "${input.name}"`);
+
+  return prisma.$transaction(async (tx) => {
+    const saved =
+      input.id == null
+        ? await tx.salesTax.create({
+            data: {
+              companyId,
+              name: input.name,
+              ratePercent: input.ratePercent,
+              active: input.active,
+              isDefault: input.isDefault,
+            },
+          })
+        : await (async () => {
+            const owned = await tx.salesTax.findFirst({
+              where: { id: input.id!, companyId },
+              select: { id: true },
+            });
+            if (!owned) throw new Error("That rate does not belong to this company");
+            return tx.salesTax.update({
+              where: { id: input.id! },
+              data: {
+                name: input.name,
+                ratePercent: input.ratePercent,
+                active: input.active,
+                isDefault: input.isDefault,
+              },
+            });
+          })();
+
+    if (input.isDefault)
+      await tx.salesTax.updateMany({
+        where: { companyId, isDefault: true, id: { not: saved.id } },
+        data: { isDefault: false },
+      });
+    return saved;
+  });
+}
+
+/** Move (or clear) the default rate. Null means new estimates start untaxed. */
+export async function setDefaultSalesTax(companyId: number, id: number | null) {
+  await prisma.$transaction(async (tx) => {
+    if (id != null) {
+      const owned = await tx.salesTax.findFirst({
+        where: { id, companyId, active: true },
+        select: { id: true },
+      });
+      if (!owned) throw new Error("That rate does not belong to this company, or is inactive");
+    }
+    await tx.salesTax.updateMany({ where: { companyId, isDefault: true }, data: { isDefault: false } });
+    if (id != null) await tx.salesTax.update({ where: { id }, data: { isDefault: true } });
+  });
+}

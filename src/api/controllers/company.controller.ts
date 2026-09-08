@@ -20,11 +20,13 @@ import {
 } from "../../lib/qbo";
 import {
   syncQboReferenceData,
-  searchQboCustomers,
+  searchCustomers,
   qboIncomeAccounts,
-  qboTaxRateOptions,
+  listSalesTax,
+  setDefaultSalesTax,
+  upsertSalesTax,
   qboSyncedAt,
-  createQboCustomer,
+  createCustomer,
 } from "../../lib/qboIngest";
 
 /**
@@ -337,7 +339,7 @@ export class CompanyController {
     const limit = Number(req.query.limit);
     res.json({
       success: true,
-      data: await searchQboCustomers(companyId, q, Number.isFinite(limit) ? limit : 20),
+      data: await searchCustomers(companyId, q, Number.isFinite(limit) ? limit : 20),
     });
   }
 
@@ -370,12 +372,12 @@ export class CompanyController {
         .status(400)
         .json({ success: false, error: { status: 400, message: "A customer name is required" } });
     try {
-      const created = await createQboCustomer(conn, companyId, {
+      const created = await createCustomer(companyId, {
         name,
         email: str(req.body?.email),
         phone: str(req.body?.phone),
         address: str(req.body?.address),
-      });
+      }, conn);
       res.status(201).json({ success: true, data: created });
     } catch (e) {
       // These messages are written for the person on site — a duplicate name or a malformed
@@ -405,17 +407,93 @@ export class CompanyController {
    * pre-fill for the organisation's default rate so an admin imports it rather than typing it.
    * A pre-fill only: CLARA computes tax from its OWN setting, never from this list.
    */
-  static async listQboTaxRates(req: RequestWithUser, res: Response) {
+  static async listSalesTaxRates(req: RequestWithUser, res: Response) {
     const companyId = req.user?.companyId;
     if (companyId == null)
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const rates = await qboTaxRateOptions(companyId);
+    const rates = await listSalesTax(companyId);
     res.json({
       success: true,
-      data: rates.map((r) => ({ ...r, rateValue: r.rateValue == null ? null : Number(r.rateValue) })),
+      data: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
     });
+  }
+
+  /**
+   * POST /api/v1/companies/sales-tax — add or update a sales-tax rate (settings → tax settings).
+   * Admin-only: this rate is applied to money on customer-facing estimates.
+   *
+   * Body: { id?, name, ratePercent, active?, isDefault? }. Passing an id updates that rate;
+   * omitting it creates one. Setting isDefault moves the default — exactly one rate per company
+   * can hold it.
+   */
+  static async saveSalesTax(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+
+    const name = str(req.body?.name);
+    if (!name)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "A rate name is required" } });
+
+    const rate = Number(req.body?.ratePercent);
+    // 0 is allowed and meaningful — a deliberate zero-rate jurisdiction is not the same as
+    // having no rate configured. The upper bound is the column's, rejected here so it fails
+    // with a sentence instead of a Prisma error.
+    if (!Number.isFinite(rate) || rate < 0 || rate > 99.9999)
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "ratePercent must be a number between 0 and 99.9999" },
+      });
+
+    try {
+      const saved = await upsertSalesTax(companyId, {
+        id: req.body?.id == null ? null : Number(req.body.id),
+        name,
+        ratePercent: rate,
+        active: req.body?.active !== false,
+        isDefault: req.body?.isDefault === true,
+      });
+      logger.info("Sales tax saved", { companyId, id: saved.id, isDefault: saved.isDefault });
+      res.json({ success: true, data: { ...saved, ratePercent: Number(saved.ratePercent) } });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Could not save the rate";
+      res.status(400).json({ success: false, error: { status: 400, message } });
+    }
+  }
+
+  /**
+   * PUT /api/v1/companies/sales-tax/default — choose the rate new estimates start with.
+   * Body: { id } — or { id: null } to have new estimates start untaxed.
+   */
+  static async setSalesTaxDefault(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const raw = req.body?.id;
+    const id = raw == null ? null : Number(raw);
+    if (id !== null && !Number.isInteger(id))
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "id must be an integer or null" } });
+    try {
+      await setDefaultSalesTax(companyId, id);
+      const rates = await listSalesTax(companyId);
+      res.json({
+        success: true,
+        data: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Could not set the default";
+      res.status(400).json({ success: false, error: { status: 400, message } });
+    }
   }
 
   /**

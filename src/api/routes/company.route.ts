@@ -60,7 +60,17 @@ companyRoute.get(
   requireAdmin,
   CompanyController.listQboIncomeAccounts
 );
-companyRoute.get("/qbo/tax-rates", authMiddleware, requireAdmin, CompanyController.listQboTaxRates);
+// Sales-tax rates are readable by every role: an estimate must show the rate it applies, and
+// gating this would blank the totals for technicians.
+companyRoute.get("/sales-tax", authMiddleware, CompanyController.listSalesTaxRates);
+// Writing a rate is admin-only: it is applied to money on customer-facing estimates.
+companyRoute.post("/sales-tax", authMiddleware, requireAdmin, CompanyController.saveSalesTax);
+companyRoute.put(
+  "/sales-tax/default",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.setSalesTaxDefault
+);
 
 companyRoute.get("/markup", authMiddleware, CompanyController.getDefaultMarkup);
 companyRoute.put("/markup", authMiddleware, requireAdmin, CompanyController.putDefaultMarkup);
