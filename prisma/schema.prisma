@@ -407,8 +407,9 @@ model Customer {
 
   /// Names are unique per company, mirroring QuickBooks' own DisplayName rule so a name that
   /// works here cannot fail there for a reason the technician never saw.
+  // No separate @@index on the same columns — the unique above already serves the
+  // picker's lookup, and a second btree is maintained on every sync write for nothing.
   @@unique([companyId, name])
-  @@index([companyId, name])
   @@map("customers")
   @@schema("public")
 }
@@ -451,7 +452,7 @@ model CustomerQb {
   customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   @@unique([customerId, realmId])
-  @@unique([companyId, realmId, qboId])
+  @@unique([companyId, realmId, qboId], map: "customer_qb_company_id_realm_id_qbo_id_key")
   @@index([companyId, realmId])
   @@map("customer_qb")
   @@schema("public")
@@ -530,15 +531,18 @@ model SalesTaxQb {
 
   salesTax SalesTax @relation(fields: [salesTaxId], references: [id], onDelete: Cascade)
 
-  @@unique([companyId, realmId, qboType, qboId])
+  @@unique([companyId, realmId, qboType, qboId], map: "sales_tax_qb_company_id_realm_id_qbo_type_qbo_id_key")
   @@index([salesTaxId])
   @@map("sales_tax_qb")
   @@schema("public")
 }
 
 /// ---------------------------------------------------------------------------------------------
-/// Ingested QuickBooks reference data. Table naming follows the product owner's convention:
-/// raw_<entity>_qb. Each row keeps the entity's own QBO id plus the few fields we query on, and
+/// Ingested QuickBooks reference data that has no CLARA-side entity of its own. Naming follows
+/// the product convention raw_<entity>_qb. Customers and sales tax used to live here too; they
+/// are now entities with `_qb` siblings, and their mirror tables are dropped in the same
+/// migration — leaving the models behind would keep a client method pointing at a table that
+/// does not exist. Each row keeps the entity's own QBO id plus the few fields we query on, and
 /// the untouched payload in `raw` so a later feature never needs a re-sync to read a field we
 /// did not think to promote.
 ///
@@ -595,25 +599,6 @@ model QboItemLink {
   @@schema("public")
 }
 
-model RawQbCustomer {
-  id          Int      @id @default(autoincrement())
-  companyId   Int      @map("company_id")
-  /// Customer.Id in QuickBooks.
-  qboId       String   @map("qbo_id")
-  /// DisplayName — QBO's unique customer key, and what the picker searches.
-  displayName String   @map("display_name")
-  email       String?
-  phone       String?
-  active      Boolean  @default(true)
-  raw         Json
-  syncedAt    DateTime @default(now()) @map("synced_at")
-
-  @@unique([companyId, qboId])
-  @@index([companyId, displayName])
-  @@map("raw_customer_qb")
-  @@schema("public")
-}
-
 model RawQbItem {
   id        Int      @id @default(autoincrement())
   companyId Int      @map("company_id")
@@ -632,37 +617,6 @@ model RawQbItem {
   /// Lowercased on write, so a name lookup is case-insensitive without a functional index.
   @@unique([companyId, name])
   @@map("raw_item_qb")
-  @@schema("public")
-}
-
-model RawQbTaxCode {
-  id        Int      @id @default(autoincrement())
-  companyId Int      @map("company_id")
-  qboId     String   @map("qbo_id")
-  name      String
-  taxable   Boolean  @default(true)
-  active    Boolean  @default(true)
-  raw       Json
-  syncedAt  DateTime @default(now()) @map("synced_at")
-
-  @@unique([companyId, qboId])
-  @@map("raw_taxcode_qb")
-  @@schema("public")
-}
-
-model RawQbTaxRate {
-  id        Int      @id @default(autoincrement())
-  companyId Int      @map("company_id")
-  qboId     String   @map("qbo_id")
-  name      String
-  /// RateValue as a percentage, e.g. 8.25. The org default rate is pre-filled from these.
-  rateValue Decimal? @map("rate_value") @db.Decimal(6, 4)
-  active    Boolean  @default(true)
-  raw       Json
-  syncedAt  DateTime @default(now()) @map("synced_at")
-
-  @@unique([companyId, qboId])
-  @@map("raw_taxrate_qb")
   @@schema("public")
 }
 

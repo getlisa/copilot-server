@@ -352,7 +352,9 @@ export function toQuoteDto(
     completedAt: quote.completedAt?.toISOString() ?? null,
     lineItems: dtos,
     markupPercent,
-    customerId: quote.customerId,
+    // ?? null like every neighbouring field: a fixture without the column would otherwise emit
+    // undefined against a DTO typed `number | null`, and JSON.stringify drops it entirely.
+    customerId: quote.customerId ?? null,
     customerName: quote.customerName ?? null,
     customerAddress: quote.customerAddress ?? null,
     customerPhone: quote.customerPhone ?? null,

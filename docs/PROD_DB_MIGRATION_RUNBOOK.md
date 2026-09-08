@@ -160,7 +160,6 @@ CREATE TABLE IF NOT EXISTS public.customers (
 -- Mirrors QuickBooks' own DisplayName uniqueness, so a name that works here cannot fail there
 -- for a reason the technician never saw.
 CREATE UNIQUE INDEX IF NOT EXISTS customers_company_id_name_key ON public.customers (company_id, name);
-CREATE INDEX IF NOT EXISTS customers_company_id_name_idx ON public.customers (company_id, name);
 
 CREATE TABLE IF NOT EXISTS public.customer_qb (
   id           SERIAL PRIMARY KEY,
@@ -184,8 +183,8 @@ CREATE TABLE IF NOT EXISTS public.customer_qb (
 -- One row per customer per realm: reconnect to a different QuickBooks file and the old row stays
 -- inert rather than being overwritten with an id belonging to someone else's books.
 CREATE UNIQUE INDEX IF NOT EXISTS customer_qb_customer_id_realm_id_key ON public.customer_qb (customer_id, realm_id);
-CREATE UNIQUE INDEX IF NOT EXISTS customer_qb_company_realm_qbo_key ON public.customer_qb (company_id, realm_id, qbo_id);
-CREATE INDEX IF NOT EXISTS customer_qb_company_realm_idx ON public.customer_qb (company_id, realm_id);
+CREATE UNIQUE INDEX IF NOT EXISTS customer_qb_company_id_realm_id_qbo_id_key ON public.customer_qb (company_id, realm_id, qbo_id);
+CREATE INDEX IF NOT EXISTS customer_qb_company_id_realm_id_idx ON public.customer_qb (company_id, realm_id);
 
 CREATE TABLE IF NOT EXISTS public.sales_tax (
   id           SERIAL PRIMARY KEY,
@@ -206,13 +205,13 @@ CREATE TABLE IF NOT EXISTS public.sales_tax (
   updated_by   BIGINT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_company_id_name_key ON public.sales_tax (company_id, name);
-CREATE INDEX IF NOT EXISTS sales_tax_company_id_active_idx ON public.sales_tax (company_id, is_active);
+CREATE INDEX IF NOT EXISTS sales_tax_company_id_is_active_idx ON public.sales_tax (company_id, is_active);
 -- At most ONE default per company. Partial unique indexes cannot be expressed in schema.prisma,
 -- so this is the only place the rule is enforced by the database — the controller also moves the
 -- default inside a transaction. Two defaults would mean a new estimate picking one arbitrarily,
 -- and picking arbitrarily in money.
 CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_one_default_per_company
-  ON public.sales_tax (company_id) WHERE is_default;
+  ON public.sales_tax (company_id) WHERE is_default AND NOT is_deleted;
 
 CREATE TABLE IF NOT EXISTS public.sales_tax_qb (
   id           SERIAL PRIMARY KEY,
@@ -233,12 +232,69 @@ CREATE TABLE IF NOT EXISTS public.sales_tax_qb (
   updated_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_by   BIGINT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_qb_company_realm_type_qbo_key ON public.sales_tax_qb (company_id, realm_id, qbo_type, qbo_id);
+CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_qb_company_id_realm_id_qbo_type_qbo_id_key ON public.sales_tax_qb (company_id, realm_id, qbo_type, qbo_id);
 CREATE INDEX IF NOT EXISTS sales_tax_qb_sales_tax_id_idx ON public.sales_tax_qb (sales_tax_id);
 
 -- Quotes point at the customer ENTITY. The QuickBooks id is not duplicated here — it lives on
 -- customer_qb, keyed by realm, so a reconnect cannot leave a stale id attached to an estimate.
 ALTER TABLE public.quotes ADD COLUMN IF NOT EXISTS customer_id INT;
+-- The FK schema.prisma already implies (Quote.customer is an optional relation). Safe here
+-- because every existing row is NULL, and SET NULL rather than CASCADE: deleting a customer
+-- must not delete quotes.
+ALTER TABLE public.quotes DROP CONSTRAINT IF EXISTS quotes_customer_id_fkey;
+ALTER TABLE public.quotes ADD CONSTRAINT quotes_customer_id_fkey
+  FOREIGN KEY (customer_id) REFERENCES public.customers(id) ON DELETE SET NULL;
+
+-- BACKFILL. Without it Phase 2 destroys every existing quote's QuickBooks customer link, and
+-- the consequence is not a blank field: syncQuoteToQbo calls ensureQboCustomer unconditionally,
+-- so a re-completed quote with customer_id NULL falls into the legacy free-text branch and
+-- re-resolves the customer from `customerName` — re-pointing the estimate at a different
+-- customer, or creating one literally named "Customer" when that field is blank.
+--
+-- DISTINCT ON picks one canonical name per (company, qbo id): the same QuickBooks customer can
+-- appear on several quotes under different names, and inserting both would violate
+-- customer_qb_company_id_realm_id_qbo_id_key and abort the migration.
+WITH link AS (
+  SELECT DISTINCT ON (q.company_id, q.qbo_customer_id)
+         q.company_id,
+         q.qbo_customer_id,
+         COALESCE(NULLIF(btrim(q.qbo_customer_name), ''),
+                  NULLIF(btrim(q.customer_name), ''),
+                  'QBO customer ' || q.qbo_customer_id) AS name
+    FROM public.quotes q
+   WHERE q.qbo_customer_id IS NOT NULL
+   ORDER BY q.company_id, q.qbo_customer_id, q.updated_at DESC
+)
+INSERT INTO public.customers (company_id, name)
+SELECT company_id, name FROM link
+ON CONFLICT (company_id, name) DO NOTHING;
+
+WITH link AS (
+  SELECT DISTINCT ON (q.company_id, q.qbo_customer_id)
+         q.company_id,
+         q.qbo_customer_id,
+         COALESCE(NULLIF(btrim(q.qbo_customer_name), ''),
+                  NULLIF(btrim(q.customer_name), ''),
+                  'QBO customer ' || q.qbo_customer_id) AS name
+    FROM public.quotes q
+   WHERE q.qbo_customer_id IS NOT NULL
+   ORDER BY q.company_id, q.qbo_customer_id, q.updated_at DESC
+)
+INSERT INTO public.customer_qb (customer_id, company_id, realm_id, qbo_id, display_name, synced_at)
+SELECT c.id, l.company_id, qc.realm_id, l.qbo_customer_id, l.name, CURRENT_TIMESTAMP
+  FROM link l
+  JOIN public.customers c
+    ON c.company_id = l.company_id AND c.name = l.name
+  JOIN public.qbo_connections qc
+    ON qc.company_id = l.company_id AND qc.realm_id IS NOT NULL
+ON CONFLICT DO NOTHING;
+
+UPDATE public.quotes q
+   SET customer_id = cq.customer_id
+  FROM public.customer_qb cq
+ WHERE cq.company_id = q.company_id
+   AND cq.qbo_id = q.qbo_customer_id
+   AND q.customer_id IS NULL;
 
 ALTER TABLE public.customers    OWNER TO app_user;
 ALTER TABLE public.customer_qb  OWNER TO app_user;
@@ -254,6 +310,21 @@ GRANT USAGE ON SEQUENCE public.sales_tax_qb_id_seq TO app_user;
 
 Nothing reads these once the new code is live. Kept separate because the OLD code selects
 `qbo_customer_id`, so dropping it before the deploy takes down every quote read.
+
+**This is the point of no return.** Once these columns are dropped the previous image cannot be
+rolled back — its Prisma client selects them, so every quote read fails immediately. Roll back
+BEFORE running Phase 2. If you must roll back after, re-add the columns
+(`ALTER TABLE public.quotes ADD COLUMN qbo_customer_id TEXT; ALTER TABLE public.quotes ADD COLUMN
+qbo_customer_name TEXT;`) before scaling the old task definition up.
+
+**"Healthy" means exercised, not just passing a health check.** One quote read and one estimate
+posted on the new image — the health endpoint touches neither the new tables nor the QBO path.
+
+**Gate: the backfill must have worked.** This must return 0 before you run anything below:
+
+```sql
+SELECT count(*) FROM public.quotes WHERE qbo_customer_id IS NOT NULL AND customer_id IS NULL;
+```
 
 ```sql
 ALTER TABLE public.quotes DROP COLUMN IF EXISTS qbo_customer_id;

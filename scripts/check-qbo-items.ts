@@ -1,6 +1,11 @@
 import assert from "assert";
 import { autoItemName } from "../src/lib/qbo";
-import { itemKey, customerDisplayName, taxGroupEffectiveRate } from "../src/lib/qboIngest";
+import {
+  itemKey,
+  customerDisplayName,
+  taxGroupEffectiveRate,
+  salesTaxUsable,
+} from "../src/lib/qboIngest";
 
 /**
  * Pins the item-identity contract behind "sync an item once, then reuse its id".
@@ -90,9 +95,18 @@ assert.strictEqual(customerDisplayName("x".repeat(160)).length, 100, "capped at 
   assert.strictEqual(taxGroupEffectiveRate([on("3")], rates), 8, "California = 8");
   assert.strictEqual(taxGroupEffectiveRate([], rates), 0, "an empty group charges nothing");
 
-  // A member referring to a rate we do not have is skipped, not treated as zero-and-counted:
-  // silently charging less is worse than charging the part we can prove.
-  assert.strictEqual(taxGroupEffectiveRate([on("1"), on("999")], rates), 7.1);
+  // A member we cannot resolve REFUSES the whole code. Charging the part we can prove would
+  // produce a plausible number nobody could tell from the truth — dropping AZ State from
+  // "Tucson" reads as 2%, and the estimate under-charges by 7.1 points in silence.
+  assert.strictEqual(taxGroupEffectiveRate([on("1"), on("999")], rates), null);
+
+  // Four decimals survive: the column is Decimal(6,4) and real jurisdictions use them.
+  assert.strictEqual(taxGroupEffectiveRate([on("9")], new Map([["9", 9.0625]])), 9.0625);
+
+  // Out of the column's range is refused rather than thrown mid-sync, which would abort the
+  // run after customers had already been written.
+  assert.strictEqual(taxGroupEffectiveRate([on("9")], new Map([["9", 150]])), null);
+  assert.strictEqual(taxGroupEffectiveRate([on("9")], new Map([["9", -1]])), null);
 
   // Compounding: 10% then 5% applied on net-plus-tax is 15.5%, not 15%. Every sandbox rate is
   // TaxOnAmount so this path is unexercised there — which is exactly why it needs a test.
@@ -121,6 +135,29 @@ assert.strictEqual(customerDisplayName("x".repeat(160)).length, 100, "capped at 
     15.5,
     "members are cascaded in TaxOrder, whatever order they arrive in"
   );
+}
+
+// ---- the source-of-truth rule must not lock a connected company out ----
+// This is the regression that shipped once: ingestion did not set `source`, so every synced rate
+// defaulted to MANUAL, `usable` was false for all of them, the default resolved to null, and
+// creating one was refused — a connected company had no usable rate and no way to add one. Each
+// half of the rule read correctly in isolation, which is why it needs a test across both.
+{
+  const qbo = { isActive: true, isDeleted: false, source: "QBO" };
+  const manual = { isActive: true, isDeleted: false, source: "MANUAL" };
+
+  // Connected: what came from the connected system is what applies.
+  assert.strictEqual(salesTaxUsable(qbo, true), true, "a synced rate MUST be usable when connected");
+  assert.strictEqual(salesTaxUsable(manual, true), false, "a typed rate is not applied while connected");
+
+  // Not connected: the company's own rates are all it has.
+  assert.strictEqual(salesTaxUsable(manual, false), true, "a typed rate applies when not connected");
+  assert.strictEqual(salesTaxUsable(qbo, false), true, "a previously-synced rate survives a disconnect");
+
+  // isActive and isDeleted are separate questions and both must veto.
+  assert.strictEqual(salesTaxUsable({ ...qbo, isActive: false }, true), false, "inactive never applies");
+  assert.strictEqual(salesTaxUsable({ ...qbo, isDeleted: true }, true), false, "soft-deleted never applies");
+  assert.strictEqual(salesTaxUsable({ ...manual, isDeleted: true }, false), false);
 }
 
 console.log("check-qbo-items: OK");
