@@ -1173,3 +1173,63 @@ from the two fixtures that fed `toQuoteDto` — its input is now a declared stru
 **Not applied yet: `docs/sql/phase1b.sql`.** `quotes` and `quote_line_items` are owned by
 `postgres`, not `app_user`, so the DDL needs the RDS master credentials — the same reason Phase 1
 did. **The backend must not be deployed until it lands** (see the corrected runbook rule).
+
+### 2026-09-08 — shipped, gated, and Phase 2 staged
+
+**Phase 1b applied** — 25/25 statements, `PHASE1B_APPLIED`, credentialed revision `:100`
+deregistered on exit. Verified afterwards as `app_user`: all 18 columns, both indexes
+(`customers_parent_id_idx`, `quotes_sales_tax_id_idx`), both FKs and both CHECKs present.
+
+The first attempt failed with `Container Overrides length must be at most 8192`, and the cause was
+**tar**, not the SQL: tar writes 512-byte blocks with a 10240-byte archive minimum, so wrapping a
+3KB runner produced 10KB before gzip started. Statements are now split on the deploy side and
+baked into one runner file — 2323 bytes against the limit, checked locally so a failure names the
+byte count instead of arriving as an API error after a round-trip.
+
+**Backend `4c2ab1f` live on task definition `:101`**, single PRIMARY deployment, rollout COMPLETED.
+**Frontend `39876fc` live** (Amplify job 61).
+
+**T-39 re-run on the new image — PASSED.** The sync path had changed materially (row claim instead
+of the advisory lock, a new `taxPrefs` stage, T-46 deactivation, unconditional parent relinking),
+so the earlier pass no longer vouched for it:
+
+| Invariant | Result |
+|---|---|
+| `source='QBO'` | 2/2 |
+| Duplicate `customer_qb` over two runs | 0 (39 → 39, identical) |
+| Tucson | 9.1000 |
+| The admin's chosen default survives a sync | yes |
+| `last_sync_at` set, `last_sync_error` null, `sync_started_at` released | yes — the row claim works |
+| `using_sales_tax` / `partner_tax_enabled` | `true` / `null` → manual tax, the design applies |
+| T-46 against live data | 39 of 39 customers still active; nothing over-deactivated |
+| **Sub-customers linked** | **7**, from real QuickBooks data |
+
+One assertion failed first, and it was the assertion that was wrong. It read "no ingested rate is
+the default" — but an admin had set Tucson as the default through the UI after the frontend
+shipped, which is the entire point of the setting. Nothing in the ingest path writes `isDefault`
+(the create omits it, the refresh writes only `name`/`source`/`ratePercent`/`isDeleted`), so the
+real invariant is that a **sync must not change** the admin's choice. Rewritten to capture the
+default before the runs and compare, plus a separate check that a *newly created* rate never
+arrives as the default.
+
+**The release gate — GATE_PASS.** One estimate posted to the sandbox with tax and a sub-customer,
+then read back from Intuit, because a green unit suite proves none of this:
+
+| | |
+|---|---|
+| CLARA | subtotal 350, taxable 100 (labor and the permit fee excluded), tax 9.10, payable **359.10** |
+| QBO `TotalAmt` | **359.10** — exact, no cent drift |
+| `TxnTaxDetail` | `TxnTaxCodeRef: 3`, and Intuit's own `TaxLine` breakdown returned **7.1 + 2.0** on `NetAmountTaxable: 100` |
+| Per line | wire `TAX`, permit fee `NON`, labor `NON` |
+| Customer | `Mahee Zentrades:Building 1`, `Job: true`, `ParentRef: 58` |
+
+Intuit independently computed the same 7.1 + 2.0 cascade `taxGroupEffectiveRate` derives — the P0
+that shipped once is now validated against the source of truth rather than against a fixture.
+
+**Phase 2 is written and NOT applied** (`docs/sql/phase2.sql`, `docs/sql/apply-phase2.sh`). Every
+precondition is met: nothing in `schema.prisma` or `src/` references the dropped objects, and
+`select count(*) from quotes where qbo_customer_id is not null` returns **0**. It is left for a
+person to run because it is the documented point of no return — after it, rolling back to `:98`
+requires re-adding the two columns first, and that recovery is in the file's header. The three
+`raw_*` tables it drops are `app_user`-owned; only the two column drops need master credentials.
+`raw_item_qb` and `raw_account_qb` are deliberately kept, and the SQL asserts they survive.
