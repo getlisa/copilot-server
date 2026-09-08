@@ -52,6 +52,8 @@ export const itemKey = (name: string) => name.trim().toLowerCase().slice(0, 100)
 interface QboCustomerRow {
   Id: string;
   DisplayName?: string;
+  /** Read-only, parent chain joined by colons: "Customer:Job:Sub-job". */
+  FullyQualifiedName?: string;
   PrimaryEmailAddr?: { Address?: string };
   PrimaryPhone?: { FreeFormNumber?: string };
   BillAddr?: { Line1?: string; City?: string; CountrySubDivisionCode?: string; PostalCode?: string };
@@ -100,7 +102,7 @@ async function ingestCustomers(
       byName?.id ??
       (
         await prisma.customer.create({
-          data: { companyId, name: displayName, email, phone, address, active: r.Active !== false },
+          data: { companyId, name: displayName, email, phone, address, isActive: r.Active !== false },
         })
       ).id;
 
@@ -118,7 +120,13 @@ async function ingestCustomers(
       },
     });
 
-    const qb = { qboId, displayName, raw: r as object, syncedAt: new Date() };
+    const qb = {
+      qboId,
+      displayName,
+      fullyQualifiedName: str(r.FullyQualifiedName),
+      raw: r as object,
+      syncedAt: new Date(),
+    };
     await prisma.customerQb.upsert({
       where: { customerId_realmId: { customerId, realmId } },
       create: { customerId, companyId, realmId, ...qb },
@@ -271,7 +279,7 @@ async function ingestSalesTax(
       ? (
           await prisma.salesTax.update({
             where: { id: existing.id },
-            data: { ratePercent: effective, active: true },
+            data: { ratePercent: effective, isActive: true, isDeleted: false },
           })
         ).id
       : (
@@ -389,7 +397,8 @@ export async function searchCustomers(companyId: number, q: string, limit = 20) 
   const rows = await prisma.customer.findMany({
     where: {
       companyId,
-      active: true,
+      isActive: true,
+      isDeleted: false,
       ...(term ? { name: { contains: term, mode: "insensitive" as const } } : {}),
     },
     select: {
@@ -397,12 +406,21 @@ export async function searchCustomers(companyId: number, q: string, limit = 20) 
       name: true,
       email: true,
       phone: true,
-      qb: { select: { qboId: true, realmId: true }, take: 1 },
+      qb: { select: { qboId: true, realmId: true, fullyQualifiedName: true }, take: 1 },
     },
     orderBy: { name: "asc" },
     take: Math.min(limit, 50),
   });
-  return rows.map(({ qb, ...c }) => ({ ...c, qboId: qb[0]?.qboId ?? null }));
+  return rows.map(({ qb, ...c }) => ({
+    ...c,
+    qboId: qb[0]?.qboId ?? null,
+    // Only worth showing when it says more than the name already does — for a top-level
+    // customer QuickBooks sets it equal to DisplayName, and repeating it would be noise.
+    fullyQualifiedName:
+      qb[0]?.fullyQualifiedName && qb[0].fullyQualifiedName !== c.name
+        ? qb[0].fullyQualifiedName
+        : null,
+  }));
 }
 
 /** Income accounts, for the admin to choose what created items bill against (G10). */
@@ -415,29 +433,78 @@ export function qboIncomeAccounts(companyId: number) {
 }
 
 /**
- * The company's sales-tax rates and which one is the default. Readable by every role: an
- * estimate has to show the rate it is applying, and gating this would blank the totals for
- * technicians.
+ * Whether this company's tax comes from a connected system rather than from what they type.
+ *
+ * The rule (product, 2026-09-08): a company connected to QuickBooks or a CRM takes its tax from
+ * that system. It cannot create MANUAL rates, and rates it created BEFORE connecting stop being
+ * usable — kept, not deleted, so disconnecting restores them.
+ *
+ * Checks both connection tables because they are separate by ownership, not by meaning:
+ * qbo_connections is this service's, crm_connections belongs to the platform backend.
  */
-export function listSalesTax(companyId: number) {
-  return prisma.salesTax.findMany({
-    where: { companyId },
+export async function taxSourceIsExternal(companyId: number): Promise<{
+  external: boolean;
+  via: "quickbooks" | "crm" | null;
+}> {
+  const conn = await qboConnectionFor(companyId);
+  if (qboConnected(conn)) return { external: true, via: "quickbooks" };
+  const crm = await prisma.crm_connections.findUnique({
+    where: { company_id: companyId },
+    select: { provider: true },
+  });
+  return crm ? { external: true, via: "crm" } : { external: false, via: null };
+}
+
+/**
+ * The company's sales-tax rates. Readable by every role: an estimate has to show the rate it is
+ * applying, and gating this would blank the totals for technicians.
+ *
+ * `usable` is computed, not stored, so it can never go stale against the connection state: a
+ * MANUAL rate is unusable while the company is connected to an external system, and becomes
+ * usable again the moment it disconnects. Unusable rates are still returned — the settings
+ * screen has to explain why they are there rather than silently dropping them.
+ */
+export async function listSalesTax(companyId: number) {
+  const { external, via } = await taxSourceIsExternal(companyId);
+  const rows = await prisma.salesTax.findMany({
+    where: { companyId, isDeleted: false },
     select: {
       id: true,
       name: true,
+      source: true,
       ratePercent: true,
       isDefault: true,
-      active: true,
+      isActive: true,
       qb: { select: { qboType: true, qboId: true }, orderBy: { qboType: "asc" } },
     },
     orderBy: [{ isDefault: "desc" }, { name: "asc" }],
   });
+  return {
+    taxSource: external ? via : "manual",
+    rates: rows.map((r) => ({
+      ...r,
+      usable: r.isActive && (!external || r.source !== "MANUAL"),
+    })),
+  };
 }
 
-/** The rate a new estimate starts with, or null when the company has not chosen one. */
-export function defaultSalesTax(companyId: number) {
+/**
+ * The rate a new estimate starts with, or null when the company has not chosen a usable one.
+ *
+ * Applies the same source-of-truth rule as the settings screen: a MANUAL default is ignored
+ * while the company is connected to an external system. Silently taxing estimates from a rate
+ * the settings screen shows as unusable would be the worst of both.
+ */
+export async function defaultSalesTax(companyId: number) {
+  const { external } = await taxSourceIsExternal(companyId);
   return prisma.salesTax.findFirst({
-    where: { companyId, isDefault: true, active: true },
+    where: {
+      companyId,
+      isDefault: true,
+      isActive: true,
+      isDeleted: false,
+      ...(external ? { source: { not: "MANUAL" } } : {}),
+    },
     select: { id: true, name: true, ratePercent: true },
   });
 }
@@ -703,7 +770,7 @@ async function pushCustomerToQbo(
 ): Promise<string> {
   const displayName = customerDisplayName(input.name);
   const email = str(input.email);
-  let created: { Customer: { Id: string } };
+  let created: { Customer: { Id: string; FullyQualifiedName?: string } };
   try {
     created = await qboFetch(conn, "/customer", {
       method: "POST",
@@ -723,7 +790,14 @@ async function pushCustomerToQbo(
     throw e;
   }
   const qboId = String(created.Customer.Id);
-  const qb = { qboId, displayName, raw: created.Customer as object, syncedAt: new Date() };
+  const qb = {
+    qboId,
+    displayName,
+    // QuickBooks computes this; for a top-level customer it equals DisplayName.
+    fullyQualifiedName: (created.Customer as { FullyQualifiedName?: string }).FullyQualifiedName ?? displayName,
+    raw: created.Customer as object,
+    syncedAt: new Date(),
+  };
   await prisma.customerQb.upsert({
     where: { customerId_realmId: { customerId, realmId } },
     create: { customerId, companyId, realmId, ...qb },
@@ -829,8 +903,26 @@ const escLiteral = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
  */
 export async function upsertSalesTax(
   companyId: number,
-  input: { id: number | null; name: string; ratePercent: number; active: boolean; isDefault: boolean }
+  input: {
+    id: number | null;
+    name: string;
+    ratePercent: number;
+    isActive: boolean;
+    isDefault: boolean;
+  },
+  actingUserId: bigint | null
 ) {
+  // The source-of-truth rule, enforced here rather than only in the UI: a connected company's
+  // tax comes from the connected system. Refusing with the reason beats a rate that saves and
+  // is then quietly never applied.
+  const { external, via } = await taxSourceIsExternal(companyId);
+  if (external)
+    throw new Error(
+      via === "quickbooks"
+        ? "Your sales tax comes from QuickBooks while it is connected. Add or change the rate in QuickBooks, then sync."
+        : "Your sales tax comes from your connected CRM. Add or change the rate there, then sync."
+    );
+
   const clash = await prisma.salesTax.findUnique({
     where: { companyId_name: { companyId, name: input.name } },
     select: { id: true },
@@ -845,9 +937,12 @@ export async function upsertSalesTax(
             data: {
               companyId,
               name: input.name,
+              source: "MANUAL",
               ratePercent: input.ratePercent,
-              active: input.active,
+              isActive: input.isActive,
               isDefault: input.isDefault,
+              createdBy: actingUserId,
+              updatedBy: actingUserId,
             },
           })
         : await (async () => {
@@ -861,8 +956,9 @@ export async function upsertSalesTax(
               data: {
                 name: input.name,
                 ratePercent: input.ratePercent,
-                active: input.active,
+                isActive: input.isActive,
                 isDefault: input.isDefault,
+                updatedBy: actingUserId,
               },
             });
           })();
@@ -878,13 +974,20 @@ export async function upsertSalesTax(
 
 /** Move (or clear) the default rate. Null means new estimates start untaxed. */
 export async function setDefaultSalesTax(companyId: number, id: number | null) {
+  const { external } = await taxSourceIsExternal(companyId);
   await prisma.$transaction(async (tx) => {
     if (id != null) {
       const owned = await tx.salesTax.findFirst({
-        where: { id, companyId, active: true },
-        select: { id: true },
+        where: { id, companyId, isActive: true, isDeleted: false },
+        select: { id: true, source: true },
       });
       if (!owned) throw new Error("That rate does not belong to this company, or is inactive");
+      // Refuse to make an unusable rate the default: it would show as the default in settings
+      // and then be ignored on every estimate.
+      if (external && owned.source === "MANUAL")
+        throw new Error(
+          "That rate was created here, and your tax comes from the connected system while it is connected."
+        );
     }
     await tx.salesTax.updateMany({ where: { companyId, isDefault: true }, data: { isDefault: false } });
     if (id != null) await tx.salesTax.update({ where: { id }, data: { isDefault: true } });

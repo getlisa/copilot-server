@@ -124,9 +124,25 @@ data, they are one day old, and two tables claiming to hold the same customers i
 `raw_item_qb` and `raw_account_qb` stay — items already have their entity (`pricebook_items`,
 linked through `qbo_item_links`) and accounts have no CLARA-side counterpart.
 
-Run BEFORE the image ships: Prisma selects every scalar column.
+**Two phases, and the order is the opposite of the usual rule.** Normally the whole block runs
+before the image ships, because Prisma selects every scalar column. Here the block also DROPS
+`quotes.qbo_customer_id` — which the *currently running* code still selects. Dropping it first
+would break every quote read in production.
+
+So: expand, deploy, then contract.
+
+- **Phase 1 (before the deploy)** — create the new tables and add `quotes.customer_id`. Purely
+  additive: the running code ignores all of it, and the new code needs the tables to exist the
+  moment it starts.
+- **Phase 2 (after the deploy is healthy)** — drop the columns and tables nothing reads any more.
+
+### Phase 1 — expand (run before deploying)
 
 ```sql
+-- Every service-managed table gets the same audit set (architecture, 2026-09-08):
+-- is_active (reversible "not in use"), is_deleted (soft delete, so history that points at the
+-- row survives), created_at/created_by, updated_at/updated_by. created_by/updated_by are
+-- users.id and NULLABLE: ingestion and background work have no acting user to attribute.
 CREATE TABLE IF NOT EXISTS public.customers (
   id         SERIAL PRIMARY KEY,
   company_id INT     NOT NULL,
@@ -134,9 +150,12 @@ CREATE TABLE IF NOT EXISTS public.customers (
   email      TEXT,
   phone      TEXT,
   address    TEXT,
-  active     BOOLEAN NOT NULL DEFAULT TRUE,
+  is_active  BOOLEAN NOT NULL DEFAULT TRUE,
+  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_by BIGINT,
+  updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_by BIGINT
 );
 -- Mirrors QuickBooks' own DisplayName uniqueness, so a name that works here cannot fail there
 -- for a reason the technician never saw.
@@ -150,8 +169,17 @@ CREATE TABLE IF NOT EXISTS public.customer_qb (
   realm_id     TEXT NOT NULL,
   qbo_id       TEXT NOT NULL,
   display_name TEXT NOT NULL,
+  -- Read-only in QuickBooks: the parent chain joined by colons ("Customer:Job:Sub-job"). It is
+  -- what distinguishes two jobs sharing a name under different parents.
+  fully_qualified_name TEXT,
   raw          JSONB,
-  synced_at    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  synced_at    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+  is_deleted   BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_by   BIGINT,
+  updated_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_by   BIGINT
 );
 -- One row per customer per realm: reconnect to a different QuickBooks file and the old row stays
 -- inert rather than being overwritten with an id belonging to someone else's books.
@@ -163,14 +191,22 @@ CREATE TABLE IF NOT EXISTS public.sales_tax (
   id           SERIAL PRIMARY KEY,
   company_id   INT     NOT NULL,
   name         TEXT    NOT NULL,
+  -- "MANUAL" (typed in tax settings) or "QBO" (ingested). Drives the source-of-truth rule: a
+  -- company connected to QuickBooks or a CRM takes its tax from that system, so it cannot
+  -- create MANUAL rates and cannot use ones created before connecting. Kept, not deleted —
+  -- disconnecting restores them, which a delete could not undo.
+  source       TEXT    NOT NULL DEFAULT 'MANUAL',
   rate_percent DECIMAL(6,4) NOT NULL,
   is_default   BOOLEAN NOT NULL DEFAULT FALSE,
-  active       BOOLEAN NOT NULL DEFAULT TRUE,
+  is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+  is_deleted   BOOLEAN NOT NULL DEFAULT FALSE,
   created_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_by   BIGINT,
+  updated_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_by   BIGINT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_company_id_name_key ON public.sales_tax (company_id, name);
-CREATE INDEX IF NOT EXISTS sales_tax_company_id_active_idx ON public.sales_tax (company_id, active);
+CREATE INDEX IF NOT EXISTS sales_tax_company_id_active_idx ON public.sales_tax (company_id, is_active);
 -- At most ONE default per company. Partial unique indexes cannot be expressed in schema.prisma,
 -- so this is the only place the rule is enforced by the database — the controller also moves the
 -- default inside a transaction. Two defaults would mean a new estimate picking one arbitrarily,
@@ -189,7 +225,13 @@ CREATE TABLE IF NOT EXISTS public.sales_tax_qb (
   qbo_id       TEXT NOT NULL,
   name         TEXT NOT NULL,
   raw          JSONB,
-  synced_at    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  synced_at    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+  is_deleted   BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_by   BIGINT,
+  updated_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_by   BIGINT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_qb_company_realm_type_qbo_key ON public.sales_tax_qb (company_id, realm_id, qbo_type, qbo_id);
 CREATE INDEX IF NOT EXISTS sales_tax_qb_sales_tax_id_idx ON public.sales_tax_qb (sales_tax_id);
@@ -197,14 +239,6 @@ CREATE INDEX IF NOT EXISTS sales_tax_qb_sales_tax_id_idx ON public.sales_tax_qb 
 -- Quotes point at the customer ENTITY. The QuickBooks id is not duplicated here — it lives on
 -- customer_qb, keyed by realm, so a reconnect cannot leave a stale id attached to an estimate.
 ALTER TABLE public.quotes ADD COLUMN IF NOT EXISTS customer_id INT;
-ALTER TABLE public.quotes DROP COLUMN IF EXISTS qbo_customer_id;
-ALTER TABLE public.quotes DROP COLUMN IF EXISTS qbo_customer_name;
-
--- Superseded by customers / customer_qb / sales_tax / sales_tax_qb. Reference data only, one day
--- old, and re-syncable — leaving them would leave two tables claiming the same customers.
-DROP TABLE IF EXISTS public.raw_customer_qb;
-DROP TABLE IF EXISTS public.raw_taxcode_qb;
-DROP TABLE IF EXISTS public.raw_taxrate_qb;
 
 ALTER TABLE public.customers    OWNER TO app_user;
 ALTER TABLE public.customer_qb  OWNER TO app_user;
@@ -216,9 +250,25 @@ GRANT USAGE ON SEQUENCE public.sales_tax_id_seq    TO app_user;
 GRANT USAGE ON SEQUENCE public.sales_tax_qb_id_seq TO app_user;
 ```
 
-Run as the Aurora master via a one-off ECS task — `app_user` cannot DDL. Recipe in
-`docs/qbo/QBO-INTEGRATION.md` §10. Re-sync afterwards to repopulate customers and sales tax
-(the 2026-09-07 sync wrote to the dropped tables).
+### Phase 2 — contract (run only once the new image is healthy)
+
+Nothing reads these once the new code is live. Kept separate because the OLD code selects
+`qbo_customer_id`, so dropping it before the deploy takes down every quote read.
+
+```sql
+ALTER TABLE public.quotes DROP COLUMN IF EXISTS qbo_customer_id;
+ALTER TABLE public.quotes DROP COLUMN IF EXISTS qbo_customer_name;
+
+-- Superseded by customers / customer_qb / sales_tax / sales_tax_qb. Reference data only, one day
+-- old, and re-syncable — leaving them would leave two tables claiming the same customers.
+DROP TABLE IF EXISTS public.raw_customer_qb;
+DROP TABLE IF EXISTS public.raw_taxcode_qb;
+DROP TABLE IF EXISTS public.raw_taxrate_qb;
+```
+
+Both phases run as the Aurora master via a one-off ECS task — `app_user` cannot DDL. Recipe in
+`docs/qbo/QBO-INTEGRATION.md` §10. Re-sync after the deploy to populate customers and sales tax
+(the 2026-09-07 sync wrote to the tables phase 2 removes).
 
 ## APPLIED 2026-09-07: QuickBooks reference-data ingestion (2026-09-07)
 

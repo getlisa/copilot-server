@@ -383,16 +383,24 @@ model crm_entity_links {
 /// A customer, as CLARA knows them. The source of truth for the estimate screen's picker and for
 /// what a proposal prints — independent of whether the company uses QuickBooks.
 model Customer {
-  id        Int      @id @default(autoincrement())
-  companyId Int      @map("company_id")
+  id        Int     @id @default(autoincrement())
+  companyId Int     @map("company_id")
   name      String
   email     String?
   phone     String?
   address   String?
-  /// False hides a customer from the picker without deleting history that points at it.
-  active    Boolean  @default(true)
+
+  /// Audit + soft delete (architecture, 2026-09-08). `isDeleted` hides a row without losing the
+  /// history that points at it; `isActive` is the reversible "not in use right now" state — the
+  /// two are different questions and collapsing them loses one. createdBy/updatedBy are users.id
+  /// with no FK, matching this schema's convention for service-managed tables, and nullable
+  /// because ingestion and background work have no acting user to attribute.
+  isActive  Boolean  @default(true) @map("is_active")
+  isDeleted Boolean  @default(false) @map("is_deleted")
   createdAt DateTime @default(now()) @map("created_at")
+  createdBy BigInt?  @map("created_by")
   updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy BigInt?  @map("updated_by")
 
   quotes Quote[]
   qb     CustomerQb[]
@@ -409,19 +417,36 @@ model Customer {
 /// company to a different QuickBooks file and the old row stays, inert, rather than being
 /// overwritten with an id that belongs to someone else's books.
 model CustomerQb {
-  id          Int      @id @default(autoincrement())
-  customerId  Int      @map("customer_id")
-  companyId   Int      @map("company_id")
+  id                 Int      @id @default(autoincrement())
+  customerId         Int      @map("customer_id")
+  companyId          Int      @map("company_id")
   /// The QuickBooks company (realm) that issued `qboId`.
-  realmId     String   @map("realm_id")
+  realmId            String   @map("realm_id")
   /// Customer.Id in QuickBooks.
-  qboId       String   @map("qbo_id")
-  /// DisplayName as QuickBooks holds it — may differ from our name if someone renamed it there.
-  displayName String   @map("display_name")
+  qboId              String   @map("qbo_id")
+  /// DisplayName as QuickBooks holds it — may differ from our name if it was renamed there.
+  displayName        String   @map("display_name")
+  /// FullyQualifiedName: read-only in QuickBooks, and the parent chain joined by colons
+  /// ("Customer:Job:Sub-job", up to 5 levels). This is what distinguishes two jobs that share a
+  /// name under different parents — DisplayName alone cannot, and the picker showing only the
+  /// leaf would make them indistinguishable.
+  fullyQualifiedName String?  @map("fully_qualified_name")
   /// The untouched payload, so a later feature never needs a re-sync to read a field we did not
   /// think to promote.
-  raw         Json?
-  syncedAt    DateTime @default(now()) @map("synced_at")
+  raw                Json?
+  syncedAt           DateTime @default(now()) @map("synced_at")
+
+  /// Audit + soft delete (architecture, 2026-09-08). `isDeleted` hides a row without losing the
+  /// history that points at it; `isActive` is the reversible "not in use right now" state — the
+  /// two are different questions and collapsing them loses one. createdBy/updatedBy are users.id
+  /// with no FK, matching this schema's convention for service-managed tables, and nullable
+  /// because ingestion and background work have no acting user to attribute.
+  isActive  Boolean  @default(true) @map("is_active")
+  isDeleted Boolean  @default(false) @map("is_deleted")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy BigInt?  @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy BigInt?  @map("updated_by")
 
   customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
@@ -439,22 +464,38 @@ model CustomerQb {
 /// Enforced by a partial unique index in the migration — Prisma cannot express one, so the
 /// controller checks it too rather than relying on the database alone.
 model SalesTax {
-  id          Int      @id @default(autoincrement())
-  companyId   Int      @map("company_id")
-  /// What a technician sees, e.g. "California" or "AZ State tax".
+  id          Int     @id @default(autoincrement())
+  companyId   Int     @map("company_id")
+  /// What a technician sees, e.g. "California" or "Tucson".
   name        String
+  /// "MANUAL" (typed in tax settings) or "QBO" (ingested).
+  ///
+  /// Drives the source-of-truth rule (product, 2026-09-08): a company connected to QuickBooks or
+  /// a CRM takes its tax from that system, so it cannot create MANUAL rates and cannot use ones
+  /// it created before connecting. Those rows are kept rather than deleted — disconnect and they
+  /// become usable again, which a delete could not undo.
+  source      String  @default("MANUAL")
   /// Percentage, e.g. 8.25. Four decimals because real rates include 9.0625%.
-  ratePercent Decimal  @map("rate_percent") @db.Decimal(6, 4)
-  /// The rate new estimates start with (settings → tax settings → default sales tax).
-  isDefault   Boolean  @default(false) @map("is_default")
-  active      Boolean  @default(true)
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  ratePercent Decimal @map("rate_percent") @db.Decimal(6, 4)
+  /// The rate new estimates start with (settings -> tax settings -> default sales tax).
+  isDefault   Boolean @default(false) @map("is_default")
+
+  /// Audit + soft delete (architecture, 2026-09-08). `isDeleted` hides a row without losing the
+  /// history that points at it; `isActive` is the reversible "not in use right now" state — the
+  /// two are different questions and collapsing them loses one. createdBy/updatedBy are users.id
+  /// with no FK, matching this schema's convention for service-managed tables, and nullable
+  /// because ingestion and background work have no acting user to attribute.
+  isActive  Boolean  @default(true) @map("is_active")
+  isDeleted Boolean  @default(false) @map("is_deleted")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy BigInt?  @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy BigInt?  @map("updated_by")
 
   qb SalesTaxQb[]
 
   @@unique([companyId, name])
-  @@index([companyId, active])
+  @@index([companyId, isActive])
   @@map("sales_tax")
   @@schema("public")
 }
@@ -467,12 +508,25 @@ model SalesTaxQb {
   salesTaxId Int      @map("sales_tax_id")
   companyId  Int      @map("company_id")
   realmId    String   @map("realm_id")
-  /// "TaxRate" | "TaxCode".
+  /// "TaxRate" carries the percentage; "TaxCode" is what a transaction line references. Intuit
+  /// models them separately, so one CLARA rate can hold a row of each.
   qboType    String   @map("qbo_type")
   qboId      String   @map("qbo_id")
   name       String
   raw        Json?
   syncedAt   DateTime @default(now()) @map("synced_at")
+
+  /// Audit + soft delete (architecture, 2026-09-08). `isDeleted` hides a row without losing the
+  /// history that points at it; `isActive` is the reversible "not in use right now" state — the
+  /// two are different questions and collapsing them loses one. createdBy/updatedBy are users.id
+  /// with no FK, matching this schema's convention for service-managed tables, and nullable
+  /// because ingestion and background work have no acting user to attribute.
+  isActive  Boolean  @default(true) @map("is_active")
+  isDeleted Boolean  @default(false) @map("is_deleted")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy BigInt?  @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy BigInt?  @map("updated_by")
 
   salesTax SalesTax @relation(fields: [salesTaxId], references: [id], onDelete: Cascade)
 

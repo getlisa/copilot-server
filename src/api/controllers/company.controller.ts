@@ -413,10 +413,14 @@ export class CompanyController {
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const rates = await listSalesTax(companyId);
+    const { taxSource, rates } = await listSalesTax(companyId);
     res.json({
       success: true,
-      data: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+      data: {
+        /** "quickbooks" | "crm" | "manual" — where this company's tax comes from. */
+        taxSource,
+        rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+      },
     });
   }
 
@@ -452,18 +456,28 @@ export class CompanyController {
       });
 
     try {
-      const saved = await upsertSalesTax(companyId, {
-        id: req.body?.id == null ? null : Number(req.body.id),
-        name,
-        ratePercent: rate,
-        active: req.body?.active !== false,
-        isDefault: req.body?.isDefault === true,
-      });
+      const saved = await upsertSalesTax(
+        companyId,
+        {
+          id: req.body?.id == null ? null : Number(req.body.id),
+          name,
+          ratePercent: rate,
+          isActive: req.body?.isActive !== false,
+          isDefault: req.body?.isDefault === true,
+        },
+        // Attributed to the admin who did it — createdBy/updatedBy exist so a rate applied to
+        // customer money is traceable to a person.
+        req.user?.userId == null ? null : BigInt(req.user.userId)
+      );
       logger.info("Sales tax saved", { companyId, id: saved.id, isDefault: saved.isDefault });
       res.json({ success: true, data: { ...saved, ratePercent: Number(saved.ratePercent) } });
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not save the rate";
-      res.status(400).json({ success: false, error: { status: 400, message } });
+      // 409 when the company's state forbids it (tax comes from a connected system); 400 when
+      // the request itself is at fault. The client shows the message either way, but the status
+      // is what tells it apart.
+      const status = /comes from (QuickBooks|your connected CRM)/i.test(message) ? 409 : 400;
+      res.status(status).json({ success: false, error: { status, message } });
     }
   }
 
@@ -485,10 +499,13 @@ export class CompanyController {
         .json({ success: false, error: { status: 400, message: "id must be an integer or null" } });
     try {
       await setDefaultSalesTax(companyId, id);
-      const rates = await listSalesTax(companyId);
+      const { taxSource, rates } = await listSalesTax(companyId);
       res.json({
         success: true,
-        data: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+        data: {
+          taxSource,
+          rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+        },
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not set the default";
