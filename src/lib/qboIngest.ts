@@ -546,28 +546,21 @@ export function qboIncomeAccounts(companyId: number) {
 /**
  * Whether this company's tax comes from a connected system rather than from what they type.
  *
- * The rule (product, 2026-09-08): a company connected to QuickBooks or a CRM takes its tax from
- * that system. It cannot create MANUAL rates, and rates it created BEFORE connecting stop being
- * usable — kept, not deleted, so disconnecting restores them.
+ * The rule (product, 2026-09-08): a company connected to QuickBooks takes its tax from
+ * QuickBooks. It cannot create MANUAL rates, and rates it created BEFORE connecting stop being
+ * applied — kept, not deleted, so disconnecting restores them.
  *
- * Checks both connection tables because they are separate by ownership, not by meaning:
- * qbo_connections is this service's, crm_connections belongs to the platform backend.
+ * QuickBooks ONLY, deliberately (product, 2026-09-08). An earlier draft also treated a
+ * `crm_connections` row as external, which locked ServiceTitan companies out of tax entirely:
+ * they could not create a rate, and nothing ingests tax from a CRM, so they would have had none
+ * at all. CRMs are out of scope for this work — when a CRM tax importer exists, add it here.
  */
 export async function taxSourceIsExternal(companyId: number): Promise<{
   external: boolean;
-  via: "quickbooks" | "crm" | null;
+  via: "quickbooks" | null;
 }> {
   const conn = await qboConnectionFor(companyId);
-  if (qboConnected(conn)) return { external: true, via: "quickbooks" };
-  // `select: { id: true }` on purpose. `crm_connections.provider` is a Postgres enum owned by
-  // the platform backend, and this schema records that extending it breaks our generated client
-  // on read — so selecting it would mean the day that team adds a provider, every tax endpoint
-  // 500s with no change on our side. Existence is all this function needs.
-  const crm = await prisma.crm_connections.findUnique({
-    where: { company_id: companyId },
-    select: { id: true },
-  });
-  return crm ? { external: true, via: "crm" } : { external: false, via: null };
+  return qboConnected(conn) ? { external: true, via: "quickbooks" } : { external: false, via: null };
 }
 
 /**
@@ -1025,7 +1018,16 @@ export async function ensureQboCustomer(
   }
 
   // Legacy path: the quote carries only free text. Adopt rather than duplicate (US4).
-  const name = customerDisplayName(fallback.name) || "Customer";
+  //
+  // A blank name is refused rather than defaulted. The old fallback created a QuickBooks
+  // customer literally called "Customer" in the client's books — a real record, in their
+  // accounting system, that someone has to find and merge. Refusing sends the technician back
+  // to the picker, which is the fix.
+  const name = customerDisplayName(fallback.name);
+  if (!name)
+    throw new Error(
+      "This quote has no customer. Choose or add one on the estimate before sending it to QuickBooks."
+    );
   const customer =
     (await prisma.customer.findUnique({
       where: { companyId_name: { companyId, name } },
@@ -1100,12 +1102,10 @@ export async function upsertSalesTax(
   // The source-of-truth rule, enforced here rather than only in the UI: a connected company's
   // tax comes from the connected system. Refusing with the reason beats a rate that saves and
   // is then quietly never applied.
-  const { external, via } = await taxSourceIsExternal(companyId);
+  const { external } = await taxSourceIsExternal(companyId);
   if (external)
     throw new Error(
-      via === "quickbooks"
-        ? "Your sales tax comes from QuickBooks while it is connected. Add or change the rate in QuickBooks, then sync."
-        : "Your sales tax comes from your connected CRM. Add or change the rate there, then sync."
+      "Your sales tax comes from QuickBooks while it is connected. Add or change the rate in QuickBooks, then sync."
     );
 
   // findFirst with isDeleted, not findUnique on the name key: a soft-deleted row would
@@ -1176,7 +1176,7 @@ export async function setDefaultSalesTax(companyId: number, id: number | null) {
       // and then be ignored on every estimate.
       if (external && owned.source === "MANUAL")
         throw new Error(
-          "That rate was created here, and your tax comes from the connected system while it is connected."
+          "That rate was created here, and your tax comes from QuickBooks while it is connected."
         );
     }
     await tx.salesTax.updateMany({ where: { companyId, isDefault: true }, data: { isDefault: false } });

@@ -488,7 +488,7 @@ export class CompanyController {
       // 409 when the company's state forbids it (tax comes from a connected system); 400 when
       // the request itself is at fault. The client shows the message either way, but the status
       // is what tells it apart.
-      const status = /comes from (QuickBooks|your connected CRM)/i.test(message) ? 409 : 400;
+      const status = /comes from QuickBooks/i.test(message) ? 409 : 400;
       res.status(status).json({ success: false, error: { status, message } });
     }
   }

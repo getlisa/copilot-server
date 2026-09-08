@@ -50,16 +50,17 @@ is now the exported pure predicate `salesTaxUsable`, asserted across all four
 (source, connected) combinations plus both veto flags — the first of those assertions goes red on
 the old code. No data repair was needed: `sales_tax` does not exist in production yet.
 
-## F2 (P1) — a CRM-connected company is locked out of tax entirely. **NEEDS A DECISION**
+## F2 (P1) — a CRM-connected company is locked out of tax entirely. RESOLVED BY SCOPE
 
 `taxSourceIsExternal` treats any `crm_connections` row as external, so a ServiceTitan company
 cannot create a MANUAL rate — but **nothing ingests tax from a CRM**, and the settings card tells
 them to "sync your CRM from Connections to import them", pointing at an importer that does not
 exist. Any rate created before connecting silently stops applying.
 
-This follows the rule as specified ("if a company is connected to a crm or qb, they cannot
-create"). Recommendation: treat `via: "crm"` as **non-blocking** until a CRM tax importer exists,
-so those companies keep a usable manual rate. Left as specified pending that call. → **T-40**
+**Decided 2026-09-08: CRMs are out of scope for this work — QuickBooks only.** The CRM branch is
+removed from `taxSourceIsExternal`, so a ServiceTitan company keeps its manual rates and is not
+locked out of anything. When a CRM tax importer exists, that is when the branch comes back.
+T-40 closed.
 
 ## F3 (P1) — tax re-sync matched on NAME only. FIXED
 
@@ -91,7 +92,7 @@ Fixed: a name match is refused when that customer is already linked to a differe
 customer in this realm; the incoming id gets a fresh customer, suffixed with its QuickBooks id so
 the `(company, name)` unique cannot abort the run. The conflict is logged with both ids.
 
-## F6 (P1) — no backfill; Phase 2 destroyed every quote's customer link. FIXED
+## F6 (P1) — no backfill; Phase 2 destroyed every quote's customer link. RESOLVED DIFFERENTLY
 
 Phase 1 added `quotes.customer_id` and nothing populated it; Phase 2 dropped `qbo_customer_id`.
 The damage was not a blank field: `syncQuoteToQbo` calls `ensureQboCustomer` unconditionally, so a
@@ -99,11 +100,17 @@ re-completed quote with a null `customer_id` fell into the legacy free-text bran
 the customer from `customerName` — re-pointing the estimate at a different customer, or creating
 one **literally named "Customer"** when that field was blank.
 
-Fixed: Phase 1 now backfills `customers` + `customer_qb` from the existing quote links (with
-`DISTINCT ON` picking one canonical name per QuickBooks id, since inserting two would violate the
-realm-scoped unique and abort the migration), then points `quotes.customer_id` at them. Phase 2
-carries a gate that must return 0 before it runs. Currently a no-op — 0 of 99 quotes have a link
-— but the picker has not shipped yet, and links accumulate the moment it does.
+**Decided 2026-09-08: no backfill.** Older estimates are not migrated — a company with no
+integration has nothing to carry across, and a company with one gets a per-estimate
+**"Sync to QuickBooks"** action beside Send / Download, so an old estimate reaches the books when
+someone actually wants it there.
+
+A backfill was written and then removed in favour of that. What made the missing backfill
+dangerous was never the null column: it was the legacy branch **inventing a customer**. That is
+now closed in code — `ensureQboCustomer` refuses a quote with no customer name instead of
+creating a QuickBooks customer literally called "Customer" in the client's books, and sends the
+technician back to the picker. Measured the same day: 0 of 99 quotes carry a link and 0 have been
+posted, so nothing is abandoned.
 
 ## F7 (P1) — item and account mirrors are not realm-scoped. DEFERRED → **T-41**
 

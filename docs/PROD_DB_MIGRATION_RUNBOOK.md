@@ -252,56 +252,14 @@ ALTER TABLE public.quotes DROP CONSTRAINT IF EXISTS quotes_customer_id_fkey;
 ALTER TABLE public.quotes ADD CONSTRAINT quotes_customer_id_fkey
   FOREIGN KEY (customer_id) REFERENCES public.customers(id) ON DELETE SET NULL;
 
--- BACKFILL. Without it Phase 2 destroys every existing quote's QuickBooks customer link, and
--- the consequence is not a blank field: syncQuoteToQbo calls ensureQboCustomer unconditionally,
--- so a re-completed quote with customer_id NULL falls into the legacy free-text branch and
--- re-resolves the customer from `customerName` — re-pointing the estimate at a different
--- customer, or creating one literally named "Customer" when that field is blank.
+-- NO BACKFILL, deliberately (product, 2026-09-08). Older estimates are not synced: a company
+-- with no integration has nothing to carry across, and a company with one gets a per-estimate
+-- "Sync to QuickBooks" action beside Send / Download rather than a bulk migration of history.
 --
--- DISTINCT ON picks one canonical name per (company, qbo id): the same QuickBooks customer can
--- appear on several quotes under different names, and inserting both would violate
--- customer_qb_company_id_realm_id_qbo_id_key and abort the migration.
-WITH link AS (
-  SELECT DISTINCT ON (q.company_id, q.qbo_customer_id)
-         q.company_id,
-         q.qbo_customer_id,
-         COALESCE(NULLIF(btrim(q.qbo_customer_name), ''),
-                  NULLIF(btrim(q.customer_name), ''),
-                  'QBO customer ' || q.qbo_customer_id) AS name
-    FROM public.quotes q
-   WHERE q.qbo_customer_id IS NOT NULL
-   ORDER BY q.company_id, q.qbo_customer_id, q.updated_at DESC
-)
-INSERT INTO public.customers (company_id, name)
-SELECT company_id, name FROM link
-ON CONFLICT (company_id, name) DO NOTHING;
-
-WITH link AS (
-  SELECT DISTINCT ON (q.company_id, q.qbo_customer_id)
-         q.company_id,
-         q.qbo_customer_id,
-         COALESCE(NULLIF(btrim(q.qbo_customer_name), ''),
-                  NULLIF(btrim(q.customer_name), ''),
-                  'QBO customer ' || q.qbo_customer_id) AS name
-    FROM public.quotes q
-   WHERE q.qbo_customer_id IS NOT NULL
-   ORDER BY q.company_id, q.qbo_customer_id, q.updated_at DESC
-)
-INSERT INTO public.customer_qb (customer_id, company_id, realm_id, qbo_id, display_name, synced_at)
-SELECT c.id, l.company_id, qc.realm_id, l.qbo_customer_id, l.name, CURRENT_TIMESTAMP
-  FROM link l
-  JOIN public.customers c
-    ON c.company_id = l.company_id AND c.name = l.name
-  JOIN public.qbo_connections qc
-    ON qc.company_id = l.company_id AND qc.realm_id IS NOT NULL
-ON CONFLICT DO NOTHING;
-
-UPDATE public.quotes q
-   SET customer_id = cq.customer_id
-  FROM public.customer_qb cq
- WHERE cq.company_id = q.company_id
-   AND cq.qbo_id = q.qbo_customer_id
-   AND q.customer_id IS NULL;
+-- The failure this used to guard against is closed in code instead: ensureQboCustomer's legacy
+-- branch now REFUSES a quote with no customer name, where it previously created a QuickBooks
+-- customer literally called "Customer" in the client's books. Measured 2026-09-08: 0 of 99
+-- quotes carry qbo_customer_id and 0 have been posted, so nothing is being abandoned here.
 
 ALTER TABLE public.customers    OWNER TO app_user;
 ALTER TABLE public.customer_qb  OWNER TO app_user;
@@ -327,10 +285,12 @@ qbo_customer_name TEXT;`) before scaling the old task definition up.
 **"Healthy" means exercised, not just passing a health check.** One quote read and one estimate
 posted on the new image — the health endpoint touches neither the new tables nor the QBO path.
 
-**Gate: the backfill must have worked.** This must return 0 before you run anything below:
+**Check what you are dropping.** There is no backfill by design (see Phase 1), so this reports
+how many quotes lose a QuickBooks customer link. Those estimates are re-synced on demand from the
+estimate screen, not migrated:
 
 ```sql
-SELECT count(*) FROM public.quotes WHERE qbo_customer_id IS NOT NULL AND customer_id IS NULL;
+SELECT count(*) FROM public.quotes WHERE qbo_customer_id IS NOT NULL;
 ```
 
 ```sql
