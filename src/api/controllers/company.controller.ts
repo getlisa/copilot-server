@@ -20,11 +20,14 @@ import {
 } from "../../lib/qbo";
 import {
   syncQboReferenceData,
-  searchQboCustomers,
+  searchCustomers,
   qboIncomeAccounts,
-  qboTaxRateOptions,
+  listSalesTax,
+  setDefaultSalesTax,
+  upsertSalesTax,
+  parseRatePercent,
   qboSyncedAt,
-  createQboCustomer,
+  createCustomer,
 } from "../../lib/qboIngest";
 
 /**
@@ -335,9 +338,13 @@ export class CompanyController {
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
     const q = typeof req.query.q === "string" ? req.query.q : "";
     const limit = Number(req.query.limit);
+    // The connected realm scopes which QuickBooks ids are meaningful; null when disconnected,
+    // in which case every customer simply reports qboId null rather than a stale one.
+    const conn = await qboConnectionFor(companyId);
+    const realmId = qboConnected(conn) ? conn.realmId : null;
     res.json({
       success: true,
-      data: await searchQboCustomers(companyId, q, Number.isFinite(limit) ? limit : 20),
+      data: await searchCustomers(companyId, q, Number.isFinite(limit) ? limit : 20, realmId),
     });
   }
 
@@ -358,24 +365,23 @@ export class CompanyController {
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    // No connection guard: a company with no accounting integration still needs customers, and
+    // createCustomer takes a null connection deliberately. Guarding here made the client's
+    // "added (not to QuickBooks)" branch unreachable and blocked customer creation outright for
+    // any company that has not connected.
     const conn = await qboConnectionFor(companyId);
-    if (!qboConnected(conn))
-      return res.status(409).json({
-        success: false,
-        error: { status: 409, message: "QuickBooks is not connected for this company" },
-      });
     const name = str(req.body?.name);
     if (!name)
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "A customer name is required" } });
     try {
-      const created = await createQboCustomer(conn, companyId, {
+      const created = await createCustomer(companyId, {
         name,
         email: str(req.body?.email),
         phone: str(req.body?.phone),
         address: str(req.body?.address),
-      });
+      }, qboConnected(conn) ? conn : null);
       res.status(201).json({ success: true, data: created });
     } catch (e) {
       // These messages are written for the person on site — a duplicate name or a malformed
@@ -405,17 +411,118 @@ export class CompanyController {
    * pre-fill for the organisation's default rate so an admin imports it rather than typing it.
    * A pre-fill only: CLARA computes tax from its OWN setting, never from this list.
    */
-  static async listQboTaxRates(req: RequestWithUser, res: Response) {
+  static async listSalesTaxRates(req: RequestWithUser, res: Response) {
     const companyId = req.user?.companyId;
     if (companyId == null)
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const rates = await qboTaxRateOptions(companyId);
+    const { taxSource, rates } = await listSalesTax(companyId);
     res.json({
       success: true,
-      data: rates.map((r) => ({ ...r, rateValue: r.rateValue == null ? null : Number(r.rateValue) })),
+      data: {
+        /** "quickbooks" | "crm" | "manual" — where this company's tax comes from. */
+        taxSource,
+        rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+      },
     });
+  }
+
+  /**
+   * POST /api/v1/companies/sales-tax — add or update a sales-tax rate (settings → tax settings).
+   * Admin-only: this rate is applied to money on customer-facing estimates.
+   *
+   * Body: { id?, name, ratePercent, isActive?, isDefault? }. Passing an id updates that rate;
+   * omitting it creates one. Setting isDefault moves the default — exactly one rate per company
+   * can hold it.
+   */
+  static async saveSalesTax(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+
+    const name = str(req.body?.name);
+    if (!name)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "A rate name is required" } });
+
+    // 0 is allowed and meaningful — a deliberate zero-rate jurisdiction is not the same as
+    // having no rate configured. Anything that is not a rate (null, "", []) is rejected rather
+    // than coerced to 0, which is what `Number()` used to do here.
+    const rate = parseRatePercent(req.body?.ratePercent);
+    if (rate == null)
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "ratePercent must be a number between 0 and 99.9999" },
+      });
+
+    try {
+      const rawId = req.body?.id == null ? null : Number(req.body.id);
+      if (rawId !== null && !Number.isInteger(rawId))
+        return res
+          .status(400)
+          .json({ success: false, error: { status: 400, message: "id must be an integer or null" } });
+      const saved = await upsertSalesTax(
+        companyId,
+        {
+          id: rawId,
+          name,
+          ratePercent: rate,
+          // Undefined stays undefined: an edit that omits these must not clear them. Sending
+          // `isDefault: false` by omission silently removed the company's default, after which
+          // every new estimate started untaxed with nothing on screen to say so.
+          isActive: req.body?.isActive === undefined ? undefined : req.body.isActive !== false,
+          isDefault: req.body?.isDefault === undefined ? undefined : req.body.isDefault === true,
+        },
+        // Attributed to the admin who did it — createdBy/updatedBy exist so a rate applied to
+        // customer money is traceable to a person.
+        req.user?.userId == null ? null : BigInt(req.user.userId)
+      );
+      logger.info("Sales tax saved", { companyId, id: saved.id, isDefault: saved.isDefault });
+      res.json({ success: true, data: { ...saved, ratePercent: Number(saved.ratePercent) } });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Could not save the rate";
+      // 409 when the company's state forbids it (tax comes from a connected system); 400 when
+      // the request itself is at fault. The client shows the message either way, but the status
+      // is what tells it apart.
+      const status = /comes from QuickBooks/i.test(message) ? 409 : 400;
+      res.status(status).json({ success: false, error: { status, message } });
+    }
+  }
+
+  /**
+   * PUT /api/v1/companies/sales-tax/default — choose the rate new estimates start with.
+   * Body: { id } — or { id: null } to have new estimates start untaxed.
+   */
+  static async setSalesTaxDefault(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const raw = req.body?.id;
+    const id = raw == null ? null : Number(raw);
+    if (id !== null && !Number.isInteger(id))
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "id must be an integer or null" } });
+    try {
+      await setDefaultSalesTax(companyId, id);
+      const { taxSource, rates } = await listSalesTax(companyId);
+      res.json({
+        success: true,
+        data: {
+          taxSource,
+          rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+        },
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Could not set the default";
+      res.status(400).json({ success: false, error: { status: 400, message } });
+    }
   }
 
   /**

@@ -362,8 +362,190 @@ model crm_entity_links {
 }
 
 /// ---------------------------------------------------------------------------------------------
-/// Ingested QuickBooks reference data. Table naming follows the product owner's convention:
-/// raw_<entity>_qb. Each row keeps the entity's own QBO id plus the few fields we query on, and
+/// The entity + `<entity>_qb` pattern (architecture, 2026-09-08).
+///
+/// CLARA owns the entity. A sibling `_qb` row holds what QuickBooks knows about it. The split
+/// matters for three reasons: the entity has to work for a company with no accounting
+/// integration at all; the QuickBooks id is only meaningful inside the realm that issued it; and
+/// re-syncing Intuit's data must never be able to lose the record itself.
+///
+/// Which company is connected to which system already has two homes, and they are separate for a
+/// reason, not by accident: `crm_connections` covers the field-service CRMs and is owned by the
+/// platform backend — it is capped at one connection per company and its `crm_provider` enum
+/// cannot take a new value without breaking that service's generated client. `qbo_connections`
+/// is the QuickBooks counterpart. Same architecture, split by ownership.
+///
+/// Items already follow this pattern: `pricebook_items` is the entity, `qbo_item_links` is its
+/// `_qb` side. It keeps its name because it also links lines that have no pricebook row at all
+/// (labor and ad-hoc, 46% of production lines), which `pricebook_item_qb` would misdescribe.
+/// ---------------------------------------------------------------------------------------------
+
+/// A customer, as CLARA knows them. The source of truth for the estimate screen's picker and for
+/// what a proposal prints — independent of whether the company uses QuickBooks.
+model Customer {
+  id        Int     @id @default(autoincrement())
+  companyId Int     @map("company_id")
+  name      String
+  email     String?
+  phone     String?
+  address   String?
+
+  /// Audit + soft delete (architecture, 2026-09-08). `isDeleted` hides a row without losing the
+  /// history that points at it; `isActive` is the reversible "not in use right now" state — the
+  /// two are different questions and collapsing them loses one. createdBy/updatedBy are users.id
+  /// with no FK, matching this schema's convention for service-managed tables, and nullable
+  /// because ingestion and background work have no acting user to attribute.
+  isActive  Boolean  @default(true) @map("is_active")
+  isDeleted Boolean  @default(false) @map("is_deleted")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy BigInt?  @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy BigInt?  @map("updated_by")
+
+  quotes Quote[]
+  qb     CustomerQb[]
+
+  /// Names are unique per company, mirroring QuickBooks' own DisplayName rule so a name that
+  /// works here cannot fail there for a reason the technician never saw.
+  // No separate @@index on the same columns — the unique above already serves the
+  // picker's lookup, and a second btree is maintained on every sync write for nothing.
+  @@unique([companyId, name])
+  @@map("customers")
+  @@schema("public")
+}
+
+/// What QuickBooks knows about one of our customers. One row per customer per realm: reconnect a
+/// company to a different QuickBooks file and the old row stays, inert, rather than being
+/// overwritten with an id that belongs to someone else's books.
+model CustomerQb {
+  id                 Int      @id @default(autoincrement())
+  customerId         Int      @map("customer_id")
+  companyId          Int      @map("company_id")
+  /// The QuickBooks company (realm) that issued `qboId`.
+  realmId            String   @map("realm_id")
+  /// Customer.Id in QuickBooks.
+  qboId              String   @map("qbo_id")
+  /// DisplayName as QuickBooks holds it — may differ from our name if it was renamed there.
+  displayName        String   @map("display_name")
+  /// FullyQualifiedName: read-only in QuickBooks, and the parent chain joined by colons
+  /// ("Customer:Job:Sub-job", up to 5 levels). This is what distinguishes two jobs that share a
+  /// name under different parents — DisplayName alone cannot, and the picker showing only the
+  /// leaf would make them indistinguishable.
+  fullyQualifiedName String?  @map("fully_qualified_name")
+  /// The untouched payload, so a later feature never needs a re-sync to read a field we did not
+  /// think to promote.
+  raw                Json?
+  syncedAt           DateTime @default(now()) @map("synced_at")
+
+  /// Audit + soft delete (architecture, 2026-09-08). `isDeleted` hides a row without losing the
+  /// history that points at it; `isActive` is the reversible "not in use right now" state — the
+  /// two are different questions and collapsing them loses one. createdBy/updatedBy are users.id
+  /// with no FK, matching this schema's convention for service-managed tables, and nullable
+  /// because ingestion and background work have no acting user to attribute.
+  isActive  Boolean  @default(true) @map("is_active")
+  isDeleted Boolean  @default(false) @map("is_deleted")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy BigInt?  @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy BigInt?  @map("updated_by")
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, realmId])
+  @@unique([companyId, realmId, qboId], map: "customer_qb_company_id_realm_id_qbo_id_key")
+  @@index([companyId, realmId])
+  @@map("customer_qb")
+  @@schema("public")
+}
+
+/// A sales tax rate the company can apply to estimates. CLARA's own record: a company with no
+/// QuickBooks connection still needs a rate, and the estimate's arithmetic is ours either way.
+///
+/// Exactly one row per company may be the default, which is what a new estimate starts with.
+/// Enforced by a partial unique index in the migration — Prisma cannot express one, so the
+/// controller checks it too rather than relying on the database alone.
+model SalesTax {
+  id          Int     @id @default(autoincrement())
+  companyId   Int     @map("company_id")
+  /// What a technician sees, e.g. "California" or "Tucson".
+  name        String
+  /// "MANUAL" (typed in tax settings) or "QBO" (ingested).
+  ///
+  /// Drives the source-of-truth rule (product, 2026-09-08): a company connected to QuickBooks or
+  /// a CRM takes its tax from that system, so it cannot create MANUAL rates and cannot use ones
+  /// it created before connecting. Those rows are kept rather than deleted — disconnect and they
+  /// become usable again, which a delete could not undo.
+  source      String  @default("MANUAL")
+  /// Percentage, e.g. 8.25. Four decimals because real rates include 9.0625%.
+  ratePercent Decimal @map("rate_percent") @db.Decimal(6, 4)
+  /// The rate new estimates start with (settings -> tax settings -> default sales tax).
+  isDefault   Boolean @default(false) @map("is_default")
+
+  /// Audit + soft delete (architecture, 2026-09-08). `isDeleted` hides a row without losing the
+  /// history that points at it; `isActive` is the reversible "not in use right now" state — the
+  /// two are different questions and collapsing them loses one. createdBy/updatedBy are users.id
+  /// with no FK, matching this schema's convention for service-managed tables, and nullable
+  /// because ingestion and background work have no acting user to attribute.
+  isActive  Boolean  @default(true) @map("is_active")
+  isDeleted Boolean  @default(false) @map("is_deleted")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy BigInt?  @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy BigInt?  @map("updated_by")
+
+  qb SalesTaxQb[]
+
+  @@unique([companyId, name])
+  @@index([companyId, isActive])
+  @@map("sales_tax")
+  @@schema("public")
+}
+
+/// What QuickBooks knows about one of our sales-tax rows. `qboType` distinguishes the two
+/// entities Intuit models separately — a TaxRate carries the percentage, a TaxCode is what a
+/// transaction line actually references — so a single rate may have one row of each.
+model SalesTaxQb {
+  id         Int      @id @default(autoincrement())
+  salesTaxId Int      @map("sales_tax_id")
+  companyId  Int      @map("company_id")
+  realmId    String   @map("realm_id")
+  /// "TaxRate" carries the percentage; "TaxCode" is what a transaction line references. Intuit
+  /// models them separately, so one CLARA rate can hold a row of each.
+  qboType    String   @map("qbo_type")
+  qboId      String   @map("qbo_id")
+  name       String
+  raw        Json?
+  syncedAt   DateTime @default(now()) @map("synced_at")
+
+  /// Audit + soft delete (architecture, 2026-09-08). `isDeleted` hides a row without losing the
+  /// history that points at it; `isActive` is the reversible "not in use right now" state — the
+  /// two are different questions and collapsing them loses one. createdBy/updatedBy are users.id
+  /// with no FK, matching this schema's convention for service-managed tables, and nullable
+  /// because ingestion and background work have no acting user to attribute.
+  isActive  Boolean  @default(true) @map("is_active")
+  isDeleted Boolean  @default(false) @map("is_deleted")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy BigInt?  @map("created_by")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy BigInt?  @map("updated_by")
+
+  salesTax SalesTax @relation(fields: [salesTaxId], references: [id], onDelete: Cascade)
+
+  // salesTaxId is part of the key: one QuickBooks rate belongs to MANY codes (a state rate sits
+  // in every city group in that state), so a key without it lets the second code's insert
+  // collide with the first's row — which aborts the whole sync, not just that member.
+  @@unique([salesTaxId, companyId, realmId, qboType, qboId])
+  @@index([salesTaxId])
+  @@map("sales_tax_qb")
+  @@schema("public")
+}
+
+/// ---------------------------------------------------------------------------------------------
+/// Ingested QuickBooks reference data that has no CLARA-side entity of its own. Naming follows
+/// the product convention raw_<entity>_qb. Customers and sales tax used to live here too; they
+/// are now entities with `_qb` siblings, and their mirror tables are dropped in the same
+/// migration — leaving the models behind would keep a client method pointing at a table that
+/// does not exist. Each row keeps the entity's own QBO id plus the few fields we query on, and
 /// the untouched payload in `raw` so a later feature never needs a re-sync to read a field we
 /// did not think to promote.
 ///
@@ -420,25 +602,6 @@ model QboItemLink {
   @@schema("public")
 }
 
-model RawQbCustomer {
-  id          Int      @id @default(autoincrement())
-  companyId   Int      @map("company_id")
-  /// Customer.Id in QuickBooks.
-  qboId       String   @map("qbo_id")
-  /// DisplayName — QBO's unique customer key, and what the picker searches.
-  displayName String   @map("display_name")
-  email       String?
-  phone       String?
-  active      Boolean  @default(true)
-  raw         Json
-  syncedAt    DateTime @default(now()) @map("synced_at")
-
-  @@unique([companyId, qboId])
-  @@index([companyId, displayName])
-  @@map("raw_customer_qb")
-  @@schema("public")
-}
-
 model RawQbItem {
   id        Int      @id @default(autoincrement())
   companyId Int      @map("company_id")
@@ -457,37 +620,6 @@ model RawQbItem {
   /// Lowercased on write, so a name lookup is case-insensitive without a functional index.
   @@unique([companyId, name])
   @@map("raw_item_qb")
-  @@schema("public")
-}
-
-model RawQbTaxCode {
-  id        Int      @id @default(autoincrement())
-  companyId Int      @map("company_id")
-  qboId     String   @map("qbo_id")
-  name      String
-  taxable   Boolean  @default(true)
-  active    Boolean  @default(true)
-  raw       Json
-  syncedAt  DateTime @default(now()) @map("synced_at")
-
-  @@unique([companyId, qboId])
-  @@map("raw_taxcode_qb")
-  @@schema("public")
-}
-
-model RawQbTaxRate {
-  id        Int      @id @default(autoincrement())
-  companyId Int      @map("company_id")
-  qboId     String   @map("qbo_id")
-  name      String
-  /// RateValue as a percentage, e.g. 8.25. The org default rate is pre-filled from these.
-  rateValue Decimal? @map("rate_value") @db.Decimal(6, 4)
-  active    Boolean  @default(true)
-  raw       Json
-  syncedAt  DateTime @default(now()) @map("synced_at")
-
-  @@unique([companyId, qboId])
-  @@map("raw_taxrate_qb")
   @@schema("public")
 }
 
@@ -565,15 +697,14 @@ model Quote {
   /// QBO Estimate id once posted (companies with a QboConnection). Posted at completion;
   /// re-completing after a reopen UPDATES this same estimate in place (QBO PRD US6).
   qboEstimateId     String?         @map("qbo_estimate_id")
-  /// The QuickBooks customer this estimate bills to, chosen or created on the estimate screen.
-  /// A customer must exist in QuickBooks — and therefore have an id — BEFORE the estimate can be
-  /// posted, because the estimate references it (product rule, 2026-09-07). Null means nobody has
-  /// picked one yet; the posting path then falls back to matching on the quote's customer name so
-  /// existing quotes keep working, and records the id here once it has one.
-  qboCustomerId     String?         @map("qbo_customer_id")
-  /// DisplayName as QuickBooks holds it, so the UI can show what it is actually linked to
-  /// without a round trip. Display only — `qboCustomerId` is the identity.
-  qboCustomerName   String?         @map("qbo_customer_name")
+  /// The customer this estimate bills to, chosen or created on the estimate screen. Null on
+  /// quotes that predate the picker — those still print the free-text customerName below, and
+  /// the QuickBooks post falls back to matching on that name.
+  ///
+  /// The QuickBooks id is NOT duplicated here: it lives on customer_qb, keyed by realm, so a
+  /// reconnect to a different QuickBooks file cannot leave a stale id attached to an estimate.
+  customerId        Int?            @map("customer_id")
+  customer          Customer?       @relation(fields: [customerId], references: [id])
   /// Which option group the customer chose, answered at completion time (QBO PRD US3).
   /// Null = not asked / no options. Cleared on reopen so re-completion asks again.
   chosenOptionGroup String?         @map("chosen_option_group")

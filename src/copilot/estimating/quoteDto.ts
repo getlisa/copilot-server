@@ -118,13 +118,11 @@ export interface QuoteDto {
    * validated; null renders blank/omitted on documents — never a placeholder, never an error.
    */
   /**
-   * The QuickBooks customer this estimate bills to, once one has been chosen or created. Null
-   * means the estimate screen has not linked one — the picker shows "choose or add" — and the
-   * posting path will fall back to matching on `customerName`.
+   * The customer this estimate bills to. Null means the picker has not linked one — the card
+   * shows "choose or add", and a QuickBooks post falls back to matching on `customerName`.
+   * The QuickBooks id is not carried here: it lives on customer_qb, keyed by realm.
    */
-  qboCustomerId: string | null;
-  /** DisplayName as QuickBooks holds it, so the picker can show the link without a round trip. */
-  qboCustomerName: string | null;
+  customerId: number | null;
   customerName: string | null;
   customerAddress: string | null;
   customerPhone: string | null;
@@ -354,8 +352,9 @@ export function toQuoteDto(
     completedAt: quote.completedAt?.toISOString() ?? null,
     lineItems: dtos,
     markupPercent,
-    qboCustomerId: quote.qboCustomerId,
-    qboCustomerName: quote.qboCustomerName,
+    // ?? null like every neighbouring field: a fixture without the column would otherwise emit
+    // undefined against a DTO typed `number | null`, and JSON.stringify drops it entirely.
+    customerId: quote.customerId ?? null,
     customerName: quote.customerName ?? null,
     customerAddress: quote.customerAddress ?? null,
     customerPhone: quote.customerPhone ?? null,

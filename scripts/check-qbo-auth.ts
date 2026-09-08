@@ -39,8 +39,8 @@ async function main() {
 
   // ---- environment stamp ----
   assert.strictEqual(QBO_ENVIRONMENT, "sandbox", "env var selects the keyset");
-  const conn = (environment: string, encryptedAuth: string | null) =>
-    ({ environment, encryptedAuth } as any);
+  const conn = (environment: string, encryptedAuth: string | null, realmId: string | null = "9341455474664217") =>
+    ({ environment, encryptedAuth, realmId } as any);
 
   assert.strictEqual(qboConnected(conn("sandbox", "sealed")), true);
   assert.strictEqual(qboConnected(conn("sandbox", null)), false, "no tokens = not connected");
@@ -54,6 +54,13 @@ async function main() {
   assert.strictEqual(qboReconnectRequired(conn("production", "sealed")), true);
   assert.strictEqual(qboReconnectRequired(conn("sandbox", "sealed")), false);
   assert.strictEqual(qboReconnectRequired(conn("production", null)), false, "never connected != reconnect");
+  // Tokens without a realm cannot post anything. Reporting Connected would surface the failure
+  // at quote completion instead of on the Connections card where Reconnect lives.
+  assert.strictEqual(
+    qboConnected(conn("sandbox", "sealed", null)),
+    false,
+    "tokens with no realm must not read as connected"
+  );
 
   // ---- consent URL + signed state ----
   const url = new URL(qboAuthUrl(42));
@@ -92,17 +99,57 @@ async function main() {
   process.env.QBO_TOKEN_KEY = saved;
   assert.strictEqual(isQboConfigured(), true);
 
-  // ---- who may manage the connection ----
-  // getConnections reports canManage from the JWT role. Pinned because the failure mode is
-  // silent: if this ever regresses to false for an admin, the Connect button simply vanishes.
-  for (const [role, expected] of [
-    ["admin", true],
-    ["service_manager", true],
-    ["technician", false],
-    [undefined, false],
-  ] as [string | undefined, boolean][]) {
-    assert.strictEqual(isAdminRole(role), expected, `canManage for role=${role}`);
+  // ---- the route table actually enforces the roles ----
+  // This replaces a loop that re-asserted isAdminRole and would have passed even if the
+  // controller hard-coded canManage: true. What needs pinning is the WIRING — drop requireAdmin
+  // from a write route and a technician can rewrite the percentage applied to customer money.
+  const { companyRoute } = await import("../src/api/routes/company.route");
+  const routes = (companyRoute as unknown as { stack: any[] }).stack
+    .filter((l) => l.route)
+    .map((l) => ({
+      method: Object.keys(l.route.methods)[0],
+      path: l.route.path,
+      handlers: l.route.stack.map((h: { name: string }) => h.name),
+    }));
+
+  const find = (method: string, path: string) => {
+    const r = routes.find((x) => x.method === method && x.path === path);
+    assert.ok(r, `route ${method.toUpperCase()} ${path} is missing`);
+    return r!;
+  };
+
+  for (const [method, path] of [
+    ["post", "/sales-tax"],
+    ["put", "/sales-tax/default"],
+    ["post", "/connections/qbo/connect"],
+    ["delete", "/connections/qbo"],
+    ["put", "/markup"],
+  ] as [string, string][]) {
+    const r = find(method, path);
+    assert.ok(r.handlers.includes("authMiddleware"), `${path} must authenticate`);
+    assert.ok(r.handlers.includes("requireAdmin"), `${path} must be admin-only`);
   }
+
+  // Open to every role, deliberately: an estimate has to show the rate it applies, and a
+  // technician picks the customer. Gating either empties the screen with no error anywhere.
+  for (const [method, path] of [
+    ["get", "/sales-tax"],
+    ["get", "/qbo/customers"],
+    ["get", "/connections/qbo/items"],
+  ] as [string, string][]) {
+    const r = find(method, path);
+    assert.ok(r.handlers.includes("authMiddleware"), `${path} must still authenticate`);
+    assert.ok(
+      !r.handlers.includes("requireAdmin"),
+      `${path} must NOT be admin-only — technicians need it`
+    );
+  }
+
+  // The OAuth callback is the one unauthenticated route; its credential is the signed state.
+  assert.ok(
+    !find("get", "/connections/qbo/callback").handlers.includes("authMiddleware"),
+    "Intuit redirects a browser here with no bearer token"
+  );
 
   console.log("check-qbo-auth: OK");
 }

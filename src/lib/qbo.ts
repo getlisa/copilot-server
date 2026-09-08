@@ -76,7 +76,10 @@ export const isQboConfigured = () =>
  * prompt instead of an opaque 401 on the next quote completion.
  */
 export const qboConnected = (conn: QboConnection | null): conn is QboConnection =>
-  !!conn?.encryptedAuth && conn.environment === QBO_ENVIRONMENT;
+  // realmId included: without it the UI reports Connected and the picker appears, but every
+  // sync and every quote completion throws "connection has no realm" later, where nobody can
+  // act on it. Refusing here puts the failure on the Connections card, next to Reconnect.
+  !!conn?.encryptedAuth && !!conn.realmId && conn.environment === QBO_ENVIRONMENT;
 
 /** Tokens exist, but from the other keyset — the UI shows "reconnect required", not "connect". */
 export const qboReconnectRequired = (conn: QboConnection | null): boolean =>
@@ -304,7 +307,7 @@ const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 export type EnsureCustomer = (
   conn: QboConnection,
   companyId: number,
-  quote: { id: string; qboCustomerId: string | null },
+  quote: { id: string; customerId: number | null },
   fallback: { name: string; email?: string | null; phone?: string | null; address?: string | null }
 ) => Promise<string>;
 
@@ -465,7 +468,7 @@ export async function syncQuoteToQbo(
     id: string;
     qboEstimateId: string | null;
     chosenOptionGroup: string | null;
-    qboCustomerId: string | null;
+    customerId: number | null;
   },
   dto: { lineItems: LineItemDto[]; optionTotals: QuoteOptionTotal[] },
   customer: { name: string; email?: string | null; phone?: string | null; address?: string | null },
