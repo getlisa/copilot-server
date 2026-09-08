@@ -433,12 +433,21 @@ model Customer {
   quotes Quote[]
   qb     CustomerQb[]
 
-  /// Names are unique per company, mirroring QuickBooks' own DisplayName rule so a name that
-  /// works here cannot fail there for a reason the technician never saw.
-  // No separate @@index on the same columns — the unique above already serves the
-  // picker's lookup, and a second btree is maintained on every sync write for nothing.
+  /// Names are unique per company **and parent**, mirroring QuickBooks' actual DisplayName rule.
+  ///
+  /// It was `(companyId, name)` until a sandbox probe settled the question (2026-09-08): Intuit
+  /// accepted `Mark Cho:Building 1` while `Mahee Zentrades:Building 1` already existed, so
+  /// DisplayName is **sibling**-unique, not realm-unique. The narrower key was refusing customers
+  /// QuickBooks would take — a technician adding "Building 1" to a second property was told it
+  /// already existed, when it is a different building.
+  ///
+  /// The production index additionally carries `NULLS NOT DISTINCT` (Postgres 15+), which Prisma
+  /// cannot express: without it every root customer has `parent_id IS NULL`, NULLs compare as
+  /// distinct, and two top-level "Acme"s would both be allowed — losing the guarantee for the
+  /// common case. See docs/sql/phase3.sql; the same documented divergence already exists for
+  /// `sales_tax_one_default_per_company`.
   @@index([parentId])
-  @@unique([companyId, name])
+  @@unique([companyId, parentId, name], map: "customers_company_id_parent_id_name_key")
   @@map("customers")
   @@schema("public")
 }
