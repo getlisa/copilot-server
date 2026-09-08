@@ -31,72 +31,14 @@ trap 'rm -rf "$WORK"' EXIT
 
 [ -f "$SQL_FILE" ] || { echo "missing $SQL_FILE" >&2; exit 1; }
 
-# ---- 1. the runner, which executes the SQL statement by statement -----------------------------
-# Prisma's $executeRawUnsafe takes ONE statement at a time, and a naive split on ";" would cut
-# every DO $$ ... $$ block in half at its first inner semicolon — hence the dollar-quote-aware
-# splitter rather than `sql.split(';')`.
-cat > "$WORK/runsql.js" <<'JS'
-const fs = require('fs');
-
-// The app's own URL points at app_user, which cannot ALTER a postgres-owned table. Swap in the
-// master credentials, keeping host, port and database exactly as configured.
-//
-// Done through the ENVIRONMENT, before @prisma/client is required, rather than through the
-// PrismaClient({datasources}) constructor: the env path is what Prisma reads by default and has
-// no API surface to get wrong across versions. This runs blind against production, where a
-// mistake costs a full ECS round-trip to discover.
-{
-  const u = new URL(process.env.DIRECT_URL || process.env.DATABASE_URL);
-  u.username = encodeURIComponent(process.env.PGMASTER_USER);
-  u.password = encodeURIComponent(process.env.PGMASTER_PASSWORD);
-  process.env.DATABASE_URL = u.toString();
-  process.env.DIRECT_URL = u.toString();
-  console.log('connecting as', process.env.PGMASTER_USER, 'to', u.host + u.pathname);
-}
-
-const { PrismaClient } = require('@prisma/client');
-
-function statements(sql) {
-  const out = [];
-  let buf = '', i = 0, tag = null;
-  while (i < sql.length) {
-    if (!tag) {
-      const m = /^\$([A-Za-z_]*)\$/.exec(sql.slice(i));
-      if (m) { tag = m[0]; buf += tag; i += tag.length; continue; }
-      if (sql[i] === '-' && sql[i + 1] === '-') {
-        const nl = sql.indexOf('\n', i);
-        i = nl === -1 ? sql.length : nl + 1;
-        continue;
-      }
-      if (sql[i] === ';') { if (buf.trim()) out.push(buf.trim()); buf = ''; i++; continue; }
-      buf += sql[i++];
-    } else {
-      if (sql.startsWith(tag, i)) { buf += tag; i += tag.length; tag = null; continue; }
-      buf += sql[i++];
-    }
-  }
-  if (buf.trim()) out.push(buf.trim());
-  return out;
-}
-
-(async () => {
-  const stmts = statements(fs.readFileSync(process.argv[2], 'utf8'));
-  console.log('statements:', stmts.length);
-  const p = new PrismaClient();
-  for (const [n, s] of stmts.entries()) {
-    try {
-      await p.$executeRawUnsafe(s);
-      console.log(`[${n + 1}/${stmts.length}] ok: ${s.split('\n')[0].slice(0, 90)}`);
-    } catch (e) {
-      console.error(`[${n + 1}/${stmts.length}] FAILED: ${s.slice(0, 200)}\n  ${e.message}`);
-      await p.$disconnect();
-      process.exit(1);
-    }
-  }
-  await p.$disconnect();
-  console.log('PHASE1B_APPLIED');
-})().catch((e) => { console.error('ERR', e.message); process.exit(1); });
-JS
+# ---- 1. build ONE self-contained runner, with the statements already split ---------------------
+# The split happens HERE, not in the container. Prisma's $executeRawUnsafe takes one statement at
+# a time, and a naive split on ";" would cut every DO $$ ... $$ block in half at its first inner
+# semicolon — so it needs a dollar-quote-aware splitter, and doing it locally keeps that logic out
+# of the payload. Which matters: the ECS container-override limit is 8192 bytes, and an earlier
+# version shipped the runner as a tar archive. A tar of one small file is ~10KB before compression
+# (512-byte blocks, 10240-byte minimum), so it blew the limit on its own.
+python3 "$(dirname "$0")/build-runner.py" "$SQL_FILE" "$WORK/runsql.js"
 
 # ---- 2. a task definition that also carries the master credentials -----------------------------
 aws ecs describe-task-definition --task-definition "$SERVICE" --query 'taskDefinition' --output json > "$WORK/base.json"
@@ -124,11 +66,15 @@ echo "registered $TASKDEF (deregistered on exit)"
 trap 'aws ecs deregister-task-definition --task-definition "'"$TASKDEF"'" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
 
 # ---- 3. run it inside the VPC ------------------------------------------------------------------
-# gzip+base64: the container-override payload is capped at 8192 bytes and the SQL plus runner is
-# comfortably over that.
-PAYLOAD=$(tar -czf - -C "$WORK" runsql.js | base64 | tr -d '\n')
-SQL_B64=$(gzip -9c "$SQL_FILE" | base64 | tr -d '\n')
-CMD="cd /app && echo '$PAYLOAD' | base64 -d | tar -xzf - && echo '$SQL_B64' | base64 -d | gunzip > /app/phase1b.sql && node /app/runsql.js /app/phase1b.sql"
+# One gzip+base64 blob, size-checked locally against the 8192-byte override limit — a failure here
+# with the actual byte count beats an InvalidParameterException from the API.
+PAYLOAD=$(gzip -9c "$WORK/runsql.js" | base64 | tr -d '\n')
+CMD="cd /app && echo '$PAYLOAD' | base64 -d | gunzip > /app/runsql.js && node /app/runsql.js"
+if [ ${#CMD} -gt 7800 ]; then
+  echo "payload is ${#CMD} bytes — over the 8192-byte container-override limit" >&2
+  exit 1
+fi
+echo "payload: ${#CMD} bytes"
 
 NET=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
         --query 'services[0].networkConfiguration' --output json)
