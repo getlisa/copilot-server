@@ -11,22 +11,25 @@
 > Measured the same day: **0 of 99 quotes** carry `qbo_customer_id`, and **0** have been posted
 > to QuickBooks.
 >
-> **Method:** six specialist reviewers over both diffs — correctness, security/multi-tenancy,
+> **Method:** seven specialist reviewers over both diffs — correctness, security/multi-tenancy,
 > data-migration, API contract, reliability, adversarial, testing. Standards lens skipped, with
-> disclosure: no repo-level `CLAUDE.md` governs these paths. The correctness reviewer had not
-> returned when this was written; its findings will be appended.
+> disclosure: no repo-level `CLAUDE.md` governs these paths.
 
 ## Disposition summary
 
 | | count |
 |---|---|
-| P0 | 1, fixed |
+| P0 | 2, both fixed |
 | P1 | 12, of which 8 fixed, 2 need a product decision, 2 deferred with IDs |
 | P2 | 14, of which 10 fixed, 4 deferred |
 | P3 | 12, of which 6 fixed, 6 deferred |
 
-Three independent reviewers found the same P0. That is the finding worth remembering: each half
+Three independent reviewers found F1 separately. That is the finding worth remembering: each half
 of the source-of-truth rule read correctly on its own, and only the combination was fatal.
+
+**F33 was introduced by the fix for F15 in this same round** — see below. Worth stating plainly:
+a review pass is not a safe operation, and the second P0 exists because the first fix was applied
+without re-checking the constraint it depended on.
 
 ## F1 (P0) — every ingested tax rate was unusable. FIXED
 
@@ -206,3 +209,90 @@ swallowed failure can occur *after* a customer has been created in the client's 
 4. Merge and deploy **technician-copilot**.
 5. Exercise a quote read and an estimate post on the new image.
 6. Only then run **Phase 2**, after its gate returns 0.
+
+
+---
+
+## Appended after the correctness reviewer returned
+
+## F33 (P0) — the fix for F15 aborts the whole sync. FIXED
+
+F15 correctly identified that `sales_tax_qb` member rows reparented themselves when a rate was
+shared by two codes. The fix scoped the lookup by `salesTaxId` — but the database's unique key
+was still `(company_id, realm_id, qbo_type, qbo_id)`, **without** `salesTaxId`. So the second
+code's member insert no longer reparented the row; it collided with it, raised 23505 in an
+uncaught `for` loop, and aborted `syncQboReferenceData` before accounts were ingested at all.
+
+Silent wrongness traded for a hard stop, which is the better direction to fail — but it would
+have failed for the sandbox's own data: AZ State 7.1% sits inside "Tucson", and adding a
+"Phoenix" code makes the collision certain.
+
+Fixed properly: `salesTaxId` is part of the key in `schema.prisma` and in the migration, and the
+writes are plain upserts on it. Two things fell out of doing it correctly:
+
+- Prisma **rejected** the explicit constraint name — 66 bytes against Postgres's 63-byte limit.
+- The derived name Prisma actually uses is truncated to
+  `sales_tax_qb_sales_tax_id_company_id_realm_id_qbo_type_qbo__key` (note the double underscore),
+  now copied verbatim into the runbook.
+
+The runbook gained the verification step that would have caught all of this:
+`prisma migrate diff --from-empty --to-schema-datamodel`, compared against the hand-written SQL.
+
+## F34 (P2) — a rate typed by an admin could be overwritten and relabelled. FIXED
+
+The tax-code name fallback matched on name with no `source` filter, then wrote
+`{source: "QBO", ratePercent, isActive: true}` over whatever it found. An admin types
+"California 8.5%" before connecting; the company connects, and QuickBooks' "California" is 8.0%
+— their row is rewritten in place, its percentage replaced and its provenance flipped. If it was
+the default, the ingested rate **inherited `isDefault`**, breaking the rule that ingested rates
+arrive as candidates. And `isActive: true` silently reactivated any rate an admin had turned off,
+on every sync.
+
+Fixed: the fallback matches `source: "QBO"` only, and the refresh no longer forces `isActive`.
+
+## F35 (P2) — "8,5" became an 85% tax rate. FIXED
+
+Both the client and `parseRatePercent` stripped commas rather than interpreting them, so `8,5`
+became `85` — inside the accepted 0–99.9999 range, stored, and applied to customer money. `1,5`
+became 15%. The success toast echoed only the name, so nothing on screen showed the number saved.
+A comma is now a decimal separator.
+
+## F36 (P2) — a customer deactivated in QuickBooks stayed billable. FIXED
+
+`isActive` was written on create and never refreshed, so a customer deactivated in QuickBooks kept
+being offered by the picker until an estimate was linked to it and QuickBooks rejected it at
+completion. A regression from the entity split: the pre-change code carried `active` in its update
+payload. Now refreshed on every sync — unlike the contact fields, which stay gap-fill-only.
+
+## F37 (P2) — a hidden customer's name was refused but unpickable. FIXED
+
+`createCustomer`'s duplicate check filtered neither `isActive` nor `isDeleted`, while the picker's
+search filters both. A technician searching an inactive "Acme" saw "No customer matches that
+name", tapped "Add a new customer", and got "already one of your customers — pick them from the
+list instead" naming a list it was not in. No third option on that screen. A hidden match is now
+revived and returned instead of refused.
+
+## F38 (P2) — a PATCH carrying both a name and a customer discarded the name. FIXED
+
+The overwrite guard tested the **stored** `customerName` rather than the pending one, so a request
+setting both fields lost the typed name silently, behind a comment claiming it "never overwrites
+what a technician typed".
+
+## F39 (P2) — the picker could show results for a query the user had moved past. FIXED
+
+The debounce cleared the pending timer but never sequenced the requests, so a slower broad query
+could land after a narrower one and replace it — input reading "acme", list showing everything
+starting with "a", and the technician picking the wrong customer. A request id in a ref now drops
+any response that is not the latest, and the in-flight response no longer writes state after the
+dialog closes.
+
+## Appended deferrals
+
+| ID | From | Why deferred |
+|---|---|---|
+| T-55 | correctness | `ensureQboCustomer`'s linked branch pushes blind, with none of the adopt-by-name protection the legacy branch has, so a customer added directly in QuickBooks dead-ends the quote until a full re-sync. |
+| T-56 | correctness | The adopt-by-name upsert keys on `(customerId, realmId)` only and can violate the second unique key after a rename. |
+| T-57 | correctness | The "Customer record" row shows the quote's free text, not the linked customer — the exact near-miss the picker exists to prevent. Needs the linked name on the DTO. |
+| T-58 | correctness | `ensureQboItem`'s step 1 is one OR'd `findFirst` with no ordering, so the documented pricebook-first precedence is not what runs — one material can bill against two QuickBooks items. |
+| T-59 | correctness | The item mirror is adopted without checking the item is still active in QuickBooks, then cached in the link table permanently. |
+| T-60 | correctness | Ingested DisplayNames skip `customerDisplayName`, so a >100-character name can never be matched again by the paths that normalise; the name index is also case-sensitive while QuickBooks' is not. |

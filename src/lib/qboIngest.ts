@@ -148,6 +148,9 @@ async function ingestCustomers(
         email: current?.email ?? email,
         phone: current?.phone ?? phone,
         address: current?.address ?? address,
+        // Refreshed every sync, unlike the contact fields: a customer deactivated in QuickBooks
+        // must stop being offered here, or a technician links an estimate that QBO then rejects.
+        isActive: r.Active !== false,
       },
     });
 
@@ -321,21 +324,18 @@ async function ingestSalesTax(
     // Match on the QBO id FIRST, via the link. Matching on name alone meant a code renamed in
     // QuickBooks created a second row while the old one kept its percentage, its isActive and
     // its isDefault — so the company quoted a stale rate forever.
-    const linked = await prisma.salesTaxQb.findUnique({
-      where: {
-        companyId_realmId_qboType_qboId: {
-          companyId,
-          realmId,
-          qboType: "TaxCode",
-          qboId: id(c.Id),
-        },
-      },
+    const linked = await prisma.salesTaxQb.findFirst({
+      where: { companyId, realmId, qboType: "TaxCode", qboId: id(c.Id) },
       select: { salesTaxId: true },
     });
     const byName = linked
       ? null
       : await prisma.salesTax.findFirst({
-          where: { companyId, name, isDeleted: false },
+          // source: "QBO" only. Adopting a MANUAL row of the same name would rewrite an admin's
+          // hand-typed percentage with QuickBooks' number and flip its provenance — and if that
+          // row was the default, the ingested rate would inherit isDefault, breaking the rule
+          // that ingested rates arrive as candidates and never as the default.
+          where: { companyId, name, source: "QBO", isDeleted: false },
           select: { id: true },
         });
 
@@ -351,14 +351,22 @@ async function ingestSalesTax(
     await prisma.salesTax.update({
       where: { id: salesTaxId },
       // The name follows QuickBooks when the code is renamed there — it is the same rate.
-      data: { name, source: "QBO", ratePercent: effective, isActive: true, isDeleted: false },
+      // isActive is deliberately NOT forced true: an admin who deactivated a rate should not
+      // have it silently reactivated by the next sync.
+      data: { name, source: "QBO", ratePercent: effective, isDeleted: false },
     });
     seen.push(salesTaxId);
 
     const codeQb = { salesTaxId, name, raw: c as object, syncedAt: new Date() };
     await prisma.salesTaxQb.upsert({
       where: {
-        companyId_realmId_qboType_qboId: { companyId, realmId, qboType: "TaxCode", qboId: id(c.Id) },
+        salesTaxId_companyId_realmId_qboType_qboId: {
+          salesTaxId,
+          companyId,
+          realmId,
+          qboType: "TaxCode",
+          qboId: id(c.Id),
+        },
       },
       create: { companyId, realmId, qboType: "TaxCode", qboId: id(c.Id), ...codeQb },
       update: codeQb,
@@ -372,16 +380,19 @@ async function ingestSalesTax(
       const rid = String(d.TaxRateRef?.value ?? "");
       if (!rateById.has(rid)) continue;
       const rateQb = { name: rateNameById.get(rid) ?? rid, raw: d as object, syncedAt: new Date() };
-      const existingMember = await prisma.salesTaxQb.findFirst({
-        where: { salesTaxId, companyId, realmId, qboType: "TaxRate", qboId: rid },
-        select: { id: true },
+      await prisma.salesTaxQb.upsert({
+        where: {
+          salesTaxId_companyId_realmId_qboType_qboId: {
+            salesTaxId,
+            companyId,
+            realmId,
+            qboType: "TaxRate",
+            qboId: rid,
+          },
+        },
+        create: { salesTaxId, companyId, realmId, qboType: "TaxRate", qboId: rid, ...rateQb },
+        update: rateQb,
       });
-      if (existingMember)
-        await prisma.salesTaxQb.update({ where: { id: existingMember.id }, data: rateQb });
-      else
-        await prisma.salesTaxQb.create({
-          data: { salesTaxId, companyId, realmId, qboType: "TaxRate", qboId: rid, ...rateQb },
-        });
     }
     imported++;
   }
@@ -831,8 +842,10 @@ export function parseRatePercent(raw: unknown): number | null {
   let n: number;
   if (typeof raw === "number") n = raw;
   else if (typeof raw === "string") {
-    // A number read off a form: tolerate a typed "%" and surrounding space.
-    const cleaned = raw.replace(/[%\s,]/g, "");
+    // A number read off a form: tolerate a typed "%" and surrounding space. A comma is treated
+    // as a DECIMAL SEPARATOR, not stripped — deleting it turned "8,5" into 85, a ten-fold tax
+    // rate that passed every bound check and reached customer money.
+    const cleaned = raw.replace(/[%\s]/g, "").replace(",", ".");
     if (!cleaned) return null;
     n = Number(cleaned);
   } else return null;
@@ -879,12 +892,26 @@ export async function createCustomer(
   const email = str(input.email);
   if (email && !EMAIL_OK.test(email)) throw new Error(`"${email}" is not a valid email address`);
 
+  // Matched the way the picker searches. A row hidden from search (inactive or soft-deleted)
+  // used to refuse the name while being absent from the list it told the technician to pick
+  // from — a dead end with no third option on that screen. A hidden match is revived instead.
   const existing = await prisma.customer.findUnique({
     where: { companyId_name: { companyId, name } },
-    select: { id: true },
+    select: { id: true, isActive: true, isDeleted: true },
   });
-  if (existing)
+  if (existing?.isActive && !existing.isDeleted)
     throw new Error(`"${name}" is already one of your customers — pick them from the list instead`);
+  if (existing) {
+    const revived = await prisma.customer.update({
+      where: { id: existing.id },
+      data: { isActive: true, isDeleted: false, updatedBy: null },
+    });
+    logger.info("Revived a hidden customer rather than refusing the name", {
+      companyId,
+      customerId: revived.id,
+    });
+    return { customerId: revived.id, name, qboId: null };
+  }
 
   const customer = await prisma.customer.create({
     data: { companyId, name, email, phone: str(input.phone), address: str(input.address) },

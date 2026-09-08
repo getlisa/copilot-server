@@ -531,7 +531,10 @@ model SalesTaxQb {
 
   salesTax SalesTax @relation(fields: [salesTaxId], references: [id], onDelete: Cascade)
 
-  @@unique([companyId, realmId, qboType, qboId], map: "sales_tax_qb_company_id_realm_id_qbo_type_qbo_id_key")
+  // salesTaxId is part of the key: one QuickBooks rate belongs to MANY codes (a state rate sits
+  // in every city group in that state), so a key without it lets the second code's insert
+  // collide with the first's row — which aborts the whole sync, not just that member.
+  @@unique([salesTaxId, companyId, realmId, qboType, qboId])
   @@index([salesTaxId])
   @@map("sales_tax_qb")
   @@schema("public")

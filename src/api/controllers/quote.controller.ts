@@ -635,9 +635,11 @@ export class QuoteController {
         });
         if (!known) return fail(res, 400, "That customer does not belong to this company");
         data.customerId = customerId;
-        // Keep the quote's own name in step so the proposal and the books agree on who this is
-        // for — but only when the quote has none, never overwriting what a technician typed.
-        if (!quote.customerName) data.customerName = known.name;
+        // The EFFECTIVE name, not the stored one: a PATCH carrying customerName and customerId
+        // together would otherwise have the typed name silently replaced, behind a comment
+        // promising the opposite.
+        if (!((data.customerName as string | null | undefined) ?? quote.customerName))
+          data.customerName = known.name;
       }
     }
 

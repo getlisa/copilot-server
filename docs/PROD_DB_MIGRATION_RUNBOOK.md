@@ -232,7 +232,14 @@ CREATE TABLE IF NOT EXISTS public.sales_tax_qb (
   updated_at   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_by   BIGINT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_qb_company_id_realm_id_qbo_type_qbo_id_key ON public.sales_tax_qb (company_id, realm_id, qbo_type, qbo_id);
+-- salesTaxId is part of the key on purpose: one QuickBooks rate belongs to MANY codes (a state
+-- rate sits in every city group in that state), so a key without it makes the second code's
+-- member insert collide with the first's row and abort the entire sync.
+-- Name copied verbatim from `prisma migrate diff` — Prisma truncates the derived name to
+-- Postgres's 63-byte limit (note the double underscore), and a divergence here is permanent
+-- drift in a repo whose only record of production is schema.prisma.
+CREATE UNIQUE INDEX IF NOT EXISTS sales_tax_qb_sales_tax_id_company_id_realm_id_qbo_type_qbo__key
+  ON public.sales_tax_qb (sales_tax_id, company_id, realm_id, qbo_type, qbo_id);
 CREATE INDEX IF NOT EXISTS sales_tax_qb_sales_tax_id_idx ON public.sales_tax_qb (sales_tax_id);
 
 -- Quotes point at the customer ENTITY. The QuickBooks id is not duplicated here — it lives on
@@ -336,6 +343,17 @@ DROP TABLE IF EXISTS public.raw_customer_qb;
 DROP TABLE IF EXISTS public.raw_taxcode_qb;
 DROP TABLE IF EXISTS public.raw_taxrate_qb;
 ```
+
+**Verify the SQL against the schema before running it.** This block is hand-written, so the one
+tool that can prove it matches `schema.prisma` is:
+
+```bash
+npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script
+```
+
+Compare the statements for the new tables against the block below — index names included. That
+comparison is what would have caught the constraint name being 66 bytes (Postgres allows 63) and
+the member key missing `sales_tax_id`.
 
 Both phases run as the Aurora master via a one-off ECS task — `app_user` cannot DDL. Recipe in
 `docs/qbo/QBO-INTEGRATION.md` §10. Re-sync after the deploy to populate customers and sales tax
