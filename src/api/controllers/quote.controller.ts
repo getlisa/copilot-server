@@ -659,15 +659,33 @@ export class QuoteController {
         // the customer is pushed to QuickBooks — into another company's books.
         const known = await prisma.customer.findFirst({
           where: { id: customerId, companyId: user.companyId },
-          select: { name: true },
+          select: { name: true, address: true, phone: true },
         });
         if (!known) return fail(res, 400, "That customer does not belong to this company");
         data.customerId = customerId;
-        // The EFFECTIVE name, not the stored one: a PATCH carrying customerName and customerId
-        // together would otherwise have the typed name silently replaced, behind a comment
-        // promising the opposite.
-        if (!((data.customerName as string | null | undefined) ?? quote.customerName))
-          data.customerName = known.name;
+        /**
+         * The quote's own name / address / phone are the Bill To block that the proposal PDF, the
+         * .docx and the uploaded .docx templates print. They are NOT read through the customer
+         * relation — `proposalPdf`, `proposalDocx`, `proposalTemplateRender` and `quoteDocx` all
+         * take them off the quote — so a linked customer whose details are never copied across
+         * leaves those documents with a Bill To line that is blank or half-filled.
+         *
+         * That used to be masked by a free-text Bill To editor on the estimate screen. The screen
+         * now sets the customer only through the picker, so this is the only path those fields
+         * have, and filling them here is what keeps the printed document whole.
+         *
+         * **Filled only where empty, each field independently.** A value already on the quote was
+         * either spoken to the agent or typed by someone who was standing at the property, and
+         * whichever it was, it beats whatever the books happen to hold — the same rule the
+         * ingestion path follows when QuickBooks data meets a technician's correction. The
+         * EFFECTIVE value is what counts, so a PATCH carrying `customerName` and `customerId`
+         * together keeps the name it sent rather than having it silently replaced.
+         */
+        const effective = <K extends "customerName" | "customerAddress" | "customerPhone">(key: K) =>
+          (data[key] as string | null | undefined) ?? quote[key];
+        if (!effective("customerName")) data.customerName = known.name;
+        if (!effective("customerAddress") && known.address) data.customerAddress = known.address;
+        if (!effective("customerPhone") && known.phone) data.customerPhone = known.phone;
       }
     }
 
