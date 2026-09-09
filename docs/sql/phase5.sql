@@ -6,20 +6,29 @@
 -- yet said which rate. The first is a decision, the second is an unfinished setup, and a screen
 -- that cannot tell them apart cannot report either honestly.
 --
--- DEFAULT FALSE, deliberately. Most companies do not charge sales tax, and a rate that starts
--- applying itself the moment someone configures one is a surprise measured in money. Every
--- existing company therefore reads "off" after this runs — which is a behaviour change ONLY for a
--- company that had a MANUAL default rate and no QuickBooks connection. For them, new estimates
--- start untaxed until an admin turns the switch on. Estimates that already exist are untouched:
--- the rate is a snapshot on the quote, and nothing here reads or writes quotes.
+-- DEFAULT FALSE for a NEW company, deliberately: most companies do not charge sales tax, and a
+-- rate that starts applying itself the moment someone configures one is a surprise measured in
+-- money.
 --
--- A company connected to QuickBooks is unaffected regardless of the stored value: taxEnabledFor()
--- forces it on, because the books hold the rates and the tax codes and an estimate declaring no
--- tax would disagree with what QuickBooks bills for the same document.
+-- Existing companies must NOT change behaviour, so phase5b.sql backfills tax_enabled = true for
+-- every company that already has an active default rate. Run both, in order. Without the
+-- backfill, a company holding a MANUAL default rate and NO QuickBooks or CRM connection silently
+-- starts producing untaxed estimates the moment the image deploys — and the switch that turns it
+-- back on ships from the frontend, so there is a window with no control anywhere to fix it.
+--
+-- A company connected to QuickBooks OR a CRM is unaffected regardless of the stored value:
+-- taxEnabledFor() forces it on, because that company invoices through a system that charges tax
+-- and an estimate declaring none would disagree with what that system bills.
+--
+-- Estimates that already exist are untouched either way: the rate is a snapshot on the quote, and
+-- nothing here reads or writes quotes.
 --
 -- ORDER: THIS RUNS BEFORE THE IMAGE THAT USES IT. Not "safe to add after" — Prisma SELECTs every
 -- scalar column its generated client knows about, so the moment the new image deploys it asks for
--- company_configs.tax_enabled on every settings read. Deploy the DDL first, then the image.
+-- company_configs.tax_enabled. That is not confined to one screen: taxEnabledFor() is read by
+-- quote CREATION and by completion's tax gap-fill, as well as by listSalesTax behind the estimate
+-- tax sheet and the settings card. Unapplied, the new image cannot create or complete an
+-- estimate. Deploy the DDL first, then the image.
 --
 -- ROLLING BACK: drop the column. Nothing else references it, no data is derived from it, and the
 -- previous image never selects it.

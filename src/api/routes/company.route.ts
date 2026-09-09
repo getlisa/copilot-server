@@ -64,7 +64,7 @@ companyRoute.get(
 // gating this would blank the totals for technicians.
 companyRoute.get("/sales-tax", authMiddleware, CompanyController.listSalesTaxRates);
 // Whether tax applies to this company at all. Admin-only: it decides whether customer-facing
-// documents carry tax. Refused while QuickBooks is connected, which forces it on.
+// documents carry tax. Refused while QuickBooks or a CRM is connected — either forces it on.
 companyRoute.put("/tax-enabled", authMiddleware, requireAdmin, CompanyController.setTaxEnabled);
 // Writing a rate is admin-only: it is applied to money on customer-facing estimates.
 companyRoute.post("/sales-tax", authMiddleware, requireAdmin, CompanyController.saveSalesTax);

@@ -518,11 +518,12 @@ export class CompanyController {
    * PUT /api/v1/companies/tax-enabled — whether sales tax applies to this company at all.
    * Body: { taxEnabled }
    *
-   * Refused while QuickBooks is connected, in both directions. The connection forces it on: the
-   * books hold the rates and the tax codes, the ingest imports them, and an estimate that declared
-   * no tax would disagree with what QuickBooks bills for the same document. Accepting the write
-   * and then ignoring it — which is what returning the computed value would amount to — is the
-   * failure mode this whole area has been bitten by before, so it 409s with the reason instead.
+   * Refused while QuickBooks OR a CRM is connected, in both directions. Either connection forces
+   * it on, for the same underlying reason: the company invoices through a system that charges tax,
+   * so an estimate declaring none would disagree with what that system bills for the same job.
+   * Accepting the write and then ignoring it — which is what returning the computed value would
+   * amount to — is the failure mode this whole area has been bitten by before, so it 409s with the
+   * reason, and `enforcedBy` decides which system the message names.
    */
   static async setTaxEnabled(req: RequestWithUser, res: Response) {
     const companyId = req.user?.companyId;

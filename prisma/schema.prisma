@@ -85,9 +85,11 @@ model company_configs {
   ///
   /// Default OFF (product, 2026-09-09): most companies do not charge sales tax, and a rate that
   /// starts applying itself the moment someone configures one is a surprise measured in money.
-  /// While QuickBooks is connected this is FORCED ON and cannot be turned off — the books already
-  /// hold the rates and the codes, so an estimate that declared no tax would disagree with what
-  /// QuickBooks bills. See taxEnabledFor().
+  /// While QuickBooks OR a CRM is connected this is FORCED ON and cannot be turned off: the
+  /// company invoices through a system that charges tax, so an estimate declaring none would
+  /// disagree with what that system bills for the same job. Note that forcing tax on is NOT the
+  /// same as making that system the tax SOURCE — taxSourceIsExternal stays QuickBooks-only, and a
+  /// CRM company must charge tax AND type its own rates. See taxEnabledFor().
   ///
   /// Distinct from "no default rate set". Off means the company does not charge tax; no default
   /// means they do but have not said which rate — the first is a decision, the second is a gap.

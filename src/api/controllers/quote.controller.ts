@@ -705,21 +705,28 @@ export class QuoteController {
          * together keeps the name it sent rather than having it silently replaced.
          */
         /**
-         * A RE-LINK is a correction, and moves all three as a SET.
+         * A RE-LINK is a correction, so it moves the fields the NEW customer can actually supply.
          *
-         * Only-where-empty is right for a first link, where the empty fields are simply unfilled.
-         * It is wrong when the estimate is re-pointed at a different customer, because the values
-         * standing in the way are this branch's own copy of the customer being replaced: link A,
-         * then realise it was the wrong Acme and pick B, and the quote keeps A's name, address and
-         * phone while `customerId` says B. The proposal PDF, the .docx, the template render and
-         * the greeting on the proposal email all read the Bill To block off the QUOTE, so every one
-         * of them would address A while QuickBooks bills B — and the customer row on screen renders
-         * those same fields, so the re-pick looks like it silently did nothing.
+         * Only-where-empty is right for a first link, where an empty field is simply unfilled. It
+         * is wrong when the estimate is re-pointed at a different customer: link A, then realise
+         * it was the wrong Acme and pick B, and the quote would keep A's name, address and phone
+         * while `customerId` said B. The proposal PDF, the .docx, the template render and the
+         * greeting on the proposal email all read the Bill To block off the QUOTE, so every one of
+         * them would address A while QuickBooks billed B — and the customer row renders those same
+         * fields, so the re-pick looked like it had silently done nothing.
          *
-         * As a set, including blanks: taking B's name but keeping A's address because B has none on
-         * file splices one customer's street under another's name and prints an address that
-         * belongs to neither. That is the same rule the customer ingest follows for exactly the
-         * same reason. An explicit value in this PATCH still wins over both.
+         * But a re-link must NOT blank a field the new customer has nothing for. An earlier
+         * version moved all three as a set including blanks, on the reasoning that the values in
+         * the way were this branch's own copy of customer A. That premise is false in a reachable
+         * state: the first-link rule fills only what is EMPTY, so a quote whose address was spoken
+         * to the agent ("the address is 42 Oak Street") still holds the technician's own words
+         * after linking A — and re-linking to a B with no address on file would destroy them, with
+         * no field left on the estimate screen to type them back into.
+         *
+         * So: the new customer's values win where it has them, and where it has none the existing
+         * value stands. The residue is a visible one — the row shows B's name beside an address
+         * that may still be A's — which is the right way round, because a wrong address on screen
+         * can be corrected and deleted data cannot. An explicit value in this PATCH beats both.
          */
         const relink = quote.customerId != null && quote.customerId !== customerId;
         const takes = <K extends "customerName" | "customerAddress" | "customerPhone">(key: K) =>
@@ -727,13 +734,17 @@ export class QuoteController {
             ? data[key] === undefined
             : !((data[key] as string | null | undefined) ?? quote[key]);
         if (takes("customerName")) data.customerName = known.name;
-        if (takes("customerAddress")) data.customerAddress = known.address ?? null;
-        if (takes("customerPhone")) data.customerPhone = known.phone ?? null;
+        // `known.x != null` on a re-link is the whole guard against erasing spoken details.
+        if (takes("customerAddress") && (!relink || known.address != null))
+          data.customerAddress = known.address ?? null;
+        if (takes("customerPhone") && (!relink || known.phone != null))
+          data.customerPhone = known.phone ?? null;
       }
     }
 
     /**
-     * Change which sales-tax rate this estimate uses — the inline pencil on the totals block.
+     * Change which sales-tax rate this estimate uses — the sales-tax row on the Estimate tab,
+     * which opens the rate sheet (EstimateTaxSheet).
      *
      * Only a DRAFT reaches here (COMPLETED is refused above), which is the whole reason this is
      * allowed to move at all: the snapshot exists so a SENT estimate cannot be re-priced, not to
