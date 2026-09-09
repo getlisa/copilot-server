@@ -41,6 +41,9 @@ $APPLY || echo "=== DRY RUN — nothing will be written. Re-run with --apply. ==
 
 ENV_FILE="$(cd "$(dirname "$0")/.." && pwd)/.env"
 [ -f "$ENV_FILE" ] || { echo "missing $ENV_FILE" >&2; exit 1; }
+# umask BEFORE mktemp: the files themselves end up 0600, rather than relying on the directory
+# mode alone to keep the production secret unreadable.
+umask 077
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 chmod 700 "$WORK"
 
@@ -78,6 +81,10 @@ if $APPLY; then
 else
   echo "  (dry run: put-secret-value skipped)"
 fi
+
+# Shred the cleartext copies NOW rather than at exit. Everything below waits on an ECS rollout,
+# so the EXIT trap alone would leave the whole production secret on disk for minutes.
+rm -f "$WORK/secret.json" "$WORK/secret.new.json" "$WORK"/QBO_WEBHOOK_VERIFIER_TOKEN_*
 
 # ---- 3. register a task-definition revision carrying both references ---------------------------
 CURRENT="$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \

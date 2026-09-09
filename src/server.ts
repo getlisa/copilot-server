@@ -10,7 +10,7 @@ import { quoteRoute } from "./api/routes/quote.route";
 import { companyRoute } from "./api/routes/company.route";
 import { adminRoute } from "./api/routes/admin.route";
 import webhookRoute from "./api/routes/webhook.route";
-import { startQboWebhookDrain } from "./lib/qboWebhookProcessor";
+import { startQboWebhookDrain, qboWebhookDrainStatus } from "./lib/qboWebhookProcessor";
 import logger from "./lib/logger";
 
 dotenv.config();
@@ -45,7 +45,13 @@ app.use(
 //
 // Adding a `verify` callback to the global parser instead would put a raw-body copy on every
 // 50 MB image upload in the app.
-app.use("/api/v1/webhooks", express.raw({ type: "*/*", limit: "5mb" }), webhookRoute);
+// Scoped to the QBO path specifically, NOT the /api/v1/webhooks prefix. body-parser short-circuits
+// once a stream is consumed, so a sibling route added under a raw-parsed prefix would silently
+// receive a Buffer where it expected parsed JSON — a trap with no error to follow.
+app.use("/api/v1/webhooks/qbo", express.raw({ type: "*/*", limit: "5mb" }), (req, res, next) => {
+  req.url = "/qbo" + (req.url === "/" ? "" : req.url);
+  webhookRoute(req, res, next);
+});
 
 // Parse JSON bodies. Some native clients (ClaraWearables, AskAI) POST JSON without a
 // proper `Content-Type: application/json` header, which would otherwise leave req.body
@@ -102,7 +108,13 @@ app.use("/api/v1/op-x7k2", adminRoute);
 
 // Health check
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+  // The drain is a background loop with no request of its own, so a stall is otherwise
+  // indistinguishable from "QuickBooks sent nothing". lastPassAt is the heartbeat to alert on.
+  res.status(200).json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    qboWebhookDrain: qboWebhookDrainStatus(),
+  });
 });
 
 // OpenAI Realtime token endpoint (for voice)

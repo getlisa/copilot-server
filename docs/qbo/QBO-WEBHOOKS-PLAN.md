@@ -297,8 +297,10 @@ CREATE INDEX IF NOT EXISTS qbo_webhook_events_drain_idx
 ```
 
 `schema.prisma` gains the matching `model QboWebhookEvent`, and the two are checked against
-each other with `prisma migrate diff --from-empty --to-schema-datamodel` before the SQL is run —
-the check the Phase 1 log credits for all 54 columns and 8 index names matching. It is also what
+each other with `prisma migrate diff --from-empty --to-schema-datamodel` before the SQL is run.
+That is the same check the Phase 1 migration used; its log credits it with catching all 54 of
+*that* migration's columns and 8 of its index names. **Phase 4's own numbers are 18 columns and
+4 indexes**, which is what `phase4.sql`'s assertion block enforces. It is also what
 gives the rule below something to sequence against: without a model there is no image change.
 
 Two obligations from the runbook, both non-negotiable here:

@@ -1,4 +1,9 @@
 import crypto from "crypto";
+// TYPE-ONLY, and deliberately so: it is erased at compile time, so this module keeps its promise
+// of importing nothing but `crypto` at runtime and stays loadable by a check script that runs in
+// the Docker build with no database. What it buys is that STAGE_FOR_ENTITY can no longer hold a
+// string that is not a real stage.
+import type { QboSyncStage } from "./qboIngest";
 
 /**
  * QuickBooks Online webhooks — signature verification and payload parsing.
@@ -189,7 +194,7 @@ export function parseQboEvents(body: unknown): ParsedQboEvent[] {
  * `estimate` maps to no stage on purpose: there is no estimate ingest, and it is handled per-event
  * by the processor.
  */
-export const STAGE_FOR_ENTITY: Record<QboEntity, string | null> = {
+export const STAGE_FOR_ENTITY: Record<QboEntity, QboSyncStage | null> = {
   account: "accounts",
   customer: "customers",
   item: "items",
@@ -200,3 +205,100 @@ export const STAGE_FOR_ENTITY: Record<QboEntity, string | null> = {
   taxagency: "salesTax",
   estimate: null,
 };
+
+
+// ---------------------------------------------------------------------------------------------
+// Drain arithmetic.
+//
+// Extracted here, into the module with no I/O, ON PURPOSE. These are the rules that decide what
+// happens to an event, and every one of them used to live inside a database-bound function where
+// no check script could reach it -- which is exactly where this feature's real bugs were found.
+// `npm test` runs inside the Docker build with no database, so anything worth pinning has to be
+// reachable without one.
+// ---------------------------------------------------------------------------------------------
+
+export type OutcomeStatus = "done" | "skipped" | "failed" | "queued";
+
+/**
+ * Which outcome wins when one event resolves to several companies.
+ *
+ * `queued` outranks everything because the row must come back if ANY company still owes work on
+ * it. `skipped` ranks lowest: it means "nothing to do here", which never overrides real work.
+ */
+export const OUTCOME_RANK: Record<OutcomeStatus, number> = {
+  skipped: 0,
+  done: 1,
+  failed: 2,
+  queued: 3,
+};
+
+export interface DrainOutcome {
+  status: OutcomeStatus;
+  /** First error seen for this row; kept even when a later, higher-ranked outcome wins. */
+  error?: string;
+  /** Highest attempt count seen; never lowered by a merge. */
+  attempts?: number;
+  /** Companies that finished this event, so a later pass does not redo their work. */
+  doneCompanies: number[];
+}
+
+/**
+ * Fold one company's outcome into whatever the row already has.
+ *
+ * THE DIAGNOSTICS MERGE INDEPENDENTLY OF THE STATUS, and that is the whole point. The previous
+ * version returned early whenever the incoming rank was not strictly higher, which silently threw
+ * away a real failure's `attempts` and `lastError` if a busy sibling had been recorded first at
+ * the same rank. With the attempt count never written, MAX_ATTEMPTS was never reached and the row
+ * retried every 10 seconds forever, with nothing recorded to explain why.
+ */
+export function mergeOutcome(prev: DrainOutcome | undefined, next: DrainOutcome): DrainOutcome {
+  if (!prev) return next;
+  const attempts = Math.max(prev.attempts ?? 0, next.attempts ?? 0);
+  return {
+    status: OUTCOME_RANK[next.status] > OUTCOME_RANK[prev.status] ? next.status : prev.status,
+    // First error wins: it is the one closest to the original cause.
+    error: prev.error ?? next.error,
+    attempts: attempts > 0 ? attempts : undefined,
+    doneCompanies: [...new Set([...prev.doneCompanies, ...next.doneCompanies])],
+  };
+}
+
+/**
+ * The reference-sync stages a set of changed entities invalidates.
+ *
+ * A tax change also re-reads `Preferences.TaxPrefs`: Preferences is not among the subscribed
+ * entities, and a company switching on Automated Sales Tax -- under which Intuit IGNORES
+ * `TxnTaxCodeRef` and computes from the address -- is overwhelmingly likely to touch its agencies
+ * in the same sitting.
+ */
+export function stagesForEntities(entities: readonly (QboEntity | null)[]): QboSyncStage[] {
+  const stages = new Set<QboSyncStage>();
+  for (const entity of entities) {
+    const stage = entity ? STAGE_FOR_ENTITY[entity] : null;
+    if (stage) stages.add(stage);
+  }
+  if (stages.has("salesTax")) stages.add("taxPrefs");
+  return [...stages];
+}
+
+/** Retries are spaced, not stacked. */
+export const MAX_ATTEMPTS = 5;
+
+/**
+ * How long to wait before attempting a row again.
+ *
+ * Exponential from 30s, capped at two hours: five attempts span roughly three hours rather than
+ * the ~50 seconds a fixed 10-second interval gives. That matters because the cheapest real
+ * failure here is a QuickBooks throttle, and a retry budget shorter than the throttle window
+ * burns every attempt against a wall and then gives up permanently.
+ */
+export function backoffMs(attempts: number): number {
+  const step = 30_000 * Math.pow(4, Math.max(0, attempts - 1));
+  return Math.min(step, 2 * 60 * 60 * 1000);
+}
+
+/** A stable dedup key for a delivery we could not parse, so redeliveries of it collapse. */
+export function unparseableEventId(rawBody: Buffer | string): string {
+  const body = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody, "utf8");
+  return `unparseable:${crypto.createHash("sha256").update(body).digest("hex")}`;
+}

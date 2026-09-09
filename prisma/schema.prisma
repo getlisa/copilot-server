@@ -744,6 +744,11 @@ model QboConnection {
   /// crashed task through the staleness window rather than wedging the company forever.
   syncStartedAt        DateTime? @map("sync_started_at")
 
+  /// Indexed because the webhook drain resolves realm -> companies on every pass. Deliberately
+  /// NOT unique: one realm may legitimately serve several companies, and the fan-out is the
+  /// design (see qboWebhookProcessor.companiesForRealm).
+  @@index([realmId], map: "qbo_connections_realm_id_idx")
+
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 
@@ -791,6 +796,15 @@ model QboWebhookEvent {
   /// Set with `claimToken` when a drain pass takes the row, cleared when it settles. A row stuck
   /// in `running` past the staleness window returns to `queued` — a killed task must not wedge an
   /// event forever.
+  /// When this row may next be attempted. Set to a backed-off future time on every requeue, so a
+  /// stuck tenant cannot occupy every pass (head-of-line starvation) and five attempts span hours
+  /// rather than the ~50 seconds a fixed 10s interval gives -- long enough to outlast a QuickBooks
+  /// throttle window. Null means "eligible now".
+  nextAttemptAt DateTime? @map("next_attempt_at") @db.Timestamptz(6)
+  /// Companies that have already completed this event, for the realm fan-out. One realm can serve
+  /// several companies; without this, a permanently broken sibling requeues the row forever and
+  /// re-runs the healthy company's full mirror pull on every pass.
+  doneCompanies Int[] @default([]) @map("done_companies")
   claimedAt DateTime? @map("claimed_at") @db.Timestamptz(6)
   /// Identifies the drain pass that owns the row. A count alone cannot say WHICH rows a batch
   /// claim won when two passes overlap on part of the same id list.
@@ -798,7 +812,7 @@ model QboWebhookEvent {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  @@index([status, createdAt], map: "qbo_webhook_events_drain_idx")
+  @@index([status, nextAttemptAt, createdAt], map: "qbo_webhook_events_drain_idx")
   @@index([realmId, createdAt(sort: Desc)], map: "qbo_webhook_events_realm_idx")
   @@map("qbo_webhook_events")
   @@schema("public")

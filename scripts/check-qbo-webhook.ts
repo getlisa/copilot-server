@@ -28,8 +28,19 @@ const sign = (body: string, token: string, encoding: "base64" | "hex") =>
   crypto.createHmac("sha256", token).update(Buffer.from(body, "utf8")).digest(encoding);
 
 async function main() {
-  const { verifierTokens, matchVerifierToken, parseQboEvents, STAGE_FOR_ENTITY, SUBSCRIBED_ENTITIES } =
-    await import("../src/lib/qboWebhook");
+  const {
+    verifierTokens,
+    matchVerifierToken,
+    parseQboEvents,
+    STAGE_FOR_ENTITY,
+    SUBSCRIBED_ENTITIES,
+    mergeOutcome,
+    stagesForEntities,
+    backoffMs,
+    unparseableEventId,
+    MAX_ATTEMPTS,
+    OUTCOME_RANK,
+  } = await import("../src/lib/qboWebhook");
 
   // ---- the two-keyset token set ----
   const tokens = verifierTokens();
@@ -127,6 +138,8 @@ async function main() {
   assert.strictEqual(STAGE_FOR_ENTITY.estimate, null, "estimates have no ingest stage");
   assert.strictEqual(STAGE_FOR_ENTITY.taxagency, "salesTax", "TaxAgency triggers a tax re-read");
   assert.strictEqual(STAGE_FOR_ENTITY.customer, "customers");
+  assert.strictEqual(STAGE_FOR_ENTITY.account, "accounts");
+  assert.strictEqual(STAGE_FOR_ENTITY.item, "items");
 
   // An unsubscribed entity is still RECORDED (entity null), never dropped and never an error.
   const [unsub] = parseQboEvents([ev("qbo.vendor.created.v1")]);
@@ -162,19 +175,123 @@ async function main() {
   assert.strictEqual(parseQboEvents([ev("qbo.item.created.v1", { intuitentityid: 42 })])[0].entityId, "42");
   assert.strictEqual(parseQboEvents([ev("qbo.item.created.v1")])[0].entityId, null);
 
+  // ---- drain arithmetic (extracted so it is reachable without a database) ----
+
+  const oc = (
+    status: "done" | "skipped" | "failed" | "queued",
+    error?: string,
+    attempts?: number,
+    doneCompanies: number[] = []
+  ) => ({ status, error, attempts, doneCompanies });
+
+  // Precedence: a row must come back if ANY company still owes work on it.
+  assert.ok(OUTCOME_RANK.queued > OUTCOME_RANK.failed, "a retry outranks giving up");
+  assert.ok(OUTCOME_RANK.failed > OUTCOME_RANK.done);
+  assert.ok(OUTCOME_RANK.done > OUTCOME_RANK.skipped, "real work outranks nothing-to-do");
+  assert.strictEqual(mergeOutcome(undefined, oc("done")).status, "done");
+  assert.strictEqual(mergeOutcome(oc("done"), oc("skipped")).status, "done");
+  assert.strictEqual(mergeOutcome(oc("skipped"), oc("done")).status, "done");
+  assert.strictEqual(mergeOutcome(oc("done"), oc("queued")).status, "queued");
+
+  // THE REGRESSION THIS EXISTS FOR. A busy sibling recorded first must not swallow a real
+  // failure's attempt count: with attempts never written, MAX_ATTEMPTS was never reached and the
+  // row retried every 10 seconds forever with no error recorded to explain it.
+  const busyThenFail = mergeOutcome(oc("queued"), oc("queued", "boom", 3));
+  assert.strictEqual(busyThenFail.attempts, 3, "an equal-rank merge must keep the attempt bump");
+  assert.strictEqual(busyThenFail.error, "boom", "and must keep the error");
+  const failThenBusy = mergeOutcome(oc("queued", "boom", 3), oc("queued"));
+  assert.strictEqual(failThenBusy.attempts, 3, "order must not change the outcome");
+  assert.strictEqual(failThenBusy.error, "boom");
+  // Attempts never go backwards, whichever order they arrive in.
+  assert.strictEqual(mergeOutcome(oc("queued", "a", 4), oc("queued", "b", 2)).attempts, 4);
+  assert.strictEqual(mergeOutcome(oc("queued", "a", 2), oc("queued", "b", 4)).attempts, 4);
+
+  // A completed company stays completed even when a sibling requeues the row.
+  const fanout = mergeOutcome(oc("done", undefined, undefined, [7]), oc("queued", "b", 1, []));
+  assert.strictEqual(fanout.status, "queued", "the row returns for the company still owed");
+  assert.deepStrictEqual(fanout.doneCompanies, [7], "but company 7 is not redone");
+  assert.deepStrictEqual(
+    mergeOutcome(oc("done", undefined, undefined, [7]), oc("done", undefined, undefined, [9]))
+      .doneCompanies,
+    [7, 9]
+  );
+
+  // Stage coalescing, including the tax pairing Preferences would otherwise have covered.
+  assert.deepStrictEqual(stagesForEntities(["customer", "customer"]), ["customers"], "deduped");
+  assert.deepStrictEqual(stagesForEntities(["estimate"]), [], "estimates have no stage");
+  assert.deepStrictEqual(stagesForEntities([null]), []);
+  assert.ok(stagesForEntities(["taxagency"]).includes("taxPrefs"), "tax re-reads TaxPrefs too");
+  assert.ok(stagesForEntities(["taxagency"]).includes("salesTax"));
+  assert.strictEqual(new Set(stagesForEntities(["customer", "item", "account"])).size, 3);
+
+  // Backoff has to outlast a QuickBooks throttle window; a flat 10s interval did not.
+  assert.ok(backoffMs(1) >= 30_000, "first retry waits at least 30s");
+  assert.ok(backoffMs(2) > backoffMs(1), "and grows");
+  assert.ok(backoffMs(4) > 20 * 60_000, "by the 4th attempt it is well past a throttle window");
+  assert.ok(backoffMs(99) <= 2 * 60 * 60 * 1000, "but is capped");
+  // 30s + 2m + 8m + 32m = 42.5 minutes across the four waits before the fifth and final attempt.
+  // The number that matters is the comparison: the old fixed 10s interval spent all five attempts
+  // inside 50 seconds, so any QuickBooks outage longer than that exhausted the row permanently.
+  let span = 0;
+  for (let a = 1; a < MAX_ATTEMPTS; a++) span += backoffMs(a);
+  assert.ok(span > 40 * 60 * 1000, `retry budget spans ${Math.round(span / 60000)}min, want >40`);
+  assert.ok(span < 4 * 60 * 60 * 1000, "but a stale refresh is worse than a slow one");
+
+  // A redelivery of the same unreadable body must collapse onto one row.
+  assert.strictEqual(unparseableEventId("abc"), unparseableEventId(Buffer.from("abc")));
+  assert.notStrictEqual(unparseableEventId("abc"), unparseableEventId("abd"));
+  assert.ok(unparseableEventId("abc").startsWith("unparseable:"));
+
   // ---- the mount order, which is load-bearing ----
-  const server = fs.readFileSync(path.join(__dirname, "../src/server.ts"), "utf8");
-  const rawMount = server.indexOf('app.use("/api/v1/webhooks"');
-  const jsonParser = server.indexOf("express.json({");
-  assert.ok(rawMount > -1, "the webhook router is mounted");
+  // COMMENTS ARE STRIPPED FIRST. Without that, commenting the mount out left the literal text in
+  // place, indexOf still found it, and all three assertions passed while every delivery 404'd —
+  // a silent-pass guard against a silent break, which is the one thing a guard must never be.
+  // Line-level, NOT a block-comment regex. The obvious `/\*[\s\S]*?\*\//g` strip is actively
+  // wrong here: `express.raw({ type: "*/*" })` contains `*/` immediately followed by `/*`, so the
+  // regex closes on the string literal and then swallows the very line it is meant to check. A
+  // guard that deletes its own subject is worse than no guard.
+  const serverSrc = fs
+    .readFileSync(path.join(__dirname, "../src/server.ts"), "utf8")
+    .split("\n")
+    .filter((l) => {
+      const t = l.trim();
+      return !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*");
+    })
+    .join("\n");
+
+  const rawMount = serverSrc.indexOf('app.use("/api/v1/webhooks/qbo"');
+  const jsonParser = serverSrc.indexOf("express.json({");
+  assert.ok(rawMount > -1, "the webhook router is mounted (and not commented out)");
+  assert.ok(jsonParser > -1, "the global JSON parser is still installed");
   assert.ok(
     rawMount < jsonParser,
     "the webhook router MUST be mounted before express.json — the HMAC is over raw bytes, and " +
       "the global parser keeps no raw copy"
   );
   assert.ok(
-    /app\.use\("\/api\/v1\/webhooks",\s*express\.raw\(\{\s*type:\s*"\*\/\*"/.test(server),
+    /app\.use\("\/api\/v1\/webhooks\/qbo",\s*express\.raw\(\{\s*type:\s*"\*\/\*"/.test(serverSrc),
     'the raw parser must match "*/*": CloudEvents can arrive as application/cloudevents-batch+json'
+  );
+  // Prove the strip actually bites, so this guard cannot rot back into a text match.
+  // Prove the filter actually bites, so this guard cannot rot back into a plain text match.
+  const strip = (src: string) =>
+    src
+      .split("\n")
+      .filter((l) => {
+        const t = l.trim();
+        return !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*");
+      })
+      .join("\n");
+  const commentedOut = strip(
+    serverSrc
+      .split("\n")
+      .map((l) => (l.includes('app.use("/api/v1/webhooks/qbo"') ? "// " + l : l))
+      .join("\n")
+  );
+  assert.strictEqual(
+    commentedOut.indexOf('app.use("/api/v1/webhooks/qbo"'),
+    -1,
+    "a commented-out mount must not satisfy this check"
   );
 
   console.log("check-qbo-webhook: OK");

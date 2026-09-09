@@ -633,13 +633,6 @@ async function ingestAccounts(conn: QboConnection, companyId: number): Promise<n
 // ---------- the sync ----------
 
 /**
- * Pull every reference entity for one company. Entities are ingested in sequence, not in
- * parallel: they share one access token whose refresh is not yet serialised (T-02), and Intuit
- * rate-limits per app — which for a Clara-owned app is shared across every client.
- *
- * Throws if the company is not connected. Callers decide whether that is a 409 or a no-op.
- */
-/**
  * How long a sync may hold its claim before another run may take it (T-44). A task killed
  * mid-sync cannot release its own claim, so without an expiry the company could never sync
  * again; ten minutes is far longer than the observed run (about four seconds for 39 customers,
@@ -675,17 +668,22 @@ export async function syncQboReferenceData(companyId: number): Promise<IngestCou
 /**
  * The sync itself, with a selectable stage list.
  *
- * `markComplete` is the load-bearing option, and it is false for webhooks. `lastSyncAt` means
+ * Entities are ingested in sequence, not in parallel: they share one access token whose refresh is
+ * not yet serialised (T-02), and Intuit rate-limits per app — which for a Clara-owned app is
+ * shared across every client. Throws if the company is not connected; callers decide whether that
+ * is a 409 or a no-op, and `QboSyncBusyError` separately means "someone else holds the claim".
+ *
+ * `markComplete` is the load-bearing option and is REQUIRED, with no default. `lastSyncAt` means
  * "last COMPLETE sync" (T-45) — a partial, webhook-driven refresh of one mirror must not advance
- * it, or the Connections card claims a freshness the other mirrors cannot back. For the same
- * reason a webhook failure does not write `lastSyncError`: those two fields describe the manual
- * sync, and a webhook's outcome belongs on its own `qbo_webhook_events` row, which is the
- * queryable trail that table exists for.
+ * it, or the Connections card claims a freshness the other mirrors cannot back. A default would
+ * quietly decide that for whoever forgot to think about it, and the wrong answer is invisible.
+ * For the same reason a partial sync does not write `lastSyncError`: those two fields describe the
+ * manual sync, and a webhook's outcome belongs on its own `qbo_webhook_events` row.
  */
 export async function runQboSync(
   companyId: number,
   stages: readonly QboSyncStage[],
-  { markComplete = true }: { markComplete?: boolean } = {}
+  { markComplete }: { markComplete: boolean }
 ): Promise<IngestCounts> {
   const conn = await qboConnectionFor(companyId);
   if (!qboConnected(conn))
@@ -728,29 +726,32 @@ export async function runQboSync(
     }
   };
 
-  const wanted = (name: QboSyncStage) => stages.includes(name);
+  // A table rather than a run of `if` blocks: `Record<QboSyncStage, ...>` makes a stage added to
+  // the union without a runner a COMPILE error. As parallel ifs, the same omission was a silent
+  // no-op — the mirror simply never refreshed, with nothing anywhere to say so.
+  const runners: Record<QboSyncStage, () => Promise<void>> = {
+    taxPrefs: async () => {
+      await ingestTaxPrefs(conn, companyId);
+    },
+    customers: async () => {
+      counts.customers = await ingestCustomers(conn, companyId, realmId);
+    },
+    items: async () => {
+      counts.items = await ingestItems(conn, companyId);
+    },
+    salesTax: async () => {
+      Object.assign(counts, await ingestSalesTax(conn, companyId, realmId));
+    },
+    accounts: async () => {
+      counts.accounts = await ingestAccounts(conn, companyId);
+    },
+  };
 
   try {
-    if (wanted("taxPrefs"))
-      await stage("taxPrefs", async () => {
-        await ingestTaxPrefs(conn, companyId);
-      });
-    if (wanted("customers"))
-      await stage("customers", async () => {
-        counts.customers = await ingestCustomers(conn, companyId, realmId);
-      });
-    if (wanted("items"))
-      await stage("items", async () => {
-        counts.items = await ingestItems(conn, companyId);
-      });
-    if (wanted("salesTax"))
-      await stage("salesTax", async () => {
-        Object.assign(counts, await ingestSalesTax(conn, companyId, realmId));
-      });
-    if (wanted("accounts"))
-      await stage("accounts", async () => {
-        counts.accounts = await ingestAccounts(conn, companyId);
-      });
+    // Iterated in ALL_QBO_SYNC_STAGES order, not caller order: taxPrefs before salesTax is a real
+    // dependency, and a caller listing stages in an arbitrary order must not change the outcome.
+    for (const name of ALL_QBO_SYNC_STAGES)
+      if (stages.includes(name)) await stage(name, runners[name]);
 
     if (failures.length) {
       // Record the failure and keep whatever did land. `lastSyncAt` is deliberately NOT advanced:

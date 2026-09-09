@@ -21,6 +21,7 @@ import {
 } from "../../lib/qbo";
 import {
   syncQboReferenceData,
+  QboSyncBusyError,
   searchCustomers,
   qboIncomeAccounts,
   listSalesTax,
@@ -313,6 +314,18 @@ export class CompanyController {
       const counts = await syncQboReferenceData(companyId);
       res.json({ success: true, data: { counts, syncedAt: new Date().toISOString() } });
     } catch (e) {
+      // "Already running" is not "QuickBooks is unreachable", and the difference became
+      // user-visible when the webhook drain started competing for this same claim every ten
+      // seconds instead of only when another admin clicked. Flattening it into the 502 below told
+      // people their accounting system was down when it was simply busy. 409 matches what this
+      // endpoint already returns for its other not-ready state.
+      if (e instanceof QboSyncBusyError) {
+        logger.info("QBO reference sync skipped: already running", { companyId });
+        return res.status(409).json({
+          success: false,
+          error: { status: 409, message: e.message },
+        });
+      }
       logger.error("QBO reference sync failed", {
         companyId,
         error: e instanceof Error ? e.message : String(e),

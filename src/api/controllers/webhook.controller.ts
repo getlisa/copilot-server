@@ -5,7 +5,10 @@ import {
   parseQboEvents,
   verifierTokens,
 } from "../../lib/qboWebhook";
-import { recordQboWebhookEvents } from "../../lib/qboWebhookProcessor";
+import {
+  recordQboWebhookEvents,
+  recordUnparseableDelivery,
+} from "../../lib/qboWebhookProcessor";
 
 /**
  * POST /api/v1/webhooks/qbo — inbound QuickBooks Online CloudEvents.
@@ -43,7 +46,10 @@ export const WebhookController = {
           content_type: contentType,
           content_length: contentLength,
         });
-        return res.status(503).json({ error: "Could not read body; please redeliver" });
+        return res.status(503).json({
+          success: false,
+          error: { status: 503, message: "Could not read body; please redeliver" },
+        });
       }
       // Genuinely empty: Intuit validating the endpoint. A 4xx here can fail that validation and
       // disable the subscription.
@@ -61,42 +67,61 @@ export const WebhookController = {
       logger.error("Cannot verify QBO webhook: no verifier token configured", {
         expected: "QBO_WEBHOOK_VERIFIER_TOKEN_SANDBOX / _PRODUCTION",
       });
-      return res.status(503).json({ error: "Verifier token unavailable; please redeliver" });
+      return res.status(503).json({
+        success: false,
+        error: { status: 503, message: "Verifier token unavailable; please redeliver" },
+      });
     }
 
     const signature = req.headers["intuit-signature"] as string | undefined;
     const keyset = matchVerifierToken(rawBody, signature, tokens);
     if (!keyset) {
+      // The source address matters here in a way it does not on an authenticated route: this is
+      // the one endpoint whose expected caller is an unauthenticated stranger, so a burst of
+      // rejections is the only signal that someone is probing it. `trust proxy` is unset, so the
+      // ALB's client address arrives in x-forwarded-for; log both.
       logger.warn("Rejected QBO webhook: invalid signature", {
         signature_present: !!signature,
         body_bytes: rawBody.length,
         tokens_tried: tokens.map((t) => t.name),
+        ip: req.ip,
+        forwarded_for: req.headers["x-forwarded-for"],
       });
-      return res.status(401).json({ error: "Invalid signature" });
+      return res.status(401).json({
+        success: false,
+        error: { status: 401, message: "Invalid signature" },
+      });
     }
+
+    // A delivery that passed the signature but cannot be read is PERSISTED, not just logged.
+    // These are verified bytes from Intuit; discarding them leaves nothing in the table to show
+    // the feed went dark, and "no rows arrived" then looks identical to "nothing changed".
+    // `select count(*) from qbo_webhook_events where operation = 'unparseable'` answers it.
+    const unreadable = async (reason: string) => {
+      logger.info(reason, { keyset, content_type: contentType, body_bytes: rawBody.length });
+      try {
+        await recordUnparseableDelivery(rawBody, keyset);
+      } catch (error) {
+        // Best effort: the delivery itself is still acknowledged, because a 5xx here would ask
+        // Intuit to redeliver a body we already know we cannot read.
+        logger.error("Could not record an unparseable QBO delivery", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return res.status(200).json({ received: 0, recorded: 0 });
+    };
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(rawBody.toString("utf8"));
     } catch {
-      logger.info("QBO webhook body was not JSON", {
-        keyset,
-        content_type: contentType,
-        body_bytes: rawBody.length,
-      });
-      return res.status(200).json({ received: 0, recorded: 0 });
+      return unreadable("QBO webhook body was not JSON");
     }
 
     const events = parseQboEvents(parsed);
     if (events.length === 0) {
       // An empty batch, or a shape we do not recognise (e.g. the retired legacy envelope).
-      // Visible in logs, still a 200.
-      logger.info("QBO webhook contained no usable CloudEvents", {
-        keyset,
-        content_type: contentType,
-        body_bytes: rawBody.length,
-      });
-      return res.status(200).json({ received: 0, recorded: 0 });
+      return unreadable("QBO webhook contained no usable CloudEvents");
     }
 
     // The global request logger sits AFTER express.json(), so this router answers without ever
@@ -132,7 +157,10 @@ export const WebhookController = {
         count: events.length,
         error: error instanceof Error ? error.message : String(error),
       });
-      return res.status(503).json({ error: "Temporary failure; please redeliver" });
+      return res.status(503).json({
+        success: false,
+        error: { status: 503, message: "Temporary failure; please redeliver" },
+      });
     }
   },
 };
