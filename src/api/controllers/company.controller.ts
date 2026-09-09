@@ -25,6 +25,8 @@ import {
   qboIncomeAccounts,
   listSalesTax,
   setDefaultSalesTax,
+  setSalesTaxActive,
+  taxEnabledFor,
   upsertSalesTax,
   parseRatePercent,
   qboSyncedAt,
@@ -430,12 +432,18 @@ export class CompanyController {
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const { taxSource, rates } = await listSalesTax(companyId);
+    const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
     res.json({
       success: true,
       data: {
         /** "quickbooks" | "crm" | "manual" — where this company's tax comes from. */
         taxSource,
+        /** Whether tax applies at all. False means new estimates start with no rate. */
+        taxEnabled,
+        /** True when a connection forces it on, so the screen locks the switch and says why. */
+        taxEnforced,
+        /** "quickbooks" | "crm" | null — which one, so the reason names the right system. */
+        taxEnforcedBy,
         rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
       },
     });
@@ -507,6 +515,119 @@ export class CompanyController {
   }
 
   /**
+   * PUT /api/v1/companies/tax-enabled — whether sales tax applies to this company at all.
+   * Body: { taxEnabled }
+   *
+   * Refused while QuickBooks OR a CRM is connected, in both directions. Either connection forces
+   * it on, for the same underlying reason: the company invoices through a system that charges tax,
+   * so an estimate declaring none would disagree with what that system bills for the same job.
+   * Accepting the write and then ignoring it — which is what returning the computed value would
+   * amount to — is the failure mode this whole area has been bitten by before, so it 409s with the
+   * reason, and `enforcedBy` decides which system the message names.
+   */
+  static async setTaxEnabled(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    // Strict, not truthy: a body of { taxEnabled: "false" } must not switch tax ON.
+    if (typeof req.body?.taxEnabled !== "boolean")
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "taxEnabled must be true or false" },
+      });
+    const { enforced, enforcedBy } = await taxEnabledFor(companyId);
+    if (enforced) {
+      /**
+       * Name the integration that is actually forcing it. The message used to say QuickBooks
+       * unconditionally, which was wrong for a CRM company in both halves: not QuickBooks, and
+       * their rates do NOT come from there — nothing ingests tax from a CRM, so they type their
+       * own. Being told to go and change something in a system that does not hold it is worse
+       * than a generic refusal.
+       */
+      const message =
+        enforcedBy === "quickbooks"
+          ? "Sales tax stays on while QuickBooks is connected — your rates and tax codes come from there."
+          : "Sales tax stays on while your CRM is connected, because jobs are invoiced through it. You can still choose which rate applies below.";
+      logger.info("Tax enabled change refused", { companyId, enforcedBy, requested: req.body.taxEnabled });
+      return res.status(409).json({ success: false, error: { status: 409, message } });
+    }
+    await prisma.company_configs.upsert({
+      where: { company_id: companyId },
+      // checklists is constrained to an ARRAY of {label, description} — [] is the empty state.
+      create: { company_id: companyId, checklists: [], tax_enabled: req.body.taxEnabled },
+      update: { tax_enabled: req.body.taxEnabled },
+    });
+    logger.info("Tax enabled changed", { companyId, taxEnabled: req.body.taxEnabled });
+    const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
+    res.json({
+      success: true,
+      data: {
+        taxSource,
+        taxEnabled,
+        taxEnforced,
+        taxEnforcedBy,
+        rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+      },
+    });
+  }
+
+  /**
+   * PUT /api/v1/companies/sales-tax/:id/active — offer this rate, or stop offering it.
+   * Body: { isActive }
+   *
+   * Separate from `saveSalesTax` because that endpoint refuses every write while a connected
+   * system owns the company's tax — which left the ingested rates, the only ones such a company
+   * has, unable to be switched off. Availability is a CLARA-side decision about what this company
+   * is offered; nothing is written to QuickBooks, and a later sync still sees the rate.
+   *
+   * Returns the whole settings payload, like the default endpoint, because deactivating can also
+   * clear the default and the screen has to reflect both.
+   */
+  static async setSalesTaxActiveState(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id))
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "id must be an integer" } });
+    // Strict, not truthy: a body of `{ isActive: "false" }` must not switch a rate ON.
+    if (typeof req.body?.isActive !== "boolean")
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "isActive must be true or false" } });
+    const isActive = req.body.isActive;
+    try {
+      await setSalesTaxActive(
+        companyId,
+        id,
+        isActive,
+        req.user?.userId == null ? null : BigInt(req.user.userId)
+      );
+      logger.info("Sales tax availability changed", { companyId, id, isActive });
+      const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
+      res.json({
+        success: true,
+        data: {
+          taxSource,
+          taxEnabled,
+          taxEnforced,
+          taxEnforcedBy,
+          rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+        },
+      });
+    } catch (e) {
+      const message = clientSafeMessage(e, "Could not change the rate");
+      res.status(400).json({ success: false, error: { status: 400, message } });
+    }
+  }
+
+  /**
    * PUT /api/v1/companies/sales-tax/default — choose the rate new estimates start with.
    * Body: { id } — or { id: null } to have new estimates start untaxed.
    */
@@ -524,11 +645,14 @@ export class CompanyController {
         .json({ success: false, error: { status: 400, message: "id must be an integer or null" } });
     try {
       await setDefaultSalesTax(companyId, id);
-      const { taxSource, rates } = await listSalesTax(companyId);
+      const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
       res.json({
         success: true,
         data: {
           taxSource,
+          taxEnabled,
+          taxEnforced,
+          taxEnforcedBy,
           rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
         },
       });

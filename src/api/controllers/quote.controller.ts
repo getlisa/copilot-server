@@ -154,6 +154,22 @@ async function loadOwnedQuote(quoteId: string, userId: bigint, companyId: number
 }
 
 /**
+ * Mark a quote as touched, so the list can order by "last worked on".
+ *
+ * `Quote.updatedAt` is `@updatedAt`, which fires on writes to the QUOTE row — and editing an
+ * estimate mostly means writing to `quote_line_items`, a different model Prisma does not
+ * propagate from. So without this, correcting a price left the quote's timestamp at whenever its
+ * customer or markup last changed, and the estimate someone just finished editing sat wherever it
+ * had been in the list.
+ *
+ * An empty `data` is deliberate: `@updatedAt` supplies the value, so there is nothing to pass and
+ * nothing that can disagree with how Prisma stamps every other update.
+ */
+async function touchQuote(quoteId: string) {
+  await prisma.quote.update({ where: { id: quoteId }, data: {} });
+}
+
+/**
  * Catalog rows for the codes a quote actually uses, so each line can carry its product link,
  * brand and rating. Only HOME_DEPOT rows matter to the DTO, but fetching by code keeps this a
  * single indexed query regardless of source.
@@ -397,7 +413,10 @@ export class QuoteController {
     const quotes = await prisma.quote.findMany({
       where: { userId: user.userId, status },
       include: { lineItems: true },
-      orderBy: { createdAt: "desc" },
+      // Most recently worked on first, not most recently created: the list is a work queue, and
+      // the estimate someone was just editing is the one they are coming back to. Line-item
+      // writes call touchQuote so an edit actually moves the row.
+      orderBy: { updatedAt: "desc" },
     });
     res.json({ success: true, data: await Promise.all(quotes.map((q) => quoteDtoWithProducts(q))) });
   }
@@ -579,6 +598,10 @@ export class QuoteController {
       },
     });
 
+    // An agent turn is work on the estimate: it adds, re-prices and removes line items, and it
+    // writes the quote row only when a customer detail was stated. Without this a conversation
+    // that reshaped the whole estimate would not move it up the list.
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({
       success: true,
@@ -659,20 +682,69 @@ export class QuoteController {
         // the customer is pushed to QuickBooks — into another company's books.
         const known = await prisma.customer.findFirst({
           where: { id: customerId, companyId: user.companyId },
-          select: { name: true },
+          select: { name: true, address: true, phone: true },
         });
         if (!known) return fail(res, 400, "That customer does not belong to this company");
         data.customerId = customerId;
-        // The EFFECTIVE name, not the stored one: a PATCH carrying customerName and customerId
-        // together would otherwise have the typed name silently replaced, behind a comment
-        // promising the opposite.
-        if (!((data.customerName as string | null | undefined) ?? quote.customerName))
-          data.customerName = known.name;
+        /**
+         * The quote's own name / address / phone are the Bill To block that the proposal PDF, the
+         * .docx and the uploaded .docx templates print. They are NOT read through the customer
+         * relation — `proposalPdf`, `proposalDocx`, `proposalTemplateRender` and `quoteDocx` all
+         * take them off the quote — so a linked customer whose details are never copied across
+         * leaves those documents with a Bill To line that is blank or half-filled.
+         *
+         * That used to be masked by a free-text Bill To editor on the estimate screen. The screen
+         * now sets the customer only through the picker, so this is the only path those fields
+         * have, and filling them here is what keeps the printed document whole.
+         *
+         * **Filled only where empty, each field independently.** A value already on the quote was
+         * either spoken to the agent or typed by someone who was standing at the property, and
+         * whichever it was, it beats whatever the books happen to hold — the same rule the
+         * ingestion path follows when QuickBooks data meets a technician's correction. The
+         * EFFECTIVE value is what counts, so a PATCH carrying `customerName` and `customerId`
+         * together keeps the name it sent rather than having it silently replaced.
+         */
+        /**
+         * A RE-LINK is a correction, so it moves the fields the NEW customer can actually supply.
+         *
+         * Only-where-empty is right for a first link, where an empty field is simply unfilled. It
+         * is wrong when the estimate is re-pointed at a different customer: link A, then realise
+         * it was the wrong Acme and pick B, and the quote would keep A's name, address and phone
+         * while `customerId` said B. The proposal PDF, the .docx, the template render and the
+         * greeting on the proposal email all read the Bill To block off the QUOTE, so every one of
+         * them would address A while QuickBooks billed B — and the customer row renders those same
+         * fields, so the re-pick looked like it had silently done nothing.
+         *
+         * But a re-link must NOT blank a field the new customer has nothing for. An earlier
+         * version moved all three as a set including blanks, on the reasoning that the values in
+         * the way were this branch's own copy of customer A. That premise is false in a reachable
+         * state: the first-link rule fills only what is EMPTY, so a quote whose address was spoken
+         * to the agent ("the address is 42 Oak Street") still holds the technician's own words
+         * after linking A — and re-linking to a B with no address on file would destroy them, with
+         * no field left on the estimate screen to type them back into.
+         *
+         * So: the new customer's values win where it has them, and where it has none the existing
+         * value stands. The residue is a visible one — the row shows B's name beside an address
+         * that may still be A's — which is the right way round, because a wrong address on screen
+         * can be corrected and deleted data cannot. An explicit value in this PATCH beats both.
+         */
+        const relink = quote.customerId != null && quote.customerId !== customerId;
+        const takes = <K extends "customerName" | "customerAddress" | "customerPhone">(key: K) =>
+          relink
+            ? data[key] === undefined
+            : !((data[key] as string | null | undefined) ?? quote[key]);
+        if (takes("customerName")) data.customerName = known.name;
+        // `known.x != null` on a re-link is the whole guard against erasing spoken details.
+        if (takes("customerAddress") && (!relink || known.address != null))
+          data.customerAddress = known.address ?? null;
+        if (takes("customerPhone") && (!relink || known.phone != null))
+          data.customerPhone = known.phone ?? null;
       }
     }
 
     /**
-     * Change which sales-tax rate this estimate uses — the inline pencil on the totals block.
+     * Change which sales-tax rate this estimate uses — the sales-tax row on the Estimate tab,
+     * which opens the rate sheet (EstimateTaxSheet).
      *
      * Only a DRAFT reaches here (COMPLETED is refused above), which is the whole reason this is
      * allowed to move at all: the snapshot exists so a SENT estimate cannot be re-priced, not to
@@ -759,15 +831,37 @@ export class QuoteController {
         totalPrice: basePrice(totalPrice),
         pricebookCode: match?.code ?? null,
         isLabor,
-        // Labor is not taxed by default — the estimate PDF's "Taxed" column has always shown
-        // labor unticked, so a blanket `default(true)` would have made the document contradict
-        // the total printed beneath it. The per-line toggle overrides either way.
-        taxable: !isLabor,
+        /**
+         * Labor is not taxed by default — the estimate PDF's "Taxed" column has always shown
+         * labor unticked, so a blanket `default(true)` would have made the document contradict
+         * the total printed beneath it.
+         *
+         * The caller may override it at creation. It used to be derivable only from `isLabor`,
+         * so the add form on the estimate screen had no way to offer the choice and a taxable
+         * permit fee or an untaxed material had to be added and then corrected — which reads on
+         * screen as the line briefly carrying the wrong tax, and reaches the totals as a value
+         * that was wrong for one round trip. Only an explicit boolean counts: anything else,
+         * including a missing field, keeps the `!isLabor` default rather than being coerced.
+         */
+        taxable: typeof req.body?.taxable === "boolean" ? req.body.taxable : !isLabor,
         sourcePricebookId: match?.sourcePricebookId ?? null,
         manuallyEdited: manualPrice,
         sortOrder: nextSort,
+        /**
+         * The QuickBooks item this line bills against, chosen in the add form. Null — the default
+         * — means resolve it at post time by name, matching or creating.
+         *
+         * Accepted here as well as on a PATCH because the choice belongs to the moment the line is
+         * described: the technician typing "permit fee" knows which item in the books it bills to,
+         * and making them add the line first and then reopen it to say so is a second trip for
+         * something they already knew. Stringified rather than trusted, and the pair moves
+         * together — an id with no name leaves the row unable to show what it picked.
+         */
+        qboItemId: req.body?.qboItemId == null ? null : String(req.body.qboItemId),
+        qboItemName: req.body?.qboItemName == null ? null : String(req.body.qboItemName),
       },
     });
+    await touchQuote(quote.id);
     res.status(201).json({
       success: true,
       // Marked up like every other read, or the new line would show a bare cost price until
@@ -815,6 +909,7 @@ export class QuoteController {
         });
       }
       await prisma.quoteLineItem.delete({ where: { id: item.id } }); // drop placeholder
+      await touchQuote(quote.id);
       const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
       return res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
     }
@@ -873,6 +968,7 @@ export class QuoteController {
     }
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
     await prisma.quoteLineItem.update({ where: { id: item.id }, data });
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
@@ -887,6 +983,7 @@ export class QuoteController {
     const item = quote.lineItems.find((i) => i.id === req.params.itemId);
     if (!item) return fail(res, 404, "Line item not found");
     await prisma.quoteLineItem.delete({ where: { id: item.id } });
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
@@ -956,6 +1053,7 @@ export class QuoteController {
         ...(packed.rounded ? { quantity: packed.quantity } : {}),
       },
     });
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }

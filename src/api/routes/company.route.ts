@@ -63,8 +63,20 @@ companyRoute.get(
 // Sales-tax rates are readable by every role: an estimate must show the rate it applies, and
 // gating this would blank the totals for technicians.
 companyRoute.get("/sales-tax", authMiddleware, CompanyController.listSalesTaxRates);
+// Whether tax applies to this company at all. Admin-only: it decides whether customer-facing
+// documents carry tax. Refused while QuickBooks or a CRM is connected — either forces it on.
+companyRoute.put("/tax-enabled", authMiddleware, requireAdmin, CompanyController.setTaxEnabled);
 // Writing a rate is admin-only: it is applied to money on customer-facing estimates.
 companyRoute.post("/sales-tax", authMiddleware, requireAdmin, CompanyController.saveSalesTax);
+// Availability only, and admin-only like every other tax write. Its own route rather than a
+// field on the POST above, because that one refuses all writes while QuickBooks owns the
+// company's tax — which is exactly when this has to work.
+companyRoute.put(
+  "/sales-tax/:id/active",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.setSalesTaxActiveState
+);
 companyRoute.put(
   "/sales-tax/default",
   authMiddleware,

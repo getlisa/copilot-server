@@ -838,6 +838,55 @@ export async function taxSourceIsExternal(companyId: number): Promise<{
 }
 
 /**
+ * Whether sales tax applies to this company at all.
+ *
+ * Two inputs, and an integration wins. The stored flag defaults OFF, because most companies do
+ * not charge sales tax and a rate that starts applying itself as soon as one is configured is a
+ * surprise measured in money. A company with **either** a QuickBooks connection **or** a CRM
+ * connection is FORCED ON: both mean this company invoices through a system that charges tax, and
+ * an estimate that declared none would disagree with what that system bills for the same job.
+ *
+ * **Forcing tax on is NOT the same as making that system the tax SOURCE, and the difference is
+ * load-bearing.** `taxSourceIsExternal` stays QuickBooks-only on purpose: it decides whether the
+ * company may create its own MANUAL rates, and an earlier draft that also treated a
+ * `crm_connections` row as external locked ServiceTitan companies out of tax completely — they
+ * could not create a rate, and nothing ingests tax from a CRM, so they ended up with none at all.
+ * A CRM company must charge tax AND must type its own rates. Those two facts live in two
+ * functions, and merging them re-creates that hole.
+ *
+ * `enforcedBy` names which integration is doing it, so the refusal and the settings screen can
+ * say the true reason rather than blaming QuickBooks for a CRM.
+ *
+ * Deliberately NOT the same question as "is a default rate set". Off means this company does not
+ * charge tax; no default means they do but have not said which rate. The first is a decision, the
+ * second is an unfinished setup, and collapsing them loses the ability to tell a configured
+ * company from an untaxed one.
+ */
+export async function taxEnabledFor(companyId: number): Promise<{
+  enabled: boolean;
+  stored: boolean;
+  enforced: boolean;
+  enforcedBy: "quickbooks" | "crm" | null;
+}> {
+  const [config, { external }, crm] = await Promise.all([
+    prisma.company_configs.findUnique({
+      where: { company_id: companyId },
+      select: { tax_enabled: true },
+    }),
+    taxSourceIsExternal(companyId),
+    // Read, not joined into taxSourceIsExternal — see the note above about why the CRM forces tax
+    // on without owning the rates.
+    prisma.crm_connections.findUnique({
+      where: { company_id: companyId },
+      select: { provider: true },
+    }),
+  ]);
+  const stored = config?.tax_enabled ?? false;
+  const enforcedBy = external ? "quickbooks" : crm ? "crm" : null;
+  return { enabled: stored || enforcedBy != null, stored, enforced: enforcedBy != null, enforcedBy };
+}
+
+/**
  * Whether a rate can actually be applied right now.
  *
  * Exported and pure so the source-of-truth rule is testable. It was inline once, and the
@@ -874,8 +923,14 @@ export async function listSalesTax(companyId: number) {
     },
     orderBy: [{ isDefault: "desc" }, { name: "asc" }],
   });
+  const tax = await taxEnabledFor(companyId);
   return {
     taxSource: external ? via : "manual",
+    taxEnabled: tax.enabled,
+    /** True when a connection forces it on, so the screen can lock the switch and say why. */
+    taxEnforced: tax.enforced,
+    /** Which integration is forcing it — so the reason names the right one. */
+    taxEnforcedBy: tax.enforcedBy,
     rates: rows.map((r) => ({
       ...r,
       usable: salesTaxUsable(r, external),
@@ -891,6 +946,13 @@ export async function listSalesTax(companyId: number) {
  * the settings screen shows as unusable would be the worst of both.
  */
 export async function defaultSalesTax(companyId: number) {
+  // Tax off means no snapshot, which is the whole effect of the switch. Both callers come through
+  // here — quote creation and completion's gap-fill — so gating it once covers the pair, and a
+  // company that turns tax off does not silently keep taxing the estimates it makes afterwards.
+  // Estimates that already carry a rate keep it: the snapshot is theirs, and re-pricing a sent
+  // document is exactly what the snapshot exists to prevent.
+  const { enabled } = await taxEnabledFor(companyId);
+  if (!enabled) return null;
   const { external } = await taxSourceIsExternal(companyId);
   return prisma.salesTax.findFirst({
     where: {
@@ -1645,6 +1707,51 @@ export async function upsertSalesTax(
         ...(input.isDefault === undefined ? {} : { isDefault: input.isDefault }),
         updatedBy: actingUserId,
       },
+    });
+  });
+}
+
+/**
+ * Turn a rate off, or back on — including a rate that came from QuickBooks.
+ *
+ * Deliberately NOT routed through `upsertSalesTax`, whose first act is to refuse every write
+ * while a connected system owns the company's tax. That guard is right for what it was written
+ * for: a name or a percentage typed here would be saved and then never applied, so refusing with
+ * the reason beats accepting it silently. It is wrong for this, and it made the ingested rates —
+ * the only ones a connected company has — the exact set that could not be switched off.
+ *
+ * Availability is a CLARA-side decision about what this company is offered, not a claim about
+ * what QuickBooks holds. The ingest already assumes an admin can make it: it refreshes a rate's
+ * name on rename but deliberately never forces `is_active` back to true, precisely so a rate
+ * someone switched off is not silently switched on by the next sync. Until now nothing could
+ * write the flag it was protecting.
+ *
+ * Nothing is sent to QuickBooks. The rate still exists there, and a later sync still sees it.
+ *
+ * Deactivating the default clears the default in the same transaction. Left set, the settings
+ * screen would keep showing it as the default while every new estimate started untaxed — and
+ * `defaultSalesTax` filters on `is_active`, so the two would disagree with nothing to explain it.
+ */
+export async function setSalesTaxActive(
+  companyId: number,
+  id: number,
+  isActive: boolean,
+  actingUserId: bigint | null
+) {
+  return prisma.$transaction(async (tx) => {
+    const owned = await tx.salesTax.findFirst({
+      where: { id, companyId, isDeleted: false },
+      select: { id: true, isDefault: true },
+    });
+    if (!owned) throw new UserFacingError("That rate does not belong to this company");
+    if (!isActive && owned.isDefault)
+      await tx.salesTax.updateMany({
+        where: { companyId, isDefault: true },
+        data: { isDefault: false },
+      });
+    return tx.salesTax.update({
+      where: { id },
+      data: { isActive, ...(isActive ? {} : { isDefault: false }), updatedBy: actingUserId },
     });
   });
 }
