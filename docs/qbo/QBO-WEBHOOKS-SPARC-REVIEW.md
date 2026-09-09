@@ -5,7 +5,7 @@
 >
 > **State at review time:** `copilot-server` PR #17 open, not merged, branch `feat/qbo-webhooks`
 > at `bfc5bbe`, base `main` at `5632c1a`. 14 files, +1867/-26, 972 executable changed lines.
-> `docs/sql/phase4.sql` is **not applied anywhere** — `qbo_webhook_events` does not exist in
+> `docs/sql/phase6.sql` (then named phase4) is **not applied anywhere** — `qbo_webhook_events` does not exist in
 > production, so no row needed repairing for any finding below. The verifier tokens are **not** in
 > `techcopilot/prod/app`; the service runs task definition `:105`, built from `5632c1a`, which has
 > no `/api/v1/webhooks` route. Measured the same day: the endpoint 404s in production.

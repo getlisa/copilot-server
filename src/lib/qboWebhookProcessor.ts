@@ -156,7 +156,8 @@ async function handleEstimateEvent(
   entityId: string | null
 ): Promise<"done" | "skipped"> {
   // Detecting an EDIT made inside QuickBooks needs a stored SyncToken, and that column does not
-  // exist yet (it lands with the phase-5 DDL on `quotes`, which is postgres-owned). Until then a
+  // exist yet (it needs a later DDL on `quotes`, which like everything here takes the RDS master
+  // credentials). Until then a
   // non-delete estimate event is recorded and skipped — and its `operation` in the ledger is the
   // point: it is how we learn Intuit's actual vocabulary for this entity.
   if (!/^delete/.test(operation)) return "skipped";

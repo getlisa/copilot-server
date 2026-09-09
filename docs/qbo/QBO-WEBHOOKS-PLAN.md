@@ -299,8 +299,8 @@ CREATE INDEX IF NOT EXISTS qbo_webhook_events_drain_idx
 `schema.prisma` gains the matching `model QboWebhookEvent`, and the two are checked against
 each other with `prisma migrate diff --from-empty --to-schema-datamodel` before the SQL is run.
 That is the same check the Phase 1 migration used; its log credits it with catching all 54 of
-*that* migration's columns and 8 of its index names. **Phase 4's own numbers are 18 columns and
-4 indexes**, which is what `phase4.sql`'s assertion block enforces. It is also what
+*that* migration's columns and 8 of its index names. **Phase 6's own numbers are 18 columns and
+4 indexes**, which is what `phase6.sql`'s assertion block enforces. It is also what
 gives the rule below something to sequence against: without a model there is no image change.
 
 Two obligations from the runbook, both non-negotiable here:
@@ -310,8 +310,9 @@ Two obligations from the runbook, both non-negotiable here:
 - **There is no migration ledger. Merged ≠ applied.** Probe `information_schema.columns` before
   assuming, and verify afterwards **as `app_user`**, not as the migration role.
 
-This table is new, so it is created as `app_user` and needs **no RDS master credentials** — unlike
-Phase 3.
+This needs the **RDS master credentials**, like every migration here. An earlier draft claimed a
+new table could be created as `app_user` and skip them; running it returned `permission denied for
+schema public` on the first statement. `app_user` holds no CREATE on `public` at all.
 
 ### 3.2 Realm → company: fan out, do not constrain
 
@@ -471,7 +472,7 @@ Phases 1 and 2 are implemented, plus the half of Phase 3 that needs no DDL. `npm
 | `src/api/routes/webhook.route.ts` | **New.** `POST /qbo`. |
 | `src/lib/qboWebhookProcessor.ts` | **New.** Record + drain: stale reclaim, token claim, realm fan-out, stage coalescing, estimate handling, retry/requeue. |
 | `scripts/check-qbo-webhook.ts` | **New.** 40-odd assertions, pure. Wired into `npm test`. |
-| `docs/sql/phase4.sql` + `apply-phase4.sh` | **New.** The ledger DDL and its runner. |
+| `docs/sql/phase6.sql` + `apply-phase6.sh` | **New.** The ledger DDL and its runner. |
 | `prisma/schema.prisma` | `model QboWebhookEvent` (+54 lines, purely additive). |
 | `src/lib/qboIngest.ts` | `syncQboReferenceData` now delegates to an exported `runQboSync(companyId, stages, {markComplete})`. Existing behaviour unchanged. |
 | `src/server.ts` | The mount, before `express.json()`, and the drain start. |
@@ -529,14 +530,57 @@ flight in another session.
 
 ---
 
+## 5.6 Applied to production — 2026-09-09
+
+**Recorded here because there is no migration ledger. Merged is not applied, and applied is not
+merged; right now this feature is the second of those.**
+
+| Step | State |
+|---|---|
+| `docs/sql/phase6.sql` | **APPLIED.** 6/6 statements, `PHASE6_APPLIED`, exit 0. Credentialed revision `:109` deregistered on exit. |
+| Verified as `app_user` | **PASS.** A real insert -> select -> delete round-trip on `qbo_webhook_events` from the service's own task definition: `user=app_user owner=postgres indexes=4 read_back=skipped ledger_rows=0`. The sentinel row cleaned itself up. |
+| `qbo_connections_realm_id_idx` | Created (statement 5/6). |
+| Verifier tokens | **LIVE.** `techcopilot/prod/app` 30 -> 32 keys, version `1aa68225-d237-48f2-9bda-ceb4a96d5e11`. Task definition `:110` registered (25 -> 27 container secrets) and the service moved onto it; rollout COMPLETED, 1/1, single deployment. |
+| Code | **NOT deployed.** `/health` answers 200 with the pre-webhook shape and `POST /api/v1/webhooks/qbo` returns **404**, because the running image is `723f969` from `main`. Both are the correct pre-merge answers. |
+
+### The premise that was wrong, and how it failed
+
+The first attempt ran on the service's own task definition, because this migration only CREATEs
+its own new table and therefore -- so the reasoning went -- needed no master credentials. It failed
+on the very first statement:
+
+```
+[1/6] FAILED: CREATE TABLE IF NOT EXISTS "public"."qbo_webhook_events" (
+Raw query failed. Code: `42501`. Message: `ERROR: permission denied for schema public`
+```
+
+**`app_user` holds no CREATE on schema `public` at all.** Creating a table is not a lesser
+privilege than altering one, and there is no "new table" exemption to find. Every apply script in
+`docs/sql/` takes the master credentials; this one now does too.
+
+Worth recording rather than quietly fixing: that claim was written confidently, survived a
+nine-reviewer review, and was disproved by the first statement that ran. Nothing local could have
+caught it -- `bash -n` passed, the generated runner was valid JavaScript, and the data-migration
+reviewer independently confirmed the SQL matched Prisma exactly. Only production had the answer.
+
+### Renumbered 4 -> 6
+
+Phases **5 and 5b** (the company-level "Enable tax" switch) landed on `main` and were applied
+while this work was in review, so `docs/sql/` now runs 1b, 2, 3, 5, 5b. A migration numbered 4
+would sit *below* an already-applied one and read as "should have run first", which is the one
+thing a sequence number exists to say. `phase4.sql` -> `phase6.sql`, `apply-phase4.sh` ->
+`apply-phase6.sh`.
+
+---
+
 ## 6. Order of operations
 
 | # | Step | Who | Blocks |
 |---|---|---|---|
 | 0 | ~~Register URL + streams on both keysets, CloudEvents format~~ | Bharath | **done 2026-09-09** |
-| 1 | `bash scripts/set-qbo-webhook-env.sh --apply` — secret + task-def revision + `update-service` (values received; local `.env` done) | Bharath (the classifier blocks me from running it) | — |
+| 1 | ~~`bash scripts/set-qbo-webhook-env.sh --apply`~~ | **DONE 2026-09-09 — secret v`1aa68225`, task def `:110` live** | — |
 | 2 | ~~Build the receiver, the ledger and the drain~~ | **done 2026-09-09 — see §5.5, `npm test` green** | — |
-| 2a | `bash docs/sql/apply-phase4.sh` — the ledger DDL, **before** the image (`app_user`, no master creds) | Bharath or me | — |
+| 2a | ~~`bash docs/sql/apply-phase6.sh`~~ | **DONE 2026-09-09 — see §5.6** | — |
 | 2b | Review, then merge to `main` — which deploys prod | Bharath | 2a |
 | 3 | Confirm one real delivery verifies (a mis-pasted token 401s everything) | both | 1, 2 |
 | 4 | Watch a day of real sandbox deliveries; record the operation vocabulary — especially `estimate.*` and `estimate.emailed` — back into §3.5 | me | 3 |

@@ -1,4 +1,4 @@
--- Phase 4 — QuickBooks webhooks: the event ledger.
+-- Phase 6 — QuickBooks webhooks: the event ledger.
 --
 -- WHAT THIS IS FOR. Nothing flowed QuickBooks -> CLARA (gap #10 / T-29). Reference data only
 -- refreshed when an admin clicked Sync, and an estimate edited or deleted inside QuickBooks never
@@ -10,9 +10,14 @@
 -- what makes a redelivery a no-op. The status columns answer "which tenants are failing", which
 -- is the question a queue and its dead-letter queue cannot.
 --
--- OWNERSHIP: this creates a NEW table, so it is owned by whatever role runs it — `app_user`, via
--- the service's own task definition. NO RDS master credentials, unlike phases 1b/2/3, which
--- touched `postgres`-owned tables. apply-phase4.sh therefore registers no credentialed revision.
+-- OWNERSHIP: needs the RDS master credentials, like every other migration here.
+--
+-- An earlier version of this file asserted the opposite, and it was wrong at the first statement.
+-- The reasoning was that a migration which only CREATEs its own new table is owned by whoever runs
+-- it, so the service's own `app_user` would do. `app_user` holds no CREATE on schema `public` at
+-- all — `ERROR: permission denied for schema public` (SQLSTATE 42501). Creating a table is not a
+-- lesser privilege than altering one. Recorded because the wrong version was confident, reviewed,
+-- and only disproved by running it.
 --
 -- ORDER: **this DDL runs BEFORE the image that uses it.** Prisma SELECTs every scalar column it
 -- knows about, so the moment the webhook image deploys it asks for these columns on every read of
@@ -22,6 +27,10 @@
 --
 -- Verified against `prisma migrate diff --from-empty --to-schema-datamodel` on 2026-09-09 —
 -- every column, type and index name below is Prisma's own output, not hand-written guesses.
+--
+-- NUMBERED 6, NOT 4. Written when main was at phase 3, but phases 5 and 5b landed and were
+-- applied while this was in review. A migration numbered below an already-applied one reads as
+-- "should have run first", which is the one thing a sequence number exists to say.
 --
 -- Idempotent: safe to re-run. There is no migration ledger in this project (merged is NOT
 -- applied), so probe `information_schema` before assuming, and verify afterwards AS `app_user`.
@@ -83,7 +92,7 @@ CREATE INDEX IF NOT EXISTS "qbo_webhook_events_realm_idx"
 -- `qbo_connections.realm_id` carries no index, and the drain resolves realm -> companies on it
 -- every pass. Deliberately NOT unique: one realm may legitimately serve several companies, and
 -- that fan-out is the design. This is the one statement here that touches an EXISTING table --
--- purely additive, and `qbo_connections` is app_user-owned like the rest of the QBO tables.
+-- purely additive.
 CREATE INDEX IF NOT EXISTS "qbo_connections_realm_id_idx"
     ON "public"."qbo_connections"("realm_id");
 
