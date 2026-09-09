@@ -81,6 +81,17 @@ model company_configs {
   /// (QBO PRD US7 — knowingly reverses the earlier per-quote-only markup decision).
   /// Per-quote markup stays editable; existing quotes are never touched by a change here.
   default_markup_percent Decimal   @default(0) @db.Decimal(5, 2)
+  /// Whether sales tax applies to this company's estimates at all.
+  ///
+  /// Default OFF (product, 2026-09-09): most companies do not charge sales tax, and a rate that
+  /// starts applying itself the moment someone configures one is a surprise measured in money.
+  /// While QuickBooks is connected this is FORCED ON and cannot be turned off — the books already
+  /// hold the rates and the codes, so an estimate that declared no tax would disagree with what
+  /// QuickBooks bills. See taxEnabledFor().
+  ///
+  /// Distinct from "no default rate set". Off means the company does not charge tax; no default
+  /// means they do but have not said which rate — the first is a decision, the second is a gap.
+  tax_enabled            Boolean   @default(false)
   companies              companies @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@schema("public")

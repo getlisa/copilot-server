@@ -838,6 +838,40 @@ export async function taxSourceIsExternal(companyId: number): Promise<{
 }
 
 /**
+ * Whether sales tax applies to this company at all.
+ *
+ * Two inputs, and the integration wins. The stored flag defaults OFF, because most companies do
+ * not charge sales tax and a rate that starts applying itself as soon as one is configured is a
+ * surprise measured in money. But a company connected to QuickBooks is FORCED ON: the books
+ * already hold the rates and the tax codes, the ingest imports them, and an estimate that
+ * declared no tax would disagree with what QuickBooks bills for the same document.
+ *
+ * `enforced` is what lets the settings screen show the switch on and locked, with a reason,
+ * instead of showing it off while tax is plainly being applied — or letting an admin turn it off
+ * and watch nothing change.
+ *
+ * Deliberately NOT the same question as "is a default rate set". Off means this company does not
+ * charge tax; no default means they do but have not said which rate. The first is a decision, the
+ * second is an unfinished setup, and collapsing them loses the ability to tell a configured
+ * company from an untaxed one.
+ */
+export async function taxEnabledFor(companyId: number): Promise<{
+  enabled: boolean;
+  stored: boolean;
+  enforced: boolean;
+}> {
+  const [config, { external }] = await Promise.all([
+    prisma.company_configs.findUnique({
+      where: { company_id: companyId },
+      select: { tax_enabled: true },
+    }),
+    taxSourceIsExternal(companyId),
+  ]);
+  const stored = config?.tax_enabled ?? false;
+  return { enabled: stored || external, stored, enforced: external };
+}
+
+/**
  * Whether a rate can actually be applied right now.
  *
  * Exported and pure so the source-of-truth rule is testable. It was inline once, and the
@@ -874,8 +908,12 @@ export async function listSalesTax(companyId: number) {
     },
     orderBy: [{ isDefault: "desc" }, { name: "asc" }],
   });
+  const tax = await taxEnabledFor(companyId);
   return {
     taxSource: external ? via : "manual",
+    taxEnabled: tax.enabled,
+    /** True when a connection forces it on, so the screen can lock the switch and say why. */
+    taxEnforced: tax.enforced,
     rates: rows.map((r) => ({
       ...r,
       usable: salesTaxUsable(r, external),
@@ -891,6 +929,13 @@ export async function listSalesTax(companyId: number) {
  * the settings screen shows as unusable would be the worst of both.
  */
 export async function defaultSalesTax(companyId: number) {
+  // Tax off means no snapshot, which is the whole effect of the switch. Both callers come through
+  // here — quote creation and completion's gap-fill — so gating it once covers the pair, and a
+  // company that turns tax off does not silently keep taxing the estimates it makes afterwards.
+  // Estimates that already carry a rate keep it: the snapshot is theirs, and re-pricing a sent
+  // document is exactly what the snapshot exists to prevent.
+  const { enabled } = await taxEnabledFor(companyId);
+  if (!enabled) return null;
   const { external } = await taxSourceIsExternal(companyId);
   return prisma.salesTax.findFirst({
     where: {

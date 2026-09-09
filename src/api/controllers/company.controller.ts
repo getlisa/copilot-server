@@ -26,6 +26,7 @@ import {
   listSalesTax,
   setDefaultSalesTax,
   setSalesTaxActive,
+  taxEnabledFor,
   upsertSalesTax,
   parseRatePercent,
   qboSyncedAt,
@@ -431,12 +432,16 @@ export class CompanyController {
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const { taxSource, rates } = await listSalesTax(companyId);
+    const { taxSource, taxEnabled, taxEnforced, rates } = await listSalesTax(companyId);
     res.json({
       success: true,
       data: {
         /** "quickbooks" | "crm" | "manual" — where this company's tax comes from. */
         taxSource,
+        /** Whether tax applies at all. False means new estimates start with no rate. */
+        taxEnabled,
+        /** True when a connection forces it on, so the screen locks the switch and says why. */
+        taxEnforced,
         rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
       },
     });
@@ -508,6 +513,57 @@ export class CompanyController {
   }
 
   /**
+   * PUT /api/v1/companies/tax-enabled — whether sales tax applies to this company at all.
+   * Body: { taxEnabled }
+   *
+   * Refused while QuickBooks is connected, in both directions. The connection forces it on: the
+   * books hold the rates and the tax codes, the ingest imports them, and an estimate that declared
+   * no tax would disagree with what QuickBooks bills for the same document. Accepting the write
+   * and then ignoring it — which is what returning the computed value would amount to — is the
+   * failure mode this whole area has been bitten by before, so it 409s with the reason instead.
+   */
+  static async setTaxEnabled(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    // Strict, not truthy: a body of { taxEnabled: "false" } must not switch tax ON.
+    if (typeof req.body?.taxEnabled !== "boolean")
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "taxEnabled must be true or false" },
+      });
+    const { enforced } = await taxEnabledFor(companyId);
+    if (enforced)
+      return res.status(409).json({
+        success: false,
+        error: {
+          status: 409,
+          message:
+            "Sales tax stays on while QuickBooks is connected — your rates and tax codes come from there.",
+        },
+      });
+    await prisma.company_configs.upsert({
+      where: { company_id: companyId },
+      // checklists is constrained to an ARRAY of {label, description} — [] is the empty state.
+      create: { company_id: companyId, checklists: [], tax_enabled: req.body.taxEnabled },
+      update: { tax_enabled: req.body.taxEnabled },
+    });
+    logger.info("Tax enabled changed", { companyId, taxEnabled: req.body.taxEnabled });
+    const { taxSource, taxEnabled, taxEnforced, rates } = await listSalesTax(companyId);
+    res.json({
+      success: true,
+      data: {
+        taxSource,
+        taxEnabled,
+        taxEnforced,
+        rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+      },
+    });
+  }
+
+  /**
    * PUT /api/v1/companies/sales-tax/:id/active — offer this rate, or stop offering it.
    * Body: { isActive }
    *
@@ -544,11 +600,13 @@ export class CompanyController {
         req.user?.userId == null ? null : BigInt(req.user.userId)
       );
       logger.info("Sales tax availability changed", { companyId, id, isActive });
-      const { taxSource, rates } = await listSalesTax(companyId);
+      const { taxSource, taxEnabled, taxEnforced, rates } = await listSalesTax(companyId);
       res.json({
         success: true,
         data: {
           taxSource,
+          taxEnabled,
+          taxEnforced,
           rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
         },
       });
@@ -576,11 +634,13 @@ export class CompanyController {
         .json({ success: false, error: { status: 400, message: "id must be an integer or null" } });
     try {
       await setDefaultSalesTax(companyId, id);
-      const { taxSource, rates } = await listSalesTax(companyId);
+      const { taxSource, taxEnabled, taxEnforced, rates } = await listSalesTax(companyId);
       res.json({
         success: true,
         data: {
           taxSource,
+          taxEnabled,
+          taxEnforced,
           rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
         },
       });

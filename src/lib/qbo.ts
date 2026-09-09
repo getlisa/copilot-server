@@ -426,8 +426,13 @@ export const autoItemName = (line: { isLabor: boolean; description: string; sear
   (line.isLabor ? "Labor" : (line.searchTerm?.trim() || line.description)).slice(0, 100);
 
 // createItem moved to lib/qboIngest.ts::ensureQboItem, which also records the id so the item is
-// never created a second time, and sets Taxable at creation (G14) and the admin's income account
-// (G10) instead of taking whichever Income account QuickBooks returned first.
+// never created a second time, and sets Taxable at creation from the line's own taxable flag
+// (G14 — threaded through by itemRefResolver below).
+//
+// The income account is NOT the admin's choice yet (G10, still open): `ensureQboItem` accepts one
+// and `GET /qbo/income-accounts` exists to offer it, but nothing stores or forwards it, so
+// creation still falls to `firstIncomeAccountId` — deterministic (active Income accounts by name,
+// mirror before a live query) but arbitrary. This comment used to claim both were done.
 
 
 /**
@@ -489,6 +494,26 @@ async function itemRefResolver(
       await ensureItem(conn, companyId, {
         pricebookItemId: line.pricebookCode ? bookIdByCode.get(line.pricebookCode) ?? null : null,
         name: autoItemName(line),
+        /**
+         * Taxability, carried onto the QuickBooks ITEM at creation (gap G14 / T-07).
+         *
+         * `ensureQboItem` has always accepted this and set `Taxable` when given it; this caller
+         * passed nothing, so every item CLARA created inherited whatever the client's QuickBooks
+         * defaults to. That is not cosmetic: an item carries its own tax setting, and it is what
+         * QuickBooks applies to every LATER transaction billed against that item — including
+         * invoices the client raises by hand, long after this estimate. A material created as
+         * non-taxable quietly under-charges tax from then on, inside someone's accounting system,
+         * with nothing in CLARA to reveal it.
+         *
+         * This estimate's own lines are unaffected either way: each carries an explicit
+         * `TaxCodeRef` of TAX or NON (see qboEstimateLines), so what the customer signed and what
+         * QuickBooks bills for THIS document already agree. This fixes what happens next.
+         *
+         * Only used at creation. An item is created once and its id reused forever, so where two
+         * lines share a name and disagree on taxability, the first one to be posted decides — and
+         * changing it afterwards is a QuickBooks-side edit, not something to overwrite from here.
+         */
+        taxable: line.taxable,
       })
     );
   }
