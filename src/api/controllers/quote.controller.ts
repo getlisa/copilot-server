@@ -681,11 +681,31 @@ export class QuoteController {
          * EFFECTIVE value is what counts, so a PATCH carrying `customerName` and `customerId`
          * together keeps the name it sent rather than having it silently replaced.
          */
-        const effective = <K extends "customerName" | "customerAddress" | "customerPhone">(key: K) =>
-          (data[key] as string | null | undefined) ?? quote[key];
-        if (!effective("customerName")) data.customerName = known.name;
-        if (!effective("customerAddress") && known.address) data.customerAddress = known.address;
-        if (!effective("customerPhone") && known.phone) data.customerPhone = known.phone;
+        /**
+         * A RE-LINK is a correction, and moves all three as a SET.
+         *
+         * Only-where-empty is right for a first link, where the empty fields are simply unfilled.
+         * It is wrong when the estimate is re-pointed at a different customer, because the values
+         * standing in the way are this branch's own copy of the customer being replaced: link A,
+         * then realise it was the wrong Acme and pick B, and the quote keeps A's name, address and
+         * phone while `customerId` says B. The proposal PDF, the .docx, the template render and
+         * the greeting on the proposal email all read the Bill To block off the QUOTE, so every one
+         * of them would address A while QuickBooks bills B — and the customer row on screen renders
+         * those same fields, so the re-pick looks like it silently did nothing.
+         *
+         * As a set, including blanks: taking B's name but keeping A's address because B has none on
+         * file splices one customer's street under another's name and prints an address that
+         * belongs to neither. That is the same rule the customer ingest follows for exactly the
+         * same reason. An explicit value in this PATCH still wins over both.
+         */
+        const relink = quote.customerId != null && quote.customerId !== customerId;
+        const takes = <K extends "customerName" | "customerAddress" | "customerPhone">(key: K) =>
+          relink
+            ? data[key] === undefined
+            : !((data[key] as string | null | undefined) ?? quote[key]);
+        if (takes("customerName")) data.customerName = known.name;
+        if (takes("customerAddress")) data.customerAddress = known.address ?? null;
+        if (takes("customerPhone")) data.customerPhone = known.phone ?? null;
       }
     }
 
