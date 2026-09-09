@@ -432,7 +432,7 @@ export class CompanyController {
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const { taxSource, taxEnabled, taxEnforced, rates } = await listSalesTax(companyId);
+    const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
     res.json({
       success: true,
       data: {
@@ -442,6 +442,8 @@ export class CompanyController {
         taxEnabled,
         /** True when a connection forces it on, so the screen locks the switch and says why. */
         taxEnforced,
+        /** "quickbooks" | "crm" | null — which one, so the reason names the right system. */
+        taxEnforcedBy,
         rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
       },
     });
@@ -534,16 +536,22 @@ export class CompanyController {
         success: false,
         error: { status: 400, message: "taxEnabled must be true or false" },
       });
-    const { enforced } = await taxEnabledFor(companyId);
-    if (enforced)
-      return res.status(409).json({
-        success: false,
-        error: {
-          status: 409,
-          message:
-            "Sales tax stays on while QuickBooks is connected — your rates and tax codes come from there.",
-        },
-      });
+    const { enforced, enforcedBy } = await taxEnabledFor(companyId);
+    if (enforced) {
+      /**
+       * Name the integration that is actually forcing it. The message used to say QuickBooks
+       * unconditionally, which was wrong for a CRM company in both halves: not QuickBooks, and
+       * their rates do NOT come from there — nothing ingests tax from a CRM, so they type their
+       * own. Being told to go and change something in a system that does not hold it is worse
+       * than a generic refusal.
+       */
+      const message =
+        enforcedBy === "quickbooks"
+          ? "Sales tax stays on while QuickBooks is connected — your rates and tax codes come from there."
+          : "Sales tax stays on while your CRM is connected, because jobs are invoiced through it. You can still choose which rate applies below.";
+      logger.info("Tax enabled change refused", { companyId, enforcedBy, requested: req.body.taxEnabled });
+      return res.status(409).json({ success: false, error: { status: 409, message } });
+    }
     await prisma.company_configs.upsert({
       where: { company_id: companyId },
       // checklists is constrained to an ARRAY of {label, description} — [] is the empty state.
@@ -551,13 +559,14 @@ export class CompanyController {
       update: { tax_enabled: req.body.taxEnabled },
     });
     logger.info("Tax enabled changed", { companyId, taxEnabled: req.body.taxEnabled });
-    const { taxSource, taxEnabled, taxEnforced, rates } = await listSalesTax(companyId);
+    const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
     res.json({
       success: true,
       data: {
         taxSource,
         taxEnabled,
         taxEnforced,
+        taxEnforcedBy,
         rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
       },
     });
@@ -600,13 +609,14 @@ export class CompanyController {
         req.user?.userId == null ? null : BigInt(req.user.userId)
       );
       logger.info("Sales tax availability changed", { companyId, id, isActive });
-      const { taxSource, taxEnabled, taxEnforced, rates } = await listSalesTax(companyId);
+      const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
       res.json({
         success: true,
         data: {
           taxSource,
           taxEnabled,
           taxEnforced,
+          taxEnforcedBy,
           rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
         },
       });
@@ -634,13 +644,14 @@ export class CompanyController {
         .json({ success: false, error: { status: 400, message: "id must be an integer or null" } });
     try {
       await setDefaultSalesTax(companyId, id);
-      const { taxSource, taxEnabled, taxEnforced, rates } = await listSalesTax(companyId);
+      const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
       res.json({
         success: true,
         data: {
           taxSource,
           taxEnabled,
           taxEnforced,
+          taxEnforcedBy,
           rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
         },
       });

@@ -840,15 +840,22 @@ export async function taxSourceIsExternal(companyId: number): Promise<{
 /**
  * Whether sales tax applies to this company at all.
  *
- * Two inputs, and the integration wins. The stored flag defaults OFF, because most companies do
+ * Two inputs, and an integration wins. The stored flag defaults OFF, because most companies do
  * not charge sales tax and a rate that starts applying itself as soon as one is configured is a
- * surprise measured in money. But a company connected to QuickBooks is FORCED ON: the books
- * already hold the rates and the tax codes, the ingest imports them, and an estimate that
- * declared no tax would disagree with what QuickBooks bills for the same document.
+ * surprise measured in money. A company with **either** a QuickBooks connection **or** a CRM
+ * connection is FORCED ON: both mean this company invoices through a system that charges tax, and
+ * an estimate that declared none would disagree with what that system bills for the same job.
  *
- * `enforced` is what lets the settings screen show the switch on and locked, with a reason,
- * instead of showing it off while tax is plainly being applied — or letting an admin turn it off
- * and watch nothing change.
+ * **Forcing tax on is NOT the same as making that system the tax SOURCE, and the difference is
+ * load-bearing.** `taxSourceIsExternal` stays QuickBooks-only on purpose: it decides whether the
+ * company may create its own MANUAL rates, and an earlier draft that also treated a
+ * `crm_connections` row as external locked ServiceTitan companies out of tax completely — they
+ * could not create a rate, and nothing ingests tax from a CRM, so they ended up with none at all.
+ * A CRM company must charge tax AND must type its own rates. Those two facts live in two
+ * functions, and merging them re-creates that hole.
+ *
+ * `enforcedBy` names which integration is doing it, so the refusal and the settings screen can
+ * say the true reason rather than blaming QuickBooks for a CRM.
  *
  * Deliberately NOT the same question as "is a default rate set". Off means this company does not
  * charge tax; no default means they do but have not said which rate. The first is a decision, the
@@ -859,16 +866,24 @@ export async function taxEnabledFor(companyId: number): Promise<{
   enabled: boolean;
   stored: boolean;
   enforced: boolean;
+  enforcedBy: "quickbooks" | "crm" | null;
 }> {
-  const [config, { external }] = await Promise.all([
+  const [config, { external }, crm] = await Promise.all([
     prisma.company_configs.findUnique({
       where: { company_id: companyId },
       select: { tax_enabled: true },
     }),
     taxSourceIsExternal(companyId),
+    // Read, not joined into taxSourceIsExternal — see the note above about why the CRM forces tax
+    // on without owning the rates.
+    prisma.crm_connections.findUnique({
+      where: { company_id: companyId },
+      select: { provider: true },
+    }),
   ]);
   const stored = config?.tax_enabled ?? false;
-  return { enabled: stored || external, stored, enforced: external };
+  const enforcedBy = external ? "quickbooks" : crm ? "crm" : null;
+  return { enabled: stored || enforcedBy != null, stored, enforced: enforcedBy != null, enforcedBy };
 }
 
 /**
@@ -914,6 +929,8 @@ export async function listSalesTax(companyId: number) {
     taxEnabled: tax.enabled,
     /** True when a connection forces it on, so the screen can lock the switch and say why. */
     taxEnforced: tax.enforced,
+    /** Which integration is forcing it — so the reason names the right one. */
+    taxEnforcedBy: tax.enforcedBy,
     rates: rows.map((r) => ({
       ...r,
       usable: salesTaxUsable(r, external),
