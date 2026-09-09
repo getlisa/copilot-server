@@ -35,6 +35,7 @@ import {
   listSalesTax,
 } from "../../lib/qboIngest";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
+import { resolveProposalBlocks } from "../../lib/proposalTemplates";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
 import { EstimateTurn } from "../../copilot/estimate/estimateService";
@@ -268,11 +269,15 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     ...(quote.customerAddress ? { billingAddress: quote.customerAddress } : {}),
     ...(quote.customerPhone ? { customerPhone: quote.customerPhone } : {}),
   };
-  // The company's own proposal format (null → the default estimate document) and their terms.
-  const company = await prisma.companies.findUnique({
-    where: { id: quote.companyId },
-    select: { proposal_template: true, footer_terms: true },
-  });
+  // The proposal format this quote renders with — chosen template → company default →
+  // legacy column → built-in (template-library) — and the company's terms.
+  const [company, resolvedBlocks] = await Promise.all([
+    prisma.companies.findUnique({
+      where: { id: quote.companyId },
+      select: { footer_terms: true },
+    }),
+    resolveProposalBlocks(quote.companyId, quote.proposalTemplateId),
+  ]);
   const input: ProposalInput = {
     header: mergedHeader,
     projectTitle,
@@ -319,7 +324,7 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     unpricedCount,
     photos,
   };
-  const proposalTemplate = company?.proposal_template ?? null;
+  const proposalTemplate = resolvedBlocks;
   return { header: mergedHeader, dto, projectTitle, input, unpricedCount, proposalTemplate };
 }
 

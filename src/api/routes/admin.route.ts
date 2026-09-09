@@ -48,9 +48,14 @@ adminRoute.post(
 );
 adminRoute.delete("/templates/:id", AdminController.deleteTemplate);
 
-adminRoute.get("/companies/:companyId/proposal-template", AdminController.getProposalTemplate);
-adminRoute.put("/companies/:companyId/proposal-template", AdminController.putProposalTemplate);
-adminRoute.delete("/companies/:companyId/proposal-template", AdminController.deleteProposalTemplate);
+// Template library (template-library PRD): a company keeps several named proposal designs,
+// exactly one default. Import/preview below stay company-scoped — they parse and render
+// blocks without touching storage.
+adminRoute.get("/companies/:companyId/proposal-templates", AdminController.listProposalTemplates);
+adminRoute.post("/companies/:companyId/proposal-templates", AdminController.createProposalTemplate);
+adminRoute.put("/proposal-templates/:id", AdminController.updateProposalTemplate);
+adminRoute.delete("/proposal-templates/:id", AdminController.deleteProposalTemplate);
+adminRoute.put("/proposal-templates/:id/default", AdminController.setDefaultProposalTemplate);
 adminRoute.post(
   "/companies/:companyId/proposal-template/import",
   pricebookUpload.single("file"), // .docx or .pdf; validated inside the importer

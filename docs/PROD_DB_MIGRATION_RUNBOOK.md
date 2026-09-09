@@ -119,6 +119,44 @@ Zero-risk to the app — it connects as `app_user`, not `postgres`.
 | Connection string auth fails with correct password | Password has `: # ? ] *` etc. — URL-encode it (step 4) |
 | Which DB is prod? | NOT the Supabase URLs in local `.env` — prod is the Aurora us-east-1 instance |
 
+## Pending migration: proposal template library — phase4 (2026-09-09)
+
+The single `companies.proposal_template` Json column becomes a per-company library
+(`proposal_templates` table, one default enforced by a partial unique index); existing designs
+migrate to a 'Default' row; `quotes` gains `proposal_template_id` + `template_asked` (the
+chat's template choice and its once-per-quote ask latch). The column stays as a read-fallback
+for one release and is dropped in a later phase.
+
+**Apply (BEFORE the image that reads it deploys — Prisma selects the new quote columns on
+every quote read):**
+
+```bash
+bash docs/sql/apply-phase4.sh
+```
+
+Idempotent: the SQL is `IF NOT EXISTS` / `NOT EXISTS`-guarded throughout, safe to re-run.
+
+**Verify (inside the container, as the app's own connection):**
+
+```bash
+node -e "
+const{PrismaClient}=require('@prisma/client');const p=new PrismaClient();
+(async()=>{
+ const cols=await p.\$queryRawUnsafe(\"select column_name from information_schema.columns where table_name='quotes' and column_name in ('proposal_template_id','template_asked')\");
+ console.log('quotes columns:',cols.length===2?'OK':'MISSING');
+ const t=await p.\$queryRawUnsafe(\"select 1 from information_schema.tables where table_name='proposal_templates'\");
+ console.log('proposal_templates table:',t.length?'OK':'MISSING');
+ const idx=await p.\$queryRawUnsafe(\"select indexname from pg_indexes where tablename='proposal_templates' and indexname='proposal_templates_one_default_per_company'\");
+ console.log('one-default index:',idx.length?'OK':'MISSING');
+ const rows=await p.\$queryRawUnsafe('select count(*)::int as n from proposal_templates');
+ console.log('migrated Default rows:',rows[0].n,'(should equal companies with a non-null proposal_template)');
+ process.exit(0)})();
+"
+```
+
+When applied, retitle this section `## APPLIED <date>: …` immediately — three "Pending" blocks
+at once is how "run the pending SQL" becomes ambiguous.
+
 ## Pending migration: customers + sales tax as entities (2026-09-08)
 
 The entity + `<entity>_qb` architecture. CLARA owns the entity; a sibling `_qb` row holds what

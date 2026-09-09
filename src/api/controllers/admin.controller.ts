@@ -7,9 +7,9 @@ import { parsePricebookFile, IngestError, ParsedRow } from "../../copilot/estima
 import { repriceDrafts, repriceLaborDrafts } from "../../copilot/estimating/reprice";
 import {
   DEFAULT_PROPOSAL_BLOCKS,
-  blocksOrDefault,
   validateProposalBlocks,
 } from "../../copilot/estimating/proposalTemplate";
+import { resolveProposalBlocks } from "../../lib/proposalTemplates";
 import { renderProposalPdf } from "../../copilot/estimating/proposalEstimate";
 import { importProposalDocument } from "../../copilot/estimating/proposalImportClassify";
 import { ProposalImportError } from "../../copilot/estimating/proposalImport";
@@ -689,62 +689,129 @@ export class AdminController {
     };
   }
 
-  /** GET /admin/companies/:companyId/proposal-template — stored blocks, or the default. */
-  static async getProposalTemplate(req: Request, res: Response) {
+  /**
+   * GET /admin/companies/:companyId/proposal-templates — the template library
+   * (template-library PRD). Empty list = the company is on the built-in standard proposal.
+   */
+  static async listProposalTemplates(req: Request, res: Response) {
     const companyId = companyIdOf(req, res);
     if (!companyId) return;
     const company = await prisma.companies.findUnique({
       where: { id: companyId },
-      select: { proposal_template: true },
+      select: { id: true },
     });
     if (!company) return fail(res, 404, "Company not found");
+    const templates = await prisma.proposalTemplate.findMany({
+      where: { companyId },
+      orderBy: [{ isDefault: "desc" }, { name: "asc" }],
+    });
     res.json({
       success: true,
       data: {
-        // `isDefault` lets the UI say "you are on the standard proposal" rather than implying
-        // the company has already customised it.
-        isDefault: company.proposal_template == null,
-        blocks: blocksOrDefault(company.proposal_template),
+        templates,
+        // What renders when no template is chosen on a quote — for the "standard proposal"
+        // empty-state preview in the editor.
+        builtinBlocks: DEFAULT_PROPOSAL_BLOCKS,
       },
     });
   }
 
   /**
-   * PUT /admin/companies/:companyId/proposal-template — save the edited blocks.
-   * Validated here so a broken format can never reach a technician's download; the renderer
-   * also falls back defensively, but a save is the right place to refuse it with a reason.
+   * POST /admin/companies/:companyId/proposal-templates — create a named template.
+   * Blocks validated here so a broken format can never reach a technician's download; the
+   * renderer also falls back defensively, but a save is the right place to refuse with a
+   * reason. The company's first template becomes the default automatically.
    */
-  static async putProposalTemplate(req: Request, res: Response) {
+  static async createProposalTemplate(req: Request, res: Response) {
     const companyId = companyIdOf(req, res);
     if (!companyId) return;
     const company = await prisma.companies.findUnique({ where: { id: companyId } });
     if (!company) return fail(res, 404, "Company not found");
-    const blocks = req.body?.blocks;
+    const name = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 120) : "";
+    if (!name) return fail(res, 400, "A template name is required");
+    const blocks = req.body?.blocks ?? DEFAULT_PROPOSAL_BLOCKS;
     const problems = validateProposalBlocks(blocks);
     if (problems.length > 0)
       return fail(res, 422, `Proposal format is not valid: ${problems.slice(0, 4).join("; ")}`);
-    await prisma.companies.update({
-      where: { id: companyId },
-      data: { proposal_template: blocks as Prisma.InputJsonValue },
+    const existing = await prisma.proposalTemplate.count({ where: { companyId } });
+    const created = await prisma.proposalTemplate.create({
+      data: {
+        companyId,
+        name,
+        blocks: blocks as Prisma.InputJsonValue,
+        isDefault: existing === 0,
+      },
     });
-    logger.info("Proposal format saved", { companyId, blocks: (blocks as unknown[]).length });
-    res.json({ success: true, data: { isDefault: false, blocks } });
+    logger.info("Proposal template created", { companyId, templateId: created.id, name });
+    res.json({ success: true, data: created });
   }
 
-  /** DELETE /admin/companies/:companyId/proposal-template — back to the standard proposal. */
+  /** PUT /admin/proposal-templates/:id — rename and/or save edited blocks. */
+  static async updateProposalTemplate(req: Request, res: Response) {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return fail(res, 400, "Invalid template id");
+    const template = await prisma.proposalTemplate.findUnique({ where: { id } });
+    if (!template) return fail(res, 404, "Template not found");
+    const data: Prisma.ProposalTemplateUpdateInput = {};
+    if (req.body?.name !== undefined) {
+      const name = typeof req.body.name === "string" ? req.body.name.trim().slice(0, 120) : "";
+      if (!name) return fail(res, 400, "A template name is required");
+      data.name = name;
+    }
+    if (req.body?.blocks !== undefined) {
+      const problems = validateProposalBlocks(req.body.blocks);
+      if (problems.length > 0)
+        return fail(res, 422, `Proposal format is not valid: ${problems.slice(0, 4).join("; ")}`);
+      data.blocks = req.body.blocks as Prisma.InputJsonValue;
+    }
+    const updated = await prisma.proposalTemplate.update({ where: { id }, data });
+    logger.info("Proposal template saved", { templateId: id, companyId: template.companyId });
+    res.json({ success: true, data: updated });
+  }
+
+  /**
+   * DELETE /admin/proposal-templates/:id. Deleting the default while other templates exist is
+   * refused — make another one the default first — so the render fallback chain always has an
+   * unambiguous company default to land on. Deleting the last template is fine: the company is
+   * simply back on the built-in standard proposal. Quotes that chose this template fall
+   * through the render chain; nothing breaks.
+   */
   static async deleteProposalTemplate(req: Request, res: Response) {
-    const companyId = companyIdOf(req, res);
-    if (!companyId) return;
-    const company = await prisma.companies.findUnique({ where: { id: companyId } });
-    if (!company) return fail(res, 404, "Company not found");
-    await prisma.companies.update({
-      where: { id: companyId },
-      // DbNull writes a real SQL NULL; JsonNull would store the JSON value `null`,
-      // which reads back as "customised" rather than "on the standard proposal".
-      data: { proposal_template: Prisma.DbNull },
-    });
-    logger.info("Proposal format reset to the standard proposal", { companyId });
-    res.json({ success: true, data: { isDefault: true, blocks: DEFAULT_PROPOSAL_BLOCKS } });
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return fail(res, 400, "Invalid template id");
+    const template = await prisma.proposalTemplate.findUnique({ where: { id } });
+    if (!template) return fail(res, 404, "Template not found");
+    if (template.isDefault) {
+      const others = await prisma.proposalTemplate.count({
+        where: { companyId: template.companyId, id: { not: id } },
+      });
+      if (others > 0)
+        return fail(res, 409, "This is the default template — make another one the default first");
+    }
+    await prisma.proposalTemplate.delete({ where: { id } });
+    logger.info("Proposal template deleted", { templateId: id, companyId: template.companyId });
+    res.json({ success: true });
+  }
+
+  /**
+   * PUT /admin/proposal-templates/:id/default — move the default. Clear-then-set inside a
+   * transaction: the one-default-per-company partial unique index is non-deferrable, so
+   * setting first would fail the very first "make default" (same pattern as sales tax).
+   */
+  static async setDefaultProposalTemplate(req: Request, res: Response) {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return fail(res, 400, "Invalid template id");
+    const template = await prisma.proposalTemplate.findUnique({ where: { id } });
+    if (!template) return fail(res, 404, "Template not found");
+    await prisma.$transaction([
+      prisma.proposalTemplate.updateMany({
+        where: { companyId: template.companyId, isDefault: true },
+        data: { isDefault: false },
+      }),
+      prisma.proposalTemplate.update({ where: { id }, data: { isDefault: true } }),
+    ]);
+    logger.info("Proposal template set as default", { templateId: id, companyId: template.companyId });
+    res.json({ success: true });
   }
 
   /**
@@ -794,7 +861,9 @@ export class AdminController {
       if (problems.length > 0)
         return fail(res, 422, `Cannot preview: ${problems.slice(0, 4).join("; ")}`);
     }
-    const blocks = submitted ?? company.proposal_template;
+    // No blocks in the body → preview what a quote with no chosen template renders today:
+    // the company default template, else the legacy column, else the built-in proposal.
+    const blocks = submitted ?? (await resolveProposalBlocks(companyId, null));
     try {
       // The dispatcher previews what technicians actually get: no stored/edited blocks →
       // the job feature's estimate document; edited blocks → the templated layout.

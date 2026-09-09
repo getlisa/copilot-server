@@ -847,6 +847,12 @@ model Quote {
   templateId        Int?            @map("template_id")
   /// The end-of-materials labor-hours ask fires at most once per quote (labor PRD US2).
   laborAsked        Boolean         @default(false) @map("labor_asked")
+  /// The customer-facing proposal template chosen in chat (template-library). Null = the
+  /// company's default template resolves at render time. Plain column, no FK — a deleted
+  /// template must fall through the render chain (chosen → default → built-in), never block.
+  proposalTemplateId Int?           @map("proposal_template_id")
+  /// The which-proposal-template ask fires at most once per quote (mirrors laborAsked).
+  templateAsked     Boolean         @default(false) @map("template_asked")
   /// QBO Estimate id once posted (companies with a QboConnection). Posted at completion;
   /// re-completing after a reopen UPDATES this same estimate in place (QBO PRD US6).
   qboEstimateId     String?         @map("qbo_estimate_id")
@@ -1001,6 +1007,28 @@ model LaborRate {
 /// registry in copilot/estimating/templates.ts — a custom client template is a new renderer
 /// implemented in code, referenced by a row here. At most one active template per company
 /// (validated at configuration time); no active row = the built-in default invoice.
+/// A named customer-facing proposal design (template-library). Replaces the single
+/// companies.proposal_template column: each company keeps a library of these, exactly one
+/// marked default. `blocks` is the same ordered ProposalBlock[] the column held (see
+/// copilot/estimating/proposalTemplate.ts) — format and renderers unchanged.
+///
+/// One default per company is enforced by the partial unique index
+/// proposal_templates_one_default_per_company (docs/sql/phase4.sql) — Prisma cannot express
+/// a partial unique index, so the schema declares only the columns.
+model ProposalTemplate {
+  id        Int      @id @default(autoincrement())
+  companyId Int      @map("company_id")
+  name      String   @db.VarChar(120)
+  blocks    Json
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([companyId])
+  @@map("proposal_templates")
+  @@schema("public")
+}
+
 model QuoteTemplate {
   id        Int      @id @default(autoincrement())
   companyId Int      @map("company_id")
