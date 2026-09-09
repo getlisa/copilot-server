@@ -751,6 +751,60 @@ model QboConnection {
   @@schema("public")
 }
 
+/// One inbound QuickBooks webhook CloudEvent. Both a dedup ledger and a queryable status trail.
+///
+/// WHY A TABLE AND NOT A QUEUE. collection_agent_backend puts these on SQS with a dedicated worker
+/// container. That is the right shape there and the wrong one here: this service has no queue, no
+/// worker, no cron and one ECS task, so SQS would mean a new queue, a new container, new IAM and
+/// a new deploy path to move work a table already tracks. The drain is an in-process loop that
+/// claims rows with a conditional updateMany gated on the row count — the same pattern
+/// `qbo_connections.sync_started_at` uses, and chosen for the same reason: a `pg_advisory_lock`
+/// is RE-ENTRANT, so two runs sharing a pooled connection both "acquire" it and the first unlock
+/// frees it for both. The claim stays correct if the service ever scales past one task.
+///
+/// `eventId` UNIQUE is the whole dedup guarantee. Intuit redelivers on any non-2xx and repeats
+/// the CloudEvents `id` verbatim, so the insert is what makes a redelivery a no-op.
+model QboWebhookEvent {
+  id BigInt @id @default(autoincrement())
+  /// CloudEvents `id`. THE dedup key — a redelivery repeats it.
+  eventId String @unique @map("event_id")
+  /// `intuitaccountid`. Resolved to companies at drain time, not here: one realm can legitimately
+  /// be connected to more than one company, and the receiver must stay fast.
+  realmId String @map("realm_id")
+  /// Which keyset's verifier token matched — "sandbox" | "production". Nothing in the CloudEvent
+  /// itself says, and one endpoint serves both keysets.
+  keyset String?
+  /// Lowercased entity segment of `type`, or null when it is not one we subscribed to.
+  entity String?
+  /// Operation segment of `type`, kept verbatim. Never validated against an enum: the vocabulary
+  /// is not fully documented, and an unknown operation is treated as "refetch", which is safe.
+  operation String
+  /// `intuitentityid` — the entity's QuickBooks Id.
+  entityId String? @map("entity_id")
+  eventTime DateTime? @map("event_time") @db.Timestamptz(6)
+  /// The untouched CloudEvent, so debugging, replay and audit survive a lossy projection.
+  raw Json
+  /// queued | running | done | skipped | failed
+  status String @default("queued")
+  attempts Int @default(0)
+  lastError String? @map("last_error")
+  /// Set with `claimToken` when a drain pass takes the row, cleared when it settles. A row stuck
+  /// in `running` past the staleness window returns to `queued` — a killed task must not wedge an
+  /// event forever.
+  claimedAt DateTime? @map("claimed_at") @db.Timestamptz(6)
+  /// Identifies the drain pass that owns the row. A count alone cannot say WHICH rows a batch
+  /// claim won when two passes overlap on part of the same id list.
+  claimToken String? @map("claim_token")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, createdAt], map: "qbo_webhook_events_drain_idx")
+  @@index([realmId, createdAt(sort: Desc)], map: "qbo_webhook_events_realm_idx")
+  @@map("qbo_webhook_events")
+  @@schema("public")
+}
+
+
 /// Estimating Agent: one chat = one quote, lifecycle DRAFT -> COMPLETED.
 /// Audit columns (architecture, 2026-09-08): `quotes` and `quote_line_items` are DELIBERATELY
 /// exempt from the created_by/updated_by rule that the customer and sales-tax tables follow.

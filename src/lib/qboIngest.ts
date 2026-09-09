@@ -647,7 +647,46 @@ async function ingestAccounts(conn: QboConnection, companyId: number): Promise<n
  */
 const SYNC_CLAIM_STALE_MS = 10 * 60 * 1000;
 
+/** The independent mirrors a sync refreshes. Each is attempted even when another fails. */
+export type QboSyncStage = "taxPrefs" | "customers" | "items" | "salesTax" | "accounts";
+
+export const ALL_QBO_SYNC_STAGES: readonly QboSyncStage[] = [
+  "taxPrefs",
+  "customers",
+  "items",
+  "salesTax",
+  "accounts",
+];
+
+/**
+ * Another sync already holds this company's claim. Its own class so a caller that can wait — the
+ * webhook drain — can RE-QUEUE rather than treat it as a failure: the running sync will finish,
+ * but it may have started before the change that triggered us, so skipping would lose the update.
+ */
+export class QboSyncBusyError extends UserFacingError {}
+
+/**
+ * Refresh every mirror and record the run as complete. This is the admin's "Sync" button.
+ */
 export async function syncQboReferenceData(companyId: number): Promise<IngestCounts> {
+  return runQboSync(companyId, ALL_QBO_SYNC_STAGES, { markComplete: true });
+}
+
+/**
+ * The sync itself, with a selectable stage list.
+ *
+ * `markComplete` is the load-bearing option, and it is false for webhooks. `lastSyncAt` means
+ * "last COMPLETE sync" (T-45) — a partial, webhook-driven refresh of one mirror must not advance
+ * it, or the Connections card claims a freshness the other mirrors cannot back. For the same
+ * reason a webhook failure does not write `lastSyncError`: those two fields describe the manual
+ * sync, and a webhook's outcome belongs on its own `qbo_webhook_events` row, which is the
+ * queryable trail that table exists for.
+ */
+export async function runQboSync(
+  companyId: number,
+  stages: readonly QboSyncStage[],
+  { markComplete = true }: { markComplete?: boolean } = {}
+): Promise<IngestCounts> {
   const conn = await qboConnectionFor(companyId);
   if (!qboConnected(conn))
     throw new UserFacingError("QuickBooks is not connected for this company");
@@ -673,7 +712,7 @@ export async function syncQboReferenceData(companyId: number): Promise<IngestCou
     data: { syncStartedAt: new Date() },
   });
   if (claim.count === 0)
-    throw new UserFacingError("A QuickBooks sync is already running for this company");
+    throw new QboSyncBusyError("A QuickBooks sync is already running for this company");
 
   // Each stage is attempted even when an earlier one failed: the stages are independent mirrors,
   // upserts are idempotent, and refusing to ingest tax because items timed out helps nobody.
@@ -689,38 +728,47 @@ export async function syncQboReferenceData(companyId: number): Promise<IngestCou
     }
   };
 
+  const wanted = (name: QboSyncStage) => stages.includes(name);
+
   try {
-    await stage("taxPrefs", async () => {
-      await ingestTaxPrefs(conn, companyId);
-    });
-    await stage("customers", async () => {
-      counts.customers = await ingestCustomers(conn, companyId, realmId);
-    });
-    await stage("items", async () => {
-      counts.items = await ingestItems(conn, companyId);
-    });
-    await stage("salesTax", async () => {
-      Object.assign(counts, await ingestSalesTax(conn, companyId, realmId));
-    });
-    await stage("accounts", async () => {
-      counts.accounts = await ingestAccounts(conn, companyId);
-    });
+    if (wanted("taxPrefs"))
+      await stage("taxPrefs", async () => {
+        await ingestTaxPrefs(conn, companyId);
+      });
+    if (wanted("customers"))
+      await stage("customers", async () => {
+        counts.customers = await ingestCustomers(conn, companyId, realmId);
+      });
+    if (wanted("items"))
+      await stage("items", async () => {
+        counts.items = await ingestItems(conn, companyId);
+      });
+    if (wanted("salesTax"))
+      await stage("salesTax", async () => {
+        Object.assign(counts, await ingestSalesTax(conn, companyId, realmId));
+      });
+    if (wanted("accounts"))
+      await stage("accounts", async () => {
+        counts.accounts = await ingestAccounts(conn, companyId);
+      });
 
     if (failures.length) {
       // Record the failure and keep whatever did land. `lastSyncAt` is deliberately NOT advanced:
       // "last synced" must mean "last complete sync", or it is a claim the mirrors cannot back.
-      await prisma.qboConnection.update({
-        where: { companyId },
-        data: { lastSyncError: failures.join("; ").slice(0, 1000) },
-      });
+      if (markComplete)
+        await prisma.qboConnection.update({
+          where: { companyId },
+          data: { lastSyncError: failures.join("; ").slice(0, 1000) },
+        });
       throw new Error(`QuickBooks sync incomplete — ${failures.join("; ")}`);
     }
 
-    await prisma.qboConnection.update({
-      where: { companyId },
-      data: { lastSyncAt: new Date(), lastSyncError: null },
-    });
-    logger.info("QBO reference data synced", { companyId, realmId, ...counts });
+    if (markComplete)
+      await prisma.qboConnection.update({
+        where: { companyId },
+        data: { lastSyncAt: new Date(), lastSyncError: null },
+      });
+    logger.info("QBO reference data synced", { companyId, realmId, stages, ...counts });
     return counts;
   } finally {
     // Released whatever happened — a failed sync must not block the retry it is asking for.
