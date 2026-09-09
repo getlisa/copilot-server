@@ -1649,6 +1649,51 @@ export async function upsertSalesTax(
   });
 }
 
+/**
+ * Turn a rate off, or back on — including a rate that came from QuickBooks.
+ *
+ * Deliberately NOT routed through `upsertSalesTax`, whose first act is to refuse every write
+ * while a connected system owns the company's tax. That guard is right for what it was written
+ * for: a name or a percentage typed here would be saved and then never applied, so refusing with
+ * the reason beats accepting it silently. It is wrong for this, and it made the ingested rates —
+ * the only ones a connected company has — the exact set that could not be switched off.
+ *
+ * Availability is a CLARA-side decision about what this company is offered, not a claim about
+ * what QuickBooks holds. The ingest already assumes an admin can make it: it refreshes a rate's
+ * name on rename but deliberately never forces `is_active` back to true, precisely so a rate
+ * someone switched off is not silently switched on by the next sync. Until now nothing could
+ * write the flag it was protecting.
+ *
+ * Nothing is sent to QuickBooks. The rate still exists there, and a later sync still sees it.
+ *
+ * Deactivating the default clears the default in the same transaction. Left set, the settings
+ * screen would keep showing it as the default while every new estimate started untaxed — and
+ * `defaultSalesTax` filters on `is_active`, so the two would disagree with nothing to explain it.
+ */
+export async function setSalesTaxActive(
+  companyId: number,
+  id: number,
+  isActive: boolean,
+  actingUserId: bigint | null
+) {
+  return prisma.$transaction(async (tx) => {
+    const owned = await tx.salesTax.findFirst({
+      where: { id, companyId, isDeleted: false },
+      select: { id: true, isDefault: true },
+    });
+    if (!owned) throw new UserFacingError("That rate does not belong to this company");
+    if (!isActive && owned.isDefault)
+      await tx.salesTax.updateMany({
+        where: { companyId, isDefault: true },
+        data: { isDefault: false },
+      });
+    return tx.salesTax.update({
+      where: { id },
+      data: { isActive, ...(isActive ? {} : { isDefault: false }), updatedBy: actingUserId },
+    });
+  });
+}
+
 /** Move (or clear) the default rate. Null means new estimates start untaxed. */
 export async function setDefaultSalesTax(companyId: number, id: number | null) {
   const { external } = await taxSourceIsExternal(companyId);

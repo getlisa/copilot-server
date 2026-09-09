@@ -25,6 +25,7 @@ import {
   qboIncomeAccounts,
   listSalesTax,
   setDefaultSalesTax,
+  setSalesTaxActive,
   upsertSalesTax,
   parseRatePercent,
   qboSyncedAt,
@@ -503,6 +504,57 @@ export class CompanyController {
       // is what tells it apart.
       const status = /comes from QuickBooks/i.test(message) ? 409 : 400;
       res.status(status).json({ success: false, error: { status, message } });
+    }
+  }
+
+  /**
+   * PUT /api/v1/companies/sales-tax/:id/active — offer this rate, or stop offering it.
+   * Body: { isActive }
+   *
+   * Separate from `saveSalesTax` because that endpoint refuses every write while a connected
+   * system owns the company's tax — which left the ingested rates, the only ones such a company
+   * has, unable to be switched off. Availability is a CLARA-side decision about what this company
+   * is offered; nothing is written to QuickBooks, and a later sync still sees the rate.
+   *
+   * Returns the whole settings payload, like the default endpoint, because deactivating can also
+   * clear the default and the screen has to reflect both.
+   */
+  static async setSalesTaxActiveState(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id))
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "id must be an integer" } });
+    // Strict, not truthy: a body of `{ isActive: "false" }` must not switch a rate ON.
+    if (typeof req.body?.isActive !== "boolean")
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "isActive must be true or false" } });
+    const isActive = req.body.isActive;
+    try {
+      await setSalesTaxActive(
+        companyId,
+        id,
+        isActive,
+        req.user?.userId == null ? null : BigInt(req.user.userId)
+      );
+      logger.info("Sales tax availability changed", { companyId, id, isActive });
+      const { taxSource, rates } = await listSalesTax(companyId);
+      res.json({
+        success: true,
+        data: {
+          taxSource,
+          rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+        },
+      });
+    } catch (e) {
+      const message = clientSafeMessage(e, "Could not change the rate");
+      res.status(400).json({ success: false, error: { status: 400, message } });
     }
   }
 

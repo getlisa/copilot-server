@@ -65,6 +65,15 @@ companyRoute.get(
 companyRoute.get("/sales-tax", authMiddleware, CompanyController.listSalesTaxRates);
 // Writing a rate is admin-only: it is applied to money on customer-facing estimates.
 companyRoute.post("/sales-tax", authMiddleware, requireAdmin, CompanyController.saveSalesTax);
+// Availability only, and admin-only like every other tax write. Its own route rather than a
+// field on the POST above, because that one refuses all writes while QuickBooks owns the
+// company's tax — which is exactly when this has to work.
+companyRoute.put(
+  "/sales-tax/:id/active",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.setSalesTaxActiveState
+);
 companyRoute.put(
   "/sales-tax/default",
   authMiddleware,
