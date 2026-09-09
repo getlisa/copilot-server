@@ -154,6 +154,22 @@ async function loadOwnedQuote(quoteId: string, userId: bigint, companyId: number
 }
 
 /**
+ * Mark a quote as touched, so the list can order by "last worked on".
+ *
+ * `Quote.updatedAt` is `@updatedAt`, which fires on writes to the QUOTE row — and editing an
+ * estimate mostly means writing to `quote_line_items`, a different model Prisma does not
+ * propagate from. So without this, correcting a price left the quote's timestamp at whenever its
+ * customer or markup last changed, and the estimate someone just finished editing sat wherever it
+ * had been in the list.
+ *
+ * An empty `data` is deliberate: `@updatedAt` supplies the value, so there is nothing to pass and
+ * nothing that can disagree with how Prisma stamps every other update.
+ */
+async function touchQuote(quoteId: string) {
+  await prisma.quote.update({ where: { id: quoteId }, data: {} });
+}
+
+/**
  * Catalog rows for the codes a quote actually uses, so each line can carry its product link,
  * brand and rating. Only HOME_DEPOT rows matter to the DTO, but fetching by code keeps this a
  * single indexed query regardless of source.
@@ -397,7 +413,10 @@ export class QuoteController {
     const quotes = await prisma.quote.findMany({
       where: { userId: user.userId, status },
       include: { lineItems: true },
-      orderBy: { createdAt: "desc" },
+      // Most recently worked on first, not most recently created: the list is a work queue, and
+      // the estimate someone was just editing is the one they are coming back to. Line-item
+      // writes call touchQuote so an edit actually moves the row.
+      orderBy: { updatedAt: "desc" },
     });
     res.json({ success: true, data: await Promise.all(quotes.map((q) => quoteDtoWithProducts(q))) });
   }
@@ -579,6 +598,10 @@ export class QuoteController {
       },
     });
 
+    // An agent turn is work on the estimate: it adds, re-prices and removes line items, and it
+    // writes the quote row only when a customer detail was stated. Without this a conversation
+    // that reshaped the whole estimate would not move it up the list.
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({
       success: true,
@@ -827,6 +850,7 @@ export class QuoteController {
         qboItemName: req.body?.qboItemName == null ? null : String(req.body.qboItemName),
       },
     });
+    await touchQuote(quote.id);
     res.status(201).json({
       success: true,
       // Marked up like every other read, or the new line would show a bare cost price until
@@ -874,6 +898,7 @@ export class QuoteController {
         });
       }
       await prisma.quoteLineItem.delete({ where: { id: item.id } }); // drop placeholder
+      await touchQuote(quote.id);
       const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
       return res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
     }
@@ -932,6 +957,7 @@ export class QuoteController {
     }
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
     await prisma.quoteLineItem.update({ where: { id: item.id }, data });
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
@@ -946,6 +972,7 @@ export class QuoteController {
     const item = quote.lineItems.find((i) => i.id === req.params.itemId);
     if (!item) return fail(res, 404, "Line item not found");
     await prisma.quoteLineItem.delete({ where: { id: item.id } });
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
@@ -1015,6 +1042,7 @@ export class QuoteController {
         ...(packed.rounded ? { quantity: packed.quantity } : {}),
       },
     });
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
