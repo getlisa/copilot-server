@@ -813,6 +813,18 @@ export class QuoteController {
         sourcePricebookId: match?.sourcePricebookId ?? null,
         manuallyEdited: manualPrice,
         sortOrder: nextSort,
+        /**
+         * The QuickBooks item this line bills against, chosen in the add form. Null — the default
+         * — means resolve it at post time by name, matching or creating.
+         *
+         * Accepted here as well as on a PATCH because the choice belongs to the moment the line is
+         * described: the technician typing "permit fee" knows which item in the books it bills to,
+         * and making them add the line first and then reopen it to say so is a second trip for
+         * something they already knew. Stringified rather than trusted, and the pair moves
+         * together — an id with no name leaves the row unable to show what it picked.
+         */
+        qboItemId: req.body?.qboItemId == null ? null : String(req.body.qboItemId),
+        qboItemName: req.body?.qboItemName == null ? null : String(req.body.qboItemName),
       },
     });
     res.status(201).json({
