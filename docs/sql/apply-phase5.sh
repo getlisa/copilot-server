@@ -98,4 +98,4 @@ EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
               --query "tasks[0].containers[?name=='$CONTAINER'].exitCode | [0]" --output text)
 echo "----- exit code: $EXIT_CODE -----"
 [ "$EXIT_CODE" = "0" ] || exit 1
-echo "Phase 5 applied. A customer name is now unique per parent, matching QuickBooks."
+echo "Phase 5 applied. company_configs.tax_enabled exists; Enable tax is now a stored fact."
