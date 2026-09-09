@@ -777,10 +777,19 @@ export class QuoteController {
         totalPrice: basePrice(totalPrice),
         pricebookCode: match?.code ?? null,
         isLabor,
-        // Labor is not taxed by default — the estimate PDF's "Taxed" column has always shown
-        // labor unticked, so a blanket `default(true)` would have made the document contradict
-        // the total printed beneath it. The per-line toggle overrides either way.
-        taxable: !isLabor,
+        /**
+         * Labor is not taxed by default — the estimate PDF's "Taxed" column has always shown
+         * labor unticked, so a blanket `default(true)` would have made the document contradict
+         * the total printed beneath it.
+         *
+         * The caller may override it at creation. It used to be derivable only from `isLabor`,
+         * so the add form on the estimate screen had no way to offer the choice and a taxable
+         * permit fee or an untaxed material had to be added and then corrected — which reads on
+         * screen as the line briefly carrying the wrong tax, and reaches the totals as a value
+         * that was wrong for one round trip. Only an explicit boolean counts: anything else,
+         * including a missing field, keeps the `!isLabor` default rather than being coerced.
+         */
+        taxable: typeof req.body?.taxable === "boolean" ? req.body.taxable : !isLabor,
         sourcePricebookId: match?.sourcePricebookId ?? null,
         manuallyEdited: manualPrice,
         sortOrder: nextSort,
