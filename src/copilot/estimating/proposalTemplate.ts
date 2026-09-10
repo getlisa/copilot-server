@@ -205,9 +205,9 @@ export function validateProposalBlocks(value: unknown): string[] {
           const where = `${at} part ${j + 1}`;
           if (!["paragraph", "bullets", "numbered"].includes(p?.format))
             problems.push(`${where}: unknown format "${p?.format}"`);
-          else if (p.format === "paragraph") {
-            if (!p.text?.trim() && !p.label?.trim()) problems.push(`${where}: empty paragraph`);
-          } else if (!Array.isArray(p.items) || p.items.length === 0)
+          // An empty paragraph is legal on purpose: it renders as a blank line, which is how
+          // an admin puts vertical space in their document (was rejected until 2026-09-10).
+          else if (p.format !== "paragraph" && (!Array.isArray(p.items) || p.items.length === 0))
             problems.push(`${where}: list has no items`);
         });
     }

@@ -664,6 +664,9 @@ export async function renderTemplatedProposalPdf(
         if (part.format === "paragraph") {
           const text = fillTokens(part.text ?? "", tokens);
           if (text) write(text, style);
+          // A deliberately empty, label-less paragraph is the admin's blank line — give it
+          // the height it has in Word instead of collapsing to nothing (2026-09-10).
+          else if (!part.label) doc.moveDown(1);
         } else {
           (part.items ?? []).forEach((raw, i) => {
             const marker = part.format === "numbered" ? `${i + 1}.` : "•";
