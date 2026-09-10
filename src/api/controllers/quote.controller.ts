@@ -651,7 +651,12 @@ export class QuoteController {
     // An agent turn is work on the estimate: it adds, re-prices and removes line items, and it
     // writes the quote row only when a customer detail was stated. Without this a conversation
     // that reshaped the whole estimate would not move it up the list.
-    await touchQuote(quote.id);
+    //
+    // A discarded turn is the exception. `touchQuote` is an empty-data update whose whole
+    // purpose is to fire `@updatedAt`, so calling it on a turn that deliberately wrote nothing
+    // would stamp a frozen quote and float it up the "last worked on" list — the one write this
+    // guard is supposed to have prevented.
+    if (!turn.discarded) await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({
       success: true,
@@ -1115,7 +1120,20 @@ export class QuoteController {
       ...(resolved.unit ? { unit: resolved.unit } : {}),
       ...(packed.rounded ? { quantity: packed.quantity } : {}),
     });
-    if (!wrote) return fail(res, 409, "Quote is Completed and frozen");
+    if (!wrote) {
+      // A refused write means the row stopped matching, and completion is only one reason —
+      // a concurrent DELETE of the line item during the same 13-32s search is the other. Both
+      // are rare, so paying one extra read here to answer accurately costs nothing on the path
+      // that matters, and "Completed and frozen" is actively misleading for a Draft whose line
+      // the technician simply removed while it was still searching.
+      const stillDraft = await prisma.quote.findFirst({
+        where: { id: quote.id, companyId: user.companyId, status: "DRAFT" },
+        select: { id: true },
+      });
+      return stillDraft
+        ? fail(res, 404, "Line item not found")
+        : fail(res, 409, "Quote is Completed and frozen");
+    }
     await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
@@ -1213,16 +1231,39 @@ export class QuoteController {
       }
     }
 
-    const updated = await prisma.quote.update({
-      where: { id: quote.id },
-      data: {
-        status: "COMPLETED",
-        completedAt: new Date(),
-        chosenOptionGroup: chosenOption,
-        ...(lateTax ? { salesTaxId: lateTax.id, taxRatePercent: lateTax.ratePercent } : {}),
-      },
-      include: { lineItems: true },
-    });
+    /**
+     * The flip only fires on a quote that is still a DRAFT, and the row count is what says
+     * whether this request is the one that completed it.
+     *
+     * Unconditional, this was reachable twice for one estimate. Everything above — the QuickBooks
+     * connection lookup, the TaxCode read, sometimes a full listSalesTax — is network and DB
+     * latency during which a second Complete can arrive: a double-tap, two tabs, or the ordinary
+     * Complete → Reopen → Complete sequence. Each one posted its own estimate to QuickBooks while
+     * `qboEstimateId` was still null, so neither saw the other's id and the customer's job ended
+     * up with two estimates that no later sync reconciles.
+     */
+    const [flipped, reread] = await prisma.$transaction([
+      prisma.quote.updateMany({
+        where: { id: quote.id, status: "DRAFT" },
+        data: {
+          status: "COMPLETED",
+          completedAt: new Date(),
+          chosenOptionGroup: chosenOption,
+          ...(lateTax ? { salesTaxId: lateTax.id, taxRatePercent: lateTax.ratePercent } : {}),
+        },
+      }),
+      // Read the line items back inside the SAME transaction as the flip. A conditional
+      // updateMany cannot return the row the way `update({ include })` did, and reading after
+      // the transaction would reopen the very gap this is closing — a write landing between
+      // the flip and the read would reach our database but not the payload posted to the CRM.
+      prisma.quote.findFirst({
+        where: { id: quote.id, userId: user.userId, companyId: user.companyId },
+        include: { lineItems: true },
+      }),
+    ]);
+    if (flipped.count === 0)
+      return fail(res, 409, "This estimate has already been marked Completed");
+    const updated = reread!;
     QuoteController.postToQboInBackground(updated);
     QuoteController.postToZtInBackground(updated);
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });

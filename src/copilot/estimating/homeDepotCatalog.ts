@@ -702,17 +702,6 @@ async function resolveThrottled(
  * its own (flags are derived, so nothing else has to be updated).
  */
 /**
- * Last resort when the catalog API cannot answer: look the part up on homedepot.com by web
- * search and write that price onto the line, marked as an estimate.
- *
- * Deliberately narrow. It only runs after every catalog attempt is spent, it only touches lines
- * that are still unpriced and untouched by a technician, and what it writes stays flagged
- * (`priceEstimated`) so the DTO can show it differently, completion can block on it, and the
- * next turn's sweep can replace it with a real catalog price. No pricebook row is created: these
- * prices must never become the company's remembered price for a part, and must never be matched
- * against by a later line.
- */
-/**
  * Price one line from an automatic lookup: Draft-only, and never over a technician's own
  * figure. Both conditions live in the UPDATE's WHERE clause — see draftWrite.ts for why a
  * status check made before a 30-to-90-second resolve cannot be trusted by the write after it.
@@ -725,6 +714,17 @@ async function priceDraftLine(
   return updateDraftLineItem(lineItemId, companyId, data, { manuallyEdited: false });
 }
 
+/**
+ * Last resort when the catalog API cannot answer: look the part up on homedepot.com by web
+ * search and write that price onto the line, marked as an estimate.
+ *
+ * Deliberately narrow. It only runs after every catalog attempt is spent, it only touches lines
+ * that are still unpriced and untouched by a technician, and what it writes stays flagged
+ * (`priceEstimated`) so the DTO can show it differently, completion can block on it, and the
+ * next turn's sweep can replace it with a real catalog price. No pricebook row is created: these
+ * prices must never become the company's remembered price for a part, and must never be matched
+ * against by a later line.
+ */
 async function webSearchFallback(
   searchTerm: string,
   companyId: number,
@@ -755,8 +755,7 @@ async function webSearchFallback(
       found.unit ?? row.unit,
       found.packQuantity
     );
-    if (
-      await priceDraftLine(row.id, companyId, {
+    const wroteEstimate = await priceDraftLine(row.id, companyId, {
         unitPrice: found.unitPrice,
         unit: found.unit ?? row.unit,
         // The sentinel IS the marker; there is no column to store a link in, so the DTO derives
@@ -765,9 +764,16 @@ async function webSearchFallback(
         // always resolves.
         pricebookCode: ESTIMATED_PRICE_CODE,
         ...(packed.rounded ? { quantity: packed.quantity } : {}),
-      })
-    )
-      written++;
+    });
+    if (!wroteEstimate) {
+      logger.info("Web-search estimate discarded: the line is no longer eligible", {
+        lineItemId: row.id,
+        searchTerm,
+        unitPrice: found.unitPrice,
+      });
+      continue;
+    }
+    written++;
   }
   if (written === 0) return;
 
@@ -895,7 +901,18 @@ export function enqueueResolve(
           sourcePricebookId: null, // fallback-sourced, not from a named book
           ...(packed.rounded ? { quantity: packed.quantity } : {}),
         });
-        if (!wrote) continue;
+        if (!wrote) {
+          // Say what was thrown away, not just that something was. The sibling success log
+          // below carries code and price; a refusal that logged neither left no way to tell
+          // which part went unpriced or what it would have cost.
+          logger.info("Catalog backfill discarded: the line is no longer eligible", {
+            lineItemId: row.id,
+            searchTerm,
+            code: resolved.code,
+            unitPrice: resolved.unitPrice,
+          });
+          continue;
+        }
         count++;
         if (packed.rounded)
           logger.info("Backfill rounded quantity up to a whole pack", {
