@@ -19,12 +19,23 @@ import {
   QBO_ENVIRONMENT,
   QBO_APP_RETURN_URL,
 } from "../../lib/qbo";
+import { isZtConfigured, ztConnected, ztConnectionFor, connectZt, disconnectZt } from "../../lib/zt";
+import {
+  syncZtData,
+  listZtJobs,
+  ztSyncProgressFor,
+  ZtSyncRunningError,
+  ZT_SYNC_CLAIM_STALE_MS,
+} from "../../lib/ztIngest";
 import {
   syncQboReferenceData,
+  QboSyncBusyError,
   searchCustomers,
   qboIncomeAccounts,
   listSalesTax,
   setDefaultSalesTax,
+  setSalesTaxActive,
+  taxEnabledFor,
   upsertSalesTax,
   parseRatePercent,
   qboSyncedAt,
@@ -164,7 +175,10 @@ export class CompanyController {
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const conn = await qboConnectionFor(companyId);
+    const [conn, ztConn] = await Promise.all([
+      qboConnectionFor(companyId),
+      ztConnectionFor(companyId),
+    ]);
     res.json({
       success: true,
       data: {
@@ -190,10 +204,132 @@ export class CompanyController {
           /** When reference data was last pulled; null means never. Drives the Sync button. */
           referenceSyncedAt: (await qboSyncedAt(companyId))?.toISOString() ?? null,
         },
-        // ponytail: ZenTrades is a display-only row in the UI for now; add a real entry
-        // here when that integration exists.
+        zt: {
+          /** Server has ZT_TOKEN_KEY set — connect 503s before touching ZenTrades without it. */
+          configured: isZtConfigured(),
+          connected: ztConnected(ztConn),
+          ztCompanyId: ztConn?.ztCompanyId ?? null,
+          ztCompanyName: ztConn?.ztCompanyName ?? null,
+          /** Last COMPLETE sync (every stage succeeded); drives the Sync button's caption. */
+          lastSyncAt: ztConn?.lastSyncAt?.toISOString() ?? null,
+          lastSyncError: ztConn?.lastSyncError ?? null,
+          /**
+           * The one-sync-at-a-time claim is held (and not yet stale). The card pairs this
+           * with the progress read to tell a LIVE sync (lock + progress line → watch it,
+           * disable the button) from an ORPHANED lock (no line → button stays usable).
+           */
+          syncRunning:
+            !!ztConn?.syncStartedAt &&
+            Date.now() - ztConn.syncStartedAt.getTime() < ZT_SYNC_CLAIM_STALE_MS,
+        },
       },
     });
+  }
+
+  /**
+   * POST /api/v1/companies/connections/zt/connect — connect ZenTrades with a login.
+   * Admin-only, scoped to the caller's company. The credentials are validated by actually
+   * logging in to ZenTrades before anything is stored; a rejected login stores nothing.
+   */
+  static async connectZtForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    if (!isZtConfigured())
+      return res.status(503).json({
+        success: false,
+        error: { status: 503, message: "ZenTrades is not configured on this server" },
+      });
+    const username = typeof req.body?.username === "string" ? req.body.username.trim() : "";
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    if (!username || !password)
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "A ZenTrades username and password are required" },
+      });
+    try {
+      const conn = await connectZt(companyId, username, password);
+      res.json({ success: true, data: { connected: true, ztCompanyId: conn.ztCompanyId } });
+    } catch (err) {
+      // The message is already user-facing prose from ztLogin; no credentials are logged.
+      logger.warn("ZenTrades connect failed", {
+        companyId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return res.status(502).json({
+        success: false,
+        error: {
+          status: 502,
+          message: err instanceof Error ? err.message : "ZenTrades login failed",
+        },
+      });
+    }
+  }
+
+  /**
+   * POST /api/v1/companies/connections/zt/sync — pull jobs, deficiencies and the price
+   * catalog. Admin-only: a write, and it polls another company's API. One run at a time per
+   * company (row claim inside syncZtData); stage failures come back in `errors` and are also
+   * recorded on the connection.
+   */
+  static async syncZtForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    try {
+      const result = await syncZtData(companyId);
+      res.json({ success: true, data: result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "ZenTrades sync failed";
+      // A held claim is a conflict the UI can act on (watch the running sync), not a gateway
+      // failure — the status code is how the client tells the two apart.
+      const status = err instanceof ZtSyncRunningError ? 409 : 502;
+      return res.status(status).json({ success: false, error: { status, message } });
+    }
+  }
+
+  /**
+   * GET /api/v1/companies/connections/zt/jobs?q= — the Estimates-tab job picker's rows.
+   * Deliberately ungated beyond auth (any role): technicians start estimates from it, the same
+   * reasoning as the QBO item list staying open.
+   */
+  static async listZtJobsForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const q = typeof req.query.q === "string" ? req.query.q : undefined;
+    res.json({ success: true, data: await listZtJobs(companyId, q) });
+  }
+
+  /**
+   * GET /api/v1/companies/connections/zt/sync/progress — what the running sync is doing,
+   * for the Connections card's live caption. Null when no sync is running.
+   */
+  static async ztSyncProgress(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    res.json({ success: true, data: { progress: ztSyncProgressFor(companyId) } });
+  }
+
+  /** DELETE /api/v1/companies/connections/zt — self-serve disconnect, same shape as QBO. */
+  static async disconnectZtForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    await disconnectZt(companyId);
+    logger.info("ZenTrades disconnected", { companyId });
+    res.json({ success: true });
   }
 
   /**
@@ -311,6 +447,18 @@ export class CompanyController {
       const counts = await syncQboReferenceData(companyId);
       res.json({ success: true, data: { counts, syncedAt: new Date().toISOString() } });
     } catch (e) {
+      // "Already running" is not "QuickBooks is unreachable", and the difference became
+      // user-visible when the webhook drain started competing for this same claim every ten
+      // seconds instead of only when another admin clicked. Flattening it into the 502 below told
+      // people their accounting system was down when it was simply busy. 409 matches what this
+      // endpoint already returns for its other not-ready state.
+      if (e instanceof QboSyncBusyError) {
+        logger.info("QBO reference sync skipped: already running", { companyId });
+        return res.status(409).json({
+          success: false,
+          error: { status: 409, message: e.message },
+        });
+      }
       logger.error("QBO reference sync failed", {
         companyId,
         error: e instanceof Error ? e.message : String(e),
@@ -430,12 +578,18 @@ export class CompanyController {
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const { taxSource, rates } = await listSalesTax(companyId);
+    const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
     res.json({
       success: true,
       data: {
         /** "quickbooks" | "crm" | "manual" — where this company's tax comes from. */
         taxSource,
+        /** Whether tax applies at all. False means new estimates start with no rate. */
+        taxEnabled,
+        /** True when a connection forces it on, so the screen locks the switch and says why. */
+        taxEnforced,
+        /** "quickbooks" | "crm" | null — which one, so the reason names the right system. */
+        taxEnforcedBy,
         rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
       },
     });
@@ -507,6 +661,119 @@ export class CompanyController {
   }
 
   /**
+   * PUT /api/v1/companies/tax-enabled — whether sales tax applies to this company at all.
+   * Body: { taxEnabled }
+   *
+   * Refused while QuickBooks OR a CRM is connected, in both directions. Either connection forces
+   * it on, for the same underlying reason: the company invoices through a system that charges tax,
+   * so an estimate declaring none would disagree with what that system bills for the same job.
+   * Accepting the write and then ignoring it — which is what returning the computed value would
+   * amount to — is the failure mode this whole area has been bitten by before, so it 409s with the
+   * reason, and `enforcedBy` decides which system the message names.
+   */
+  static async setTaxEnabled(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    // Strict, not truthy: a body of { taxEnabled: "false" } must not switch tax ON.
+    if (typeof req.body?.taxEnabled !== "boolean")
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "taxEnabled must be true or false" },
+      });
+    const { enforced, enforcedBy } = await taxEnabledFor(companyId);
+    if (enforced) {
+      /**
+       * Name the integration that is actually forcing it. The message used to say QuickBooks
+       * unconditionally, which was wrong for a CRM company in both halves: not QuickBooks, and
+       * their rates do NOT come from there — nothing ingests tax from a CRM, so they type their
+       * own. Being told to go and change something in a system that does not hold it is worse
+       * than a generic refusal.
+       */
+      const message =
+        enforcedBy === "quickbooks"
+          ? "Sales tax stays on while QuickBooks is connected — your rates and tax codes come from there."
+          : "Sales tax stays on while your CRM is connected, because jobs are invoiced through it. You can still choose which rate applies below.";
+      logger.info("Tax enabled change refused", { companyId, enforcedBy, requested: req.body.taxEnabled });
+      return res.status(409).json({ success: false, error: { status: 409, message } });
+    }
+    await prisma.company_configs.upsert({
+      where: { company_id: companyId },
+      // checklists is constrained to an ARRAY of {label, description} — [] is the empty state.
+      create: { company_id: companyId, checklists: [], tax_enabled: req.body.taxEnabled },
+      update: { tax_enabled: req.body.taxEnabled },
+    });
+    logger.info("Tax enabled changed", { companyId, taxEnabled: req.body.taxEnabled });
+    const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
+    res.json({
+      success: true,
+      data: {
+        taxSource,
+        taxEnabled,
+        taxEnforced,
+        taxEnforcedBy,
+        rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+      },
+    });
+  }
+
+  /**
+   * PUT /api/v1/companies/sales-tax/:id/active — offer this rate, or stop offering it.
+   * Body: { isActive }
+   *
+   * Separate from `saveSalesTax` because that endpoint refuses every write while a connected
+   * system owns the company's tax — which left the ingested rates, the only ones such a company
+   * has, unable to be switched off. Availability is a CLARA-side decision about what this company
+   * is offered; nothing is written to QuickBooks, and a later sync still sees the rate.
+   *
+   * Returns the whole settings payload, like the default endpoint, because deactivating can also
+   * clear the default and the screen has to reflect both.
+   */
+  static async setSalesTaxActiveState(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id))
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "id must be an integer" } });
+    // Strict, not truthy: a body of `{ isActive: "false" }` must not switch a rate ON.
+    if (typeof req.body?.isActive !== "boolean")
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "isActive must be true or false" } });
+    const isActive = req.body.isActive;
+    try {
+      await setSalesTaxActive(
+        companyId,
+        id,
+        isActive,
+        req.user?.userId == null ? null : BigInt(req.user.userId)
+      );
+      logger.info("Sales tax availability changed", { companyId, id, isActive });
+      const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
+      res.json({
+        success: true,
+        data: {
+          taxSource,
+          taxEnabled,
+          taxEnforced,
+          taxEnforcedBy,
+          rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
+        },
+      });
+    } catch (e) {
+      const message = clientSafeMessage(e, "Could not change the rate");
+      res.status(400).json({ success: false, error: { status: 400, message } });
+    }
+  }
+
+  /**
    * PUT /api/v1/companies/sales-tax/default — choose the rate new estimates start with.
    * Body: { id } — or { id: null } to have new estimates start untaxed.
    */
@@ -524,11 +791,14 @@ export class CompanyController {
         .json({ success: false, error: { status: 400, message: "id must be an integer or null" } });
     try {
       await setDefaultSalesTax(companyId, id);
-      const { taxSource, rates } = await listSalesTax(companyId);
+      const { taxSource, taxEnabled, taxEnforced, taxEnforcedBy, rates } = await listSalesTax(companyId);
       res.json({
         success: true,
         data: {
           taxSource,
+          taxEnabled,
+          taxEnforced,
+          taxEnforcedBy,
           rates: rates.map((r) => ({ ...r, ratePercent: Number(r.ratePercent) })),
         },
       });

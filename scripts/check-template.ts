@@ -95,6 +95,10 @@ async function main() {
     qboEstimateId: null,
     qboSyncedAt: null,
     qboSyncError: null,
+    ztTicketId: null,
+    ztEstimateId: null,
+    ztSyncedAt: null,
+    ztSyncError: null,
     blockingFlagCount: 0,
   };
   const branding: InvoiceBranding = {

@@ -5,6 +5,8 @@ import { ESTIMATED_PRICE_CODE } from "./quoteDto";
 import { packAwareQuantity, unitsCompatible } from "./packMath";
 import { enqueueResolve } from "./homeDepotCatalog";
 import { loadCompanyPricing } from "./companyPricing";
+import { listProposalTemplateChoices } from "../../lib/proposalTemplates";
+import { ztChatContext } from "../../lib/ztIngest";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
 
 /**
@@ -108,6 +110,16 @@ interface AgentOutput {
    * US2). Persisted onto the quote so the ask fires at most once, ever.
    */
   askedLaborHours: boolean;
+  /**
+   * True on the turn where the agent makes THE which-proposal-template ask
+   * (template-library). Same once-per-quote latch mechanism as askedLaborHours.
+   */
+  askedProposalTemplate: boolean;
+  /**
+   * The template the technician named this turn (answering the ask or unprompted) — one of
+   * the context's listed PROPOSAL TEMPLATES, verbatim. Null on turns where none was named.
+   */
+  proposalTemplateName: string | null;
 }
 
 const nullable = (t: string) => ({ type: [t, "null"] });
@@ -123,6 +135,13 @@ const nullable = (t: string) => ({ type: [t, "null"] });
  */
 const CUSTOMER_PROMPT = `
 CUSTOMER DETAILS. The quote carries the customer's name, address, and phone number — all optional, free text. When the technician states one ("this is for John Miller", "the address is 42 Oak Street", "her number is 555-0142"), set customerName / customerAddress / customerPhone to exactly what they said, each independently — one stated field never requires the others, and never ask for the missing ones. Leave a field null on every turn where it is not stated; null never clears a stored value, and a newly stated value replaces the previous one (corrections work the same way). Never invent, guess, or complete a customer detail — no inferring a name from context, no formatting or "fixing" a phone number or address. These are quote-level fields, never line items, so never emit operations for them. Do not confuse the CUSTOMER's details with product, supplier, or company names.`;
+
+/**
+ * Appended to the system prompt: the once-per-quote proposal-template ask (template-library).
+ * Mirrors the labor ask: the context says whether it was made; the latch persists on the quote.
+ */
+const TEMPLATE_PROMPT = `
+PROPOSAL TEMPLATE. The context may list this client's PROPOSAL TEMPLATES — the customer-facing document designs — and whether THE TEMPLATE ASK was already made. When TWO OR MORE are listed and the ask was not yet made, ask early (your first or second reply): "Which proposal template should this estimate use?" — put it in the questions array with the listed template names as the options, and set askedProposalTemplate true on that turn. NEVER repeat the ask. When the technician names one — answering the ask or unprompted, at any point — set proposalTemplateName to EXACTLY that name as listed; leave it null on every other turn. This is a document-format choice only: never emit operations for it, and it never blocks estimating — if they ignore or decline it, move on (the company's default design applies). When the context lists no templates, never mention templates at all.`;
 
 const MARKUP_PROMPT = `
 MATERIALS MARKUP. The quote carries one markup percentage that applies to every material line. When the technician states one ("mark it up 20 percent", "add a 15% markup", "make the markup 10"), set markupPercent to that number — 20 for 20%, not 0.2 — and leave it null on every turn where they do not. Setting it replaces any previous value; it is one number for the whole quote, never per line, so never emit line-item operations to apply a markup yourself. A stated 0 clears it. Never invent or suggest a percentage they did not say, and never treat a negative number as a markup: if they ask for a discount or a negative markup, set markupPercent null and say in your reply that markup cannot go below 0%. A price the technician states for a line is always their own cost or rate, never a marked-up figure, so a markup being set changes nothing about how you record it.`;
@@ -205,6 +224,8 @@ export const TURN_JSON_SCHEMA = {
         },
       },
       askedLaborHours: { type: "boolean" },
+      askedProposalTemplate: { type: "boolean" },
+      proposalTemplateName: nullable("string"),
     },
     required: [
       "operations",
@@ -216,6 +237,8 @@ export const TURN_JSON_SCHEMA = {
       "isFollowUpQuestion",
       "questions",
       "askedLaborHours",
+      "askedProposalTemplate",
+      "proposalTemplateName",
     ],
   },
 };
@@ -301,7 +324,12 @@ function buildTurnContext(
   /** Pricebook rows keyed by code, so priced lines can expose product link/brand/rating. */
   catalog?: Map<string, PricebookItem>,
   laborRates: LaborRateLite[] = [],
-  laborAsked = false
+  laborAsked = false,
+  /** Names offered in the template ask; empty = 0-1 templates, never ask (template-library). */
+  proposalTemplates: string[] = [],
+  templateAsked = false,
+  /** ZenTrades job context for a ZT-seeded quote (ztChatContext); null otherwise. */
+  ztContext: string | null = null
 ): string {
   // Product provenance is included so the agent can answer "what's the link / brand / price"
   // from context instead of guessing or web-searching. Keyed off the line's pricebookCode.
@@ -343,7 +371,7 @@ function buildTurnContext(
       : laborRates
           .map((r) => `- ${r.name} — $${r.hourlyRate}/hr`)
           .join("\n");
-  return `CURRENT LINE ITEMS:
+  return `${ztContext ? `${ztContext}\n\n` : ""}CURRENT LINE ITEMS:
 ${itemLines}
 
 KNOWLEDGE BASE ENTRIES (problem → material):
@@ -353,7 +381,16 @@ CONFIGURED LABOR TYPES for this client:
 ${laborLines}
 
 THE LABOR ASK was already made for this quote: ${laborAsked ? "YES — never ask again" : "no"}.
+${
+  proposalTemplates.length >= 2
+    ? `
+PROPOSAL TEMPLATES for this client:
+${proposalTemplates.map((n) => `- ${n}`).join("\n")}
 
+THE TEMPLATE ASK was already made for this quote: ${templateAsked ? "YES — never ask again" : "no"}.
+`
+    : ""
+}
 TECHNICIAN SAID:
 ${utterance}`;
 }
@@ -373,7 +410,7 @@ export async function runEstimatingTurn(opts: {
   /** Presigned URLs of photos attached to this turn (vision input). */
   imageUrls?: string[];
 }): Promise<AgentTurnResult> {
-  const [items, kbEntries, pricing, laborRates, quoteRow] = await Promise.all([
+  const [items, kbEntries, pricing, laborRates, quoteRow, proposalTemplates] = await Promise.all([
     prisma.quoteLineItem.findMany({
       where: { quoteId: opts.quoteId },
       orderBy: { sortOrder: "asc" },
@@ -381,8 +418,17 @@ export async function runEstimatingTurn(opts: {
     prisma.kbEntry.findMany({ where: { companyId: opts.companyId } }),
     loadCompanyPricing(opts.companyId),
     prisma.laborRate.findMany({ where: { companyId: opts.companyId } }),
-    prisma.quote.findUnique({ where: { id: opts.quoteId }, select: { laborAsked: true } }),
+    prisma.quote.findUnique({
+      where: { id: opts.quoteId },
+      select: { laborAsked: true, templateAsked: true, ztTicketId: true },
+    }),
+    listProposalTemplateChoices(opts.companyId),
   ]);
+  // ZT-seeded quotes carry their job's description + open deficiencies into every turn, so the
+  // agent's first reply reflects the actual scope instead of asking what the job is.
+  const ztContext = quoteRow?.ztTicketId
+    ? await ztChatContext(opts.companyId, quoteRow.ztTicketId)
+    : null;
   const laborRatesLite: LaborRateLite[] = laborRates.map((r) => ({
     id: r.id,
     name: r.name,
@@ -421,10 +467,14 @@ export async function runEstimatingTurn(opts: {
     opts.utterance,
     catalog,
     laborRatesLite,
-    quoteRow?.laborAsked === true
+    quoteRow?.laborAsked === true,
+    // The ask needs a real choice: 0-1 templates → no list in context, the rule never fires.
+    proposalTemplates.length >= 2 ? proposalTemplates.map((t) => t.name) : [],
+    quoteRow?.templateAsked === true,
+    ztContext
   );
   const { raw } = await callStructured({
-    system: SYSTEM_PROMPT + MARKUP_PROMPT + CUSTOMER_PROMPT,
+    system: SYSTEM_PROMPT + MARKUP_PROMPT + CUSTOMER_PROMPT + TEMPLATE_PROMPT,
     userContent: opts.imageUrls?.length
       ? [
           { type: "text", text: turnContext },
@@ -823,6 +873,28 @@ export async function runEstimatingTurn(opts: {
       where: { id: opts.quoteId },
       data: { laborAsked: true },
     });
+  }
+
+  // The template ask latches the same way (template-library). A named template is matched
+  // against the company's real list — the model echoes a name, never an id, so a hallucinated
+  // or misspelled name simply writes nothing and the default design applies.
+  if (output.askedProposalTemplate === true && quoteRow?.templateAsked !== true) {
+    await prisma.quote.update({
+      where: { id: opts.quoteId },
+      data: { templateAsked: true },
+    });
+  }
+  const namedTemplate = output.proposalTemplateName;
+  if (typeof namedTemplate === "string" && namedTemplate.trim()) {
+    const match = proposalTemplates.find(
+      (t) => t.name.toLowerCase() === namedTemplate.trim().toLowerCase()
+    );
+    if (match) {
+      await prisma.quote.update({
+        where: { id: opts.quoteId },
+        data: { proposalTemplateId: match.id, templateAsked: true },
+      });
+    }
   }
 
   return {

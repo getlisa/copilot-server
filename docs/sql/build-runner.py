@@ -58,12 +58,23 @@ RUNNER = """// The app's URL points at app_user, which cannot ALTER a postgres-o
 // master credentials through the ENVIRONMENT, before @prisma/client is required — the env path is
 // what Prisma reads by default and has no constructor API to get wrong across versions. This runs
 // blind against production, where finding out costs a full ECS round-trip.
+//
+// GUARDED, and the guard is load-bearing. A migration that only CREATEs its own objects needs no
+// master credentials and runs on the service's own task definition, which carries neither
+// variable. Unguarded, `encodeURIComponent(undefined)` yields the STRING "undefined", so the
+// runner authenticated as a user of that name and the DDL never applied — with the failure
+// arriving as an opaque auth error a full ECS round-trip later. Absent credentials now mean
+// "stay as app_user", which is a real answer rather than a corrupted one.
 {
   const u = new URL(process.env.DIRECT_URL || process.env.DATABASE_URL);
-  u.username = encodeURIComponent(process.env.PGMASTER_USER);
-  u.password = encodeURIComponent(process.env.PGMASTER_PASSWORD);
-  process.env.DATABASE_URL = process.env.DIRECT_URL = u.toString();
-  console.log('connecting as', process.env.PGMASTER_USER, 'to', u.host + u.pathname);
+  if (process.env.PGMASTER_USER && process.env.PGMASTER_PASSWORD) {
+    u.username = encodeURIComponent(process.env.PGMASTER_USER);
+    u.password = encodeURIComponent(process.env.PGMASTER_PASSWORD);
+    process.env.DATABASE_URL = process.env.DIRECT_URL = u.toString();
+    console.log('connecting as', process.env.PGMASTER_USER, 'to', u.host + u.pathname);
+  } else {
+    console.log('connecting as the app user (no master credentials supplied) to', u.host + u.pathname);
+  }
 }
 const { PrismaClient } = require('@prisma/client');
 const S = __STMTS__;

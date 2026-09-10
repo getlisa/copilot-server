@@ -100,13 +100,18 @@ function numberingFormats(numberingXml: string): Map<string, "bullets" | "number
  *
  * ponytail: regex over the paragraph XML rather than a full OOXML parse. It reads what the
  * block model can express — alignment, bold, italic, font, size, colour, list kind — and
- * ignores what the model cannot render in both formats anyway (tables, text boxes, headers,
- * footers, styles inherited from styles.xml). A document whose formatting lives entirely in
- * named styles will import with default formatting; the editor is where that gets fixed.
+ * ignores what the model cannot render in both formats anyway (tables, text boxes, footers,
+ * styles inherited from styles.xml). A document whose formatting lives entirely in named
+ * styles will import with default formatting; the editor is where that gets fixed.
+ *
+ * Page HEADERS are read, ahead of the body: a real proposal's letterhead (logo + document
+ * title) usually lives in word/header*.xml, and skipping it dropped the title from every
+ * import (user report 2026-09-10). Footers stay ignored — the renderer draws its own.
  */
 export function extractDocxParagraphs(buffer: Buffer): ExtractResult {
   let documentXml: string;
   let numberingXml = "";
+  let headerXmls: string[] = [];
   try {
     const zip = new PizZip(buffer);
     const entry = zip.file("word/document.xml");
@@ -114,6 +119,7 @@ export function extractDocxParagraphs(buffer: Buffer): ExtractResult {
     documentXml = entry.asText();
     // Optional: absent in a document with no lists.
     numberingXml = zip.file("word/numbering.xml")?.asText() ?? "";
+    headerXmls = zip.file(/word\/header\d*\.xml$/).map((f) => f.asText());
   } catch (err) {
     throw new ProposalImportError(
       `Not a readable .docx file: ${err instanceof Error ? err.message : String(err)}`
@@ -122,9 +128,21 @@ export function extractDocxParagraphs(buffer: Buffer): ExtractResult {
 
   const listFormats = numberingFormats(numberingXml);
   const paragraphs: ExtractedParagraph[] = [];
-  for (const para of documentXml.match(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g) ?? []) {
+  // Word keeps separate headers for default/first/even pages that usually repeat the same
+  // letterhead — identical header paragraphs are read once.
+  const seenHeaderTexts = new Set<string>();
+  const sources = [
+    ...headerXmls.map((xml) => ({ xml, fromHeader: true })),
+    { xml: documentXml, fromHeader: false },
+  ];
+  for (const { xml, fromHeader } of sources)
+  for (const para of xml.match(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g) ?? []) {
     const text = xmlText(para).trim();
     if (!text) continue;
+    if (fromHeader) {
+      if (seenHeaderTexts.has(text)) continue;
+      seenHeaderTexts.add(text);
+    }
 
     const props = para.match(/<w:pPr>[\s\S]*?<\/w:pPr>/)?.[0] ?? "";
     // Formatting is taken from the FIRST run: the model styles a whole block, so a paragraph
@@ -294,6 +312,8 @@ export async function extractPdfParagraphs(buffer: Buffer): Promise<ExtractResul
 export interface ClassifiedBlock {
   heading: string | null;
   dynamic: string | null;
+  /** The document showed this section as a boxed/shaded info table rather than plain lines. */
+  boxed?: boolean | null;
   paragraphIndexes: number[];
 }
 
@@ -326,6 +346,7 @@ export function assembleImportedBlocks(
         visible: true,
         ...(heading ? { heading } : {}),
         dynamic: b.dynamic as DynamicBlockType,
+        ...(b.boxed && b.dynamic === "projectBlock" ? { boxed: true } : {}),
       });
       continue;
     }

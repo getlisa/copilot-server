@@ -43,10 +43,12 @@ const CLASSIFY_SCHEMA = {
           properties: {
             heading: { type: ["string", "null"] },
             dynamic: { type: ["string", "null"], enum: [...DYNAMIC_BLOCK_TYPES, null] },
+            /** projectBlock: the document shows this as boxed info tables, not plain lines. */
+            boxed: { type: ["boolean", "null"] },
             /** Indexes into the numbered paragraph list, for a static block. */
             paragraphIndexes: { type: "array", items: { type: "integer" } },
           },
-          required: ["heading", "dynamic", "paragraphIndexes"],
+          required: ["heading", "dynamic", "boxed", "paragraphIndexes"],
         },
       },
     },
@@ -64,7 +66,7 @@ DYNAMIC = a place where THIS QUOTE's data is filled in. Do not keep the sample t
 - logo — the company logo image
 - contactLine — the company's phone/email contact line under the letterhead
 (The document's TITLE — "Bid Proposal", "Estimate", "Quotation" — is STATIC text: keep the company's own title wording as a static block.)
-- projectBlock — project name, customer name/address/phone, contractor, date lines
+- projectBlock — project name, customer name/address/phone, contractor, date lines. Set boxed=true ONLY when the document presents this as boxed/shaded information tables (e.g. a "PROPOSAL INFORMATION" / "CLIENT & SITE INFORMATION" box pair with a colored header bar and label/value rows); leave boxed=false/null when it is plain text lines.
 - scopeOfWork — the itemised description of the work to be performed on this job
 - lineItems — a table of line items with rates/quantities/amounts per row
 - costSummary — prose prices, totals, subtotals, cost-in-words (not a per-line table)

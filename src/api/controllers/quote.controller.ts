@@ -35,6 +35,10 @@ import {
   listSalesTax,
 } from "../../lib/qboIngest";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
+import { resolveProposalBlocks } from "../../lib/proposalTemplates";
+import { seedQuoteFromZtTicket, ztWelcomeMessage } from "../../lib/ztIngest";
+import { ztConnectionFor, ztConnected } from "../../lib/zt";
+import { syncQuoteToZt } from "../../lib/ztEstimate";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
 import { EstimateTurn } from "../../copilot/estimate/estimateService";
@@ -154,6 +158,22 @@ async function loadOwnedQuote(quoteId: string, userId: bigint, companyId: number
 }
 
 /**
+ * Mark a quote as touched, so the list can order by "last worked on".
+ *
+ * `Quote.updatedAt` is `@updatedAt`, which fires on writes to the QUOTE row — and editing an
+ * estimate mostly means writing to `quote_line_items`, a different model Prisma does not
+ * propagate from. So without this, correcting a price left the quote's timestamp at whenever its
+ * customer or markup last changed, and the estimate someone just finished editing sat wherever it
+ * had been in the list.
+ *
+ * An empty `data` is deliberate: `@updatedAt` supplies the value, so there is nothing to pass and
+ * nothing that can disagree with how Prisma stamps every other update.
+ */
+async function touchQuote(quoteId: string) {
+  await prisma.quote.update({ where: { id: quoteId }, data: {} });
+}
+
+/**
  * Catalog rows for the codes a quote actually uses, so each line can carry its product link,
  * brand and rating. Only HOME_DEPOT rows matter to the DTO, but fetching by code keeps this a
  * single indexed query regardless of source.
@@ -252,11 +272,15 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     ...(quote.customerAddress ? { billingAddress: quote.customerAddress } : {}),
     ...(quote.customerPhone ? { customerPhone: quote.customerPhone } : {}),
   };
-  // The company's own proposal format (null → the default estimate document) and their terms.
-  const company = await prisma.companies.findUnique({
-    where: { id: quote.companyId },
-    select: { proposal_template: true, footer_terms: true },
-  });
+  // The proposal format this quote renders with — chosen template → company default →
+  // legacy column → built-in (template-library) — and the company's terms.
+  const [company, resolvedBlocks] = await Promise.all([
+    prisma.companies.findUnique({
+      where: { id: quote.companyId },
+      select: { footer_terms: true },
+    }),
+    resolveProposalBlocks(quote.companyId, quote.proposalTemplateId),
+  ]);
   const input: ProposalInput = {
     header: mergedHeader,
     projectTitle,
@@ -303,7 +327,7 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     unpricedCount,
     photos,
   };
-  const proposalTemplate = company?.proposal_template ?? null;
+  const proposalTemplate = resolvedBlocks;
   return { header: mergedHeader, dto, projectTitle, input, unpricedCount, proposalTemplate };
 }
 
@@ -374,6 +398,20 @@ export class QuoteController {
     // force when the estimate was created, frozen against later changes to the company's default.
     // Null when nothing is configured — and null is not 0%, it means no tax is declared at all.
     const tax = await defaultSalesTax(user.companyId);
+    // A quote started from a ZenTrades job (Estimates-tab picker) inherits the ticket's
+    // customer (adopted by ZenTrades id) and its service address's tax zone as the snapshot —
+    // the zone-specific rate beats the company default. An unknown ticket id is refused: a
+    // quote silently created unlinked would post nowhere at completion.
+    const ztTicketId =
+      typeof req.body?.ztTicketId === "string" && req.body.ztTicketId.trim()
+        ? req.body.ztTicketId.trim()
+        : null;
+    const ztSeed = ztTicketId ? await seedQuoteFromZtTicket(user.companyId, ztTicketId) : null;
+    if (ztTicketId && !ztSeed)
+      return res.status(404).json({
+        success: false,
+        error: { status: 404, message: "That ZenTrades job is not synced for this company" },
+      });
     const quote = await prisma.quote.create({
       data: {
         conversationId: conversation.id,
@@ -381,11 +419,38 @@ export class QuoteController {
         companyId: user.companyId,
         templateId: activeTemplate?.id ?? null,
         markupPercent: config?.default_markup_percent ?? 0,
-        salesTaxId: tax?.id ?? null,
-        taxRatePercent: tax?.ratePercent ?? null,
+        salesTaxId: ztSeed?.salesTaxId ?? tax?.id ?? null,
+        taxRatePercent: ztSeed?.taxRatePercent ?? tax?.ratePercent ?? null,
+        ...(ztSeed
+          ? {
+              ztTicketId,
+              customerId: ztSeed.customerId,
+              customerName: ztSeed.customerName,
+              customerAddress: ztSeed.customerAddress,
+              customerPhone: ztSeed.customerPhone,
+            }
+          : {}),
       },
       include: { lineItems: true },
     });
+    // A ZT-seeded chat opens already talking: the job + open deficiencies as the first AI
+    // message, so the technician reacts instead of dictating. Best-effort — a failed welcome
+    // must not fail the creation.
+    if (ztSeed && ztTicketId) {
+      const welcome = await ztWelcomeMessage(user.companyId, ztTicketId).catch(() => null);
+      if (welcome) {
+        await prisma.message
+          .create({
+            data: { conversationId: conversation.id, senderType: "AI", content: welcome },
+          })
+          .catch((err) =>
+            logger.warn("ZT welcome message failed", {
+              quoteId: quote.id,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          );
+      }
+    }
     res.status(201).json({ success: true, data: await quoteDtoWithProducts(quote) });
   }
 
@@ -397,7 +462,10 @@ export class QuoteController {
     const quotes = await prisma.quote.findMany({
       where: { userId: user.userId, status },
       include: { lineItems: true },
-      orderBy: { createdAt: "desc" },
+      // Most recently worked on first, not most recently created: the list is a work queue, and
+      // the estimate someone was just editing is the one they are coming back to. Line-item
+      // writes call touchQuote so an edit actually moves the row.
+      orderBy: { updatedAt: "desc" },
     });
     res.json({ success: true, data: await Promise.all(quotes.map((q) => quoteDtoWithProducts(q))) });
   }
@@ -579,6 +647,10 @@ export class QuoteController {
       },
     });
 
+    // An agent turn is work on the estimate: it adds, re-prices and removes line items, and it
+    // writes the quote row only when a customer detail was stated. Without this a conversation
+    // that reshaped the whole estimate would not move it up the list.
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({
       success: true,
@@ -659,20 +731,69 @@ export class QuoteController {
         // the customer is pushed to QuickBooks — into another company's books.
         const known = await prisma.customer.findFirst({
           where: { id: customerId, companyId: user.companyId },
-          select: { name: true },
+          select: { name: true, address: true, phone: true },
         });
         if (!known) return fail(res, 400, "That customer does not belong to this company");
         data.customerId = customerId;
-        // The EFFECTIVE name, not the stored one: a PATCH carrying customerName and customerId
-        // together would otherwise have the typed name silently replaced, behind a comment
-        // promising the opposite.
-        if (!((data.customerName as string | null | undefined) ?? quote.customerName))
-          data.customerName = known.name;
+        /**
+         * The quote's own name / address / phone are the Bill To block that the proposal PDF, the
+         * .docx and the uploaded .docx templates print. They are NOT read through the customer
+         * relation — `proposalPdf`, `proposalDocx`, `proposalTemplateRender` and `quoteDocx` all
+         * take them off the quote — so a linked customer whose details are never copied across
+         * leaves those documents with a Bill To line that is blank or half-filled.
+         *
+         * That used to be masked by a free-text Bill To editor on the estimate screen. The screen
+         * now sets the customer only through the picker, so this is the only path those fields
+         * have, and filling them here is what keeps the printed document whole.
+         *
+         * **Filled only where empty, each field independently.** A value already on the quote was
+         * either spoken to the agent or typed by someone who was standing at the property, and
+         * whichever it was, it beats whatever the books happen to hold — the same rule the
+         * ingestion path follows when QuickBooks data meets a technician's correction. The
+         * EFFECTIVE value is what counts, so a PATCH carrying `customerName` and `customerId`
+         * together keeps the name it sent rather than having it silently replaced.
+         */
+        /**
+         * A RE-LINK is a correction, so it moves the fields the NEW customer can actually supply.
+         *
+         * Only-where-empty is right for a first link, where an empty field is simply unfilled. It
+         * is wrong when the estimate is re-pointed at a different customer: link A, then realise
+         * it was the wrong Acme and pick B, and the quote would keep A's name, address and phone
+         * while `customerId` said B. The proposal PDF, the .docx, the template render and the
+         * greeting on the proposal email all read the Bill To block off the QUOTE, so every one of
+         * them would address A while QuickBooks billed B — and the customer row renders those same
+         * fields, so the re-pick looked like it had silently done nothing.
+         *
+         * But a re-link must NOT blank a field the new customer has nothing for. An earlier
+         * version moved all three as a set including blanks, on the reasoning that the values in
+         * the way were this branch's own copy of customer A. That premise is false in a reachable
+         * state: the first-link rule fills only what is EMPTY, so a quote whose address was spoken
+         * to the agent ("the address is 42 Oak Street") still holds the technician's own words
+         * after linking A — and re-linking to a B with no address on file would destroy them, with
+         * no field left on the estimate screen to type them back into.
+         *
+         * So: the new customer's values win where it has them, and where it has none the existing
+         * value stands. The residue is a visible one — the row shows B's name beside an address
+         * that may still be A's — which is the right way round, because a wrong address on screen
+         * can be corrected and deleted data cannot. An explicit value in this PATCH beats both.
+         */
+        const relink = quote.customerId != null && quote.customerId !== customerId;
+        const takes = <K extends "customerName" | "customerAddress" | "customerPhone">(key: K) =>
+          relink
+            ? data[key] === undefined
+            : !((data[key] as string | null | undefined) ?? quote[key]);
+        if (takes("customerName")) data.customerName = known.name;
+        // `known.x != null` on a re-link is the whole guard against erasing spoken details.
+        if (takes("customerAddress") && (!relink || known.address != null))
+          data.customerAddress = known.address ?? null;
+        if (takes("customerPhone") && (!relink || known.phone != null))
+          data.customerPhone = known.phone ?? null;
       }
     }
 
     /**
-     * Change which sales-tax rate this estimate uses — the inline pencil on the totals block.
+     * Change which sales-tax rate this estimate uses — the sales-tax row on the Estimate tab,
+     * which opens the rate sheet (EstimateTaxSheet).
      *
      * Only a DRAFT reaches here (COMPLETED is refused above), which is the whole reason this is
      * allowed to move at all: the snapshot exists so a SENT estimate cannot be re-priced, not to
@@ -759,15 +880,37 @@ export class QuoteController {
         totalPrice: basePrice(totalPrice),
         pricebookCode: match?.code ?? null,
         isLabor,
-        // Labor is not taxed by default — the estimate PDF's "Taxed" column has always shown
-        // labor unticked, so a blanket `default(true)` would have made the document contradict
-        // the total printed beneath it. The per-line toggle overrides either way.
-        taxable: !isLabor,
+        /**
+         * Labor is not taxed by default — the estimate PDF's "Taxed" column has always shown
+         * labor unticked, so a blanket `default(true)` would have made the document contradict
+         * the total printed beneath it.
+         *
+         * The caller may override it at creation. It used to be derivable only from `isLabor`,
+         * so the add form on the estimate screen had no way to offer the choice and a taxable
+         * permit fee or an untaxed material had to be added and then corrected — which reads on
+         * screen as the line briefly carrying the wrong tax, and reaches the totals as a value
+         * that was wrong for one round trip. Only an explicit boolean counts: anything else,
+         * including a missing field, keeps the `!isLabor` default rather than being coerced.
+         */
+        taxable: typeof req.body?.taxable === "boolean" ? req.body.taxable : !isLabor,
         sourcePricebookId: match?.sourcePricebookId ?? null,
         manuallyEdited: manualPrice,
         sortOrder: nextSort,
+        /**
+         * The QuickBooks item this line bills against, chosen in the add form. Null — the default
+         * — means resolve it at post time by name, matching or creating.
+         *
+         * Accepted here as well as on a PATCH because the choice belongs to the moment the line is
+         * described: the technician typing "permit fee" knows which item in the books it bills to,
+         * and making them add the line first and then reopen it to say so is a second trip for
+         * something they already knew. Stringified rather than trusted, and the pair moves
+         * together — an id with no name leaves the row unable to show what it picked.
+         */
+        qboItemId: req.body?.qboItemId == null ? null : String(req.body.qboItemId),
+        qboItemName: req.body?.qboItemName == null ? null : String(req.body.qboItemName),
       },
     });
+    await touchQuote(quote.id);
     res.status(201).json({
       success: true,
       // Marked up like every other read, or the new line would show a bare cost price until
@@ -815,6 +958,7 @@ export class QuoteController {
         });
       }
       await prisma.quoteLineItem.delete({ where: { id: item.id } }); // drop placeholder
+      await touchQuote(quote.id);
       const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
       return res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
     }
@@ -873,6 +1017,7 @@ export class QuoteController {
     }
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
     await prisma.quoteLineItem.update({ where: { id: item.id }, data });
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
@@ -887,6 +1032,7 @@ export class QuoteController {
     const item = quote.lineItems.find((i) => i.id === req.params.itemId);
     if (!item) return fail(res, 404, "Line item not found");
     await prisma.quoteLineItem.delete({ where: { id: item.id } });
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
@@ -956,6 +1102,7 @@ export class QuoteController {
         ...(packed.rounded ? { quantity: packed.quantity } : {}),
       },
     });
+    await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
   }
@@ -1063,6 +1210,7 @@ export class QuoteController {
       include: { lineItems: true },
     });
     QuoteController.postToQboInBackground(updated);
+    QuoteController.postToZtInBackground(updated);
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });
   }
 
@@ -1134,6 +1282,98 @@ export class QuoteController {
           })
         );
     });
+  }
+
+  /**
+   * Fire-and-forget ZenTrades post/update after completion — the sibling of the QBO post at
+   * the same call site, same rules: completion never fails because of an integration, the
+   * outcome lands on the quote (zt_synced_at / zt_sync_error), POST /:quoteId/zt is the retry.
+   */
+  private static postToZtInBackground(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
+    void (async () => {
+      if (!quote.ztTicketId) return;
+      const conn = await ztConnectionFor(quote.companyId);
+      if (!ztConnected(conn)) return;
+      const dto = await quoteDtoWithProducts(quote);
+      // The proposal PDF travels with the estimate (ZenTrades confirmed attachments).
+      // Best-effort: a render failure posts the estimate without it rather than not at all.
+      let pdf: { fileName: string; base64: string } | null = null;
+      try {
+        const { input, proposalTemplate } = await buildProposalParts(quote);
+        const buffer = await renderProposalPdf(input, proposalTemplate);
+        pdf = { fileName: `proposal-${quote.id.slice(0, 8)}.pdf`, base64: buffer.toString("base64") };
+      } catch (e) {
+        logger.warn("ZT post: proposal PDF render failed; posting without attachment", {
+          quoteId: quote.id,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+      const result = await syncQuoteToZt(conn, quote, dto, pdf);
+      await prisma.quote.update({
+        where: { id: quote.id },
+        data: {
+          ztEstimateId: result.ztEstimateId,
+          ztBillingMetaDataId: result.ztBillingMetaDataId,
+          ztSyncedAt: new Date(),
+          ztSyncError: null,
+        },
+      });
+    })().catch(async (e) => {
+      const message = e instanceof Error ? e.message : String(e);
+      logger.error("ZenTrades estimate sync failed", { quoteId: quote.id, error: message });
+      await prisma.quote
+        .update({ where: { id: quote.id }, data: { ztSyncError: message.slice(0, 500) } })
+        .catch((err) =>
+          logger.error("Could not record the ZT sync failure on the quote", {
+            quoteId: quote.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        );
+    });
+  }
+
+  /**
+   * POST /api/v1/quotes/:quoteId/zt — retry a failed ZenTrades post, or push an older
+   * completed estimate. Completed quotes only, mirroring the QBO retry.
+   */
+  static async postQuoteToZt(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    if (quote.status !== "COMPLETED") return fail(res, 409, "Only a completed quote can be sent");
+    if (!quote.ztTicketId) return fail(res, 409, "This quote is not linked to a ZenTrades job");
+    const conn = await ztConnectionFor(user.companyId);
+    if (!ztConnected(conn)) return fail(res, 409, "ZenTrades is not connected");
+    try {
+      const dto = await quoteDtoWithProducts(quote);
+      let pdf: { fileName: string; base64: string } | null = null;
+      try {
+        const { input, proposalTemplate } = await buildProposalParts(quote);
+        const buffer = await renderProposalPdf(input, proposalTemplate);
+        pdf = { fileName: `proposal-${quote.id.slice(0, 8)}.pdf`, base64: buffer.toString("base64") };
+      } catch {
+        /* post without the attachment */
+      }
+      const result = await syncQuoteToZt(conn, quote, dto, pdf);
+      const updated = await prisma.quote.update({
+        where: { id: quote.id },
+        data: {
+          ztEstimateId: result.ztEstimateId,
+          ztBillingMetaDataId: result.ztBillingMetaDataId,
+          ztSyncedAt: new Date(),
+          ztSyncError: null,
+        },
+        include: { lineItems: true },
+      });
+      res.json({ success: true, data: await quoteDtoWithProducts(updated) });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      await prisma.quote
+        .update({ where: { id: quote.id }, data: { ztSyncError: message.slice(0, 500) } })
+        .catch(() => undefined);
+      return fail(res, 502, message);
+    }
   }
 
   /**

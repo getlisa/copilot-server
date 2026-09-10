@@ -1,0 +1,41 @@
+-- Phase 5 — "Enable tax": one company-level switch.
+--
+-- WHAT THIS IS FOR. Whether sales tax applies to a company's estimates at all was not a stored
+-- fact. It was inferred from whether a default rate happened to be set, which conflates two
+-- different things: a company that does not charge sales tax, and a company that does but has not
+-- yet said which rate. The first is a decision, the second is an unfinished setup, and a screen
+-- that cannot tell them apart cannot report either honestly.
+--
+-- DEFAULT FALSE for a NEW company, deliberately: most companies do not charge sales tax, and a
+-- rate that starts applying itself the moment someone configures one is a surprise measured in
+-- money.
+--
+-- Existing companies must NOT change behaviour, so phase5b.sql backfills tax_enabled = true for
+-- every company that already has an active default rate. Run both, in order. Without the
+-- backfill, a company holding a MANUAL default rate and NO QuickBooks or CRM connection silently
+-- starts producing untaxed estimates the moment the image deploys — and the switch that turns it
+-- back on ships from the frontend, so there is a window with no control anywhere to fix it.
+--
+-- A company connected to QuickBooks OR a CRM is unaffected regardless of the stored value:
+-- taxEnabledFor() forces it on, because that company invoices through a system that charges tax
+-- and an estimate declaring none would disagree with what that system bills.
+--
+-- Estimates that already exist are untouched either way: the rate is a snapshot on the quote, and
+-- nothing here reads or writes quotes.
+--
+-- ORDER: THIS RUNS BEFORE THE IMAGE THAT USES IT. Not "safe to add after" — Prisma SELECTs every
+-- scalar column its generated client knows about, so the moment the new image deploys it asks for
+-- company_configs.tax_enabled. That is not confined to one screen: taxEnabledFor() is read by
+-- quote CREATION and by completion's tax gap-fill, as well as by listSalesTax behind the estimate
+-- tax sheet and the settings card. Unapplied, the new image cannot create or complete an
+-- estimate. Deploy the DDL first, then the image.
+--
+-- ROLLING BACK: drop the column. Nothing else references it, no data is derived from it, and the
+-- previous image never selects it.
+--     ALTER TABLE public.company_configs DROP COLUMN tax_enabled;
+
+ALTER TABLE public.company_configs
+  ADD COLUMN IF NOT EXISTS tax_enabled BOOLEAN NOT NULL DEFAULT false;
+
+-- Verify AS app_user, not as the migration role: ownership and grants are the thing that differs,
+-- and a column the migration role can see is not proof the service can.

@@ -81,6 +81,19 @@ model company_configs {
   /// (QBO PRD US7 — knowingly reverses the earlier per-quote-only markup decision).
   /// Per-quote markup stays editable; existing quotes are never touched by a change here.
   default_markup_percent Decimal   @default(0) @db.Decimal(5, 2)
+  /// Whether sales tax applies to this company's estimates at all.
+  ///
+  /// Default OFF (product, 2026-09-09): most companies do not charge sales tax, and a rate that
+  /// starts applying itself the moment someone configures one is a surprise measured in money.
+  /// While QuickBooks OR a CRM is connected this is FORCED ON and cannot be turned off: the
+  /// company invoices through a system that charges tax, so an estimate declaring none would
+  /// disagree with what that system bills for the same job. Note that forcing tax on is NOT the
+  /// same as making that system the tax SOURCE — taxSourceIsExternal stays QuickBooks-only, and a
+  /// CRM company must charge tax AND type its own rates. See taxEnabledFor().
+  ///
+  /// Distinct from "no default rate set". Off means the company does not charge tax; no default
+  /// means they do but have not said which rate — the first is a decision, the second is a gap.
+  tax_enabled            Boolean   @default(false)
   companies              companies @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@schema("public")
@@ -432,6 +445,7 @@ model Customer {
 
   quotes Quote[]
   qb     CustomerQb[]
+  zt     CustomerZt[]
 
   /// Names are unique per company **and parent**, mirroring QuickBooks' actual DisplayName rule.
   ///
@@ -532,6 +546,7 @@ model SalesTax {
   updatedBy BigInt?  @map("updated_by")
 
   qb     SalesTaxQb[]
+  zt     SalesTaxZt[]
   quotes Quote[]
 
   @@unique([companyId, name])
@@ -691,6 +706,135 @@ model RawQbAccount {
 /// creates it. Connected means encrypted_auth is non-null AND environment matches the server's.
 /// The deferred per-company-app-keys design (client_id / encrypted_client_secret columns) is
 /// documented at the top of src/lib/qbo.ts.
+/// Raw ZenTrades ticket payloads — the read store for the Estimates-tab job picker and the
+/// chat seeding. Estimates-tab-only scope: tickets are NEVER projected into `jobs`. The
+/// complete untrimmed API object lives in rawPayload (raw-ingest rule): any field ZenTrades
+/// returns stays queryable without a re-sync, and the write-back builds its estimate payload
+/// (customer, addresses, tax zone) from here.
+model ZtJobRaw {
+  id           Int       @id @default(autoincrement())
+  companyId    Int       @map("company_id")
+  ztTicketId   String    @map("zt_ticket_id") @db.VarChar(64)
+  ticketNumber String?   @map("ticket_number") @db.VarChar(64)
+  /// ZenTrades' updatedAt — the sync cursor and the cheap change signal.
+  ztUpdatedAt  DateTime? @map("zt_updated_at")
+  rawPayload   Json      @map("raw_payload")
+  /// sha256 of the payload (collections-agent pattern): full-list polling skips unchanged rows.
+  contentHash  String    @map("content_hash") @db.VarChar(64)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@unique([companyId, ztTicketId])
+  @@index([companyId, ztUpdatedAt(sort: Desc)])
+  @@map("zt_jobs_raw")
+  @@schema("public")
+}
+
+/// Raw ZenTrades deficiencies. No canonical table (Estimates-tab-only scope): seeding and the
+/// picker's open-count read these rows directly. `status` is projected out for cheap filtering.
+model ZtDeficiencyRaw {
+  id             Int      @id @default(autoincrement())
+  companyId      Int      @map("company_id")
+  ztDeficiencyId String   @map("zt_deficiency_id") @db.VarChar(64)
+  ztTicketId     String?  @map("zt_ticket_id") @db.VarChar(64)
+  status         String?  @db.VarChar(32)
+  rawPayload     Json     @map("raw_payload")
+  contentHash    String   @map("content_hash") @db.VarChar(64)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([companyId, ztDeficiencyId])
+  @@index([companyId, ztTicketId])
+  @@map("zt_deficiencies_raw")
+  @@schema("public")
+}
+
+/// Raw ZenTrades price-catalog items — pricebook OR flat-rate rows (mutually exclusive per
+/// company, so one table with `kind`). projectedItemId is the raw↔canonical mapping into
+/// PricebookItem; the estimating agent prices from the projection with no agent changes.
+model ZtCatalogRaw {
+  id              Int      @id @default(autoincrement())
+  companyId       Int      @map("company_id")
+  kind            String   @db.VarChar(16)
+  ztItemId        String   @map("zt_item_id") @db.VarChar(64)
+  rawPayload      Json     @map("raw_payload")
+  contentHash     String   @map("content_hash") @db.VarChar(64)
+  projectedItemId Int?     @map("projected_item_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([companyId, kind, ztItemId])
+  @@map("zt_catalog_raw")
+  @@schema("public")
+}
+
+/// CLARA customer ↔ ZenTrades billing-customer id (the customer_qb pattern): a ZT-seeded quote
+/// adopts by id first, so a re-sync or a second quote never duplicates the customer.
+model CustomerZt {
+  id           Int      @id @default(autoincrement())
+  customerId   Int      @map("customer_id")
+  companyId    Int      @map("company_id")
+  ztCustomerId String   @map("zt_customer_id") @db.VarChar(64)
+  raw          Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, ztCustomerId])
+  @@index([customerId])
+  @@map("customer_zt")
+  @@schema("public")
+}
+
+/// sales_tax row ↔ ZenTrades rate id (the sales_tax_qb pattern), read at post time for the
+/// estimate's salesTaxRateId reference.
+model SalesTaxZt {
+  id         Int      @id @default(autoincrement())
+  salesTaxId Int      @map("sales_tax_id")
+  companyId  Int      @map("company_id")
+  ztRateId   String   @map("zt_rate_id") @db.VarChar(64)
+  raw        Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+  salesTax   SalesTax @relation(fields: [salesTaxId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, ztRateId])
+  @@index([salesTaxId])
+  @@map("sales_tax_zt")
+  @@schema("public")
+}
+
+/// One ZenTrades connection per company (ZenTrades plan 2.1/2.2) — the qbo_connections
+/// pattern, split by provider on purpose (never extend the platform-owned crm_* family).
+/// ZenTrades has no OAuth and no refresh token: auth is a normal user login whose session JWT
+/// expires, so the sealed blob keeps {username, password, accessToken} and re-login with the
+/// stored credentials is the only recovery path (same finding as the collections integration).
+model ZtConnection {
+  id                   Int       @id @default(autoincrement())
+  companyId            Int       @unique @map("company_id")
+  /// AES-256-GCM blob of { username, password, accessToken }, sealed under ZT_TOKEN_KEY (zt.ts).
+  encryptedAuth        String?   @map("encrypted_auth")
+  /// The ZenTrades company id, read from the login JWT payload. What every API call scopes to.
+  ztCompanyId          String?   @map("zt_company_id")
+  /// The ZenTrades company NAME from the login response (user.company.name) — shown on the
+  /// Connections card so an admin sees WHICH account they bound, not just that one is bound.
+  ztCompanyName        String?   @map("zt_company_name") @db.VarChar(200)
+  ztUserId             String?   @map("zt_user_id")
+  accessTokenExpiresAt DateTime? @map("access_token_expires_at")
+  /// Sync bookkeeping (Phase 2 sync engine): last COMPLETE run, last failure, and the
+  /// one-sync-at-a-time row claim — same semantics as QboConnection.
+  lastSyncAt           DateTime? @map("last_sync_at")
+  lastSyncError        String?   @map("last_sync_error")
+  syncStartedAt        DateTime? @map("sync_started_at")
+  /// Serializes re-login (QBO gap T-02, fixed here from day one): concurrent completions racing
+  /// a session refresh would each replay a login; the conditional claim makes one win.
+  refreshLockUntil     DateTime? @map("refresh_lock_until")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@map("zt_connections")
+  @@schema("public")
+}
+
 model QboConnection {
   id                   Int       @id @default(autoincrement())
   companyId            Int       @unique @map("company_id")
@@ -731,12 +875,80 @@ model QboConnection {
   /// crashed task through the staleness window rather than wedging the company forever.
   syncStartedAt        DateTime? @map("sync_started_at")
 
+  /// Indexed because the webhook drain resolves realm -> companies on every pass. Deliberately
+  /// NOT unique: one realm may legitimately serve several companies, and the fan-out is the
+  /// design (see qboWebhookProcessor.companiesForRealm).
+  @@index([realmId], map: "qbo_connections_realm_id_idx")
+
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 
   @@map("qbo_connections")
   @@schema("public")
 }
+
+/// One inbound QuickBooks webhook CloudEvent. Both a dedup ledger and a queryable status trail.
+///
+/// WHY A TABLE AND NOT A QUEUE. collection_agent_backend puts these on SQS with a dedicated worker
+/// container. That is the right shape there and the wrong one here: this service has no queue, no
+/// worker, no cron and one ECS task, so SQS would mean a new queue, a new container, new IAM and
+/// a new deploy path to move work a table already tracks. The drain is an in-process loop that
+/// claims rows with a conditional updateMany gated on the row count — the same pattern
+/// `qbo_connections.sync_started_at` uses, and chosen for the same reason: a `pg_advisory_lock`
+/// is RE-ENTRANT, so two runs sharing a pooled connection both "acquire" it and the first unlock
+/// frees it for both. The claim stays correct if the service ever scales past one task.
+///
+/// `eventId` UNIQUE is the whole dedup guarantee. Intuit redelivers on any non-2xx and repeats
+/// the CloudEvents `id` verbatim, so the insert is what makes a redelivery a no-op.
+model QboWebhookEvent {
+  id BigInt @id @default(autoincrement())
+  /// CloudEvents `id`. THE dedup key — a redelivery repeats it.
+  eventId String @unique @map("event_id")
+  /// `intuitaccountid`. Resolved to companies at drain time, not here: one realm can legitimately
+  /// be connected to more than one company, and the receiver must stay fast.
+  realmId String @map("realm_id")
+  /// Which keyset's verifier token matched — "sandbox" | "production". Nothing in the CloudEvent
+  /// itself says, and one endpoint serves both keysets.
+  keyset String?
+  /// Lowercased entity segment of `type`, or null when it is not one we subscribed to.
+  entity String?
+  /// Operation segment of `type`, kept verbatim. Never validated against an enum: the vocabulary
+  /// is not fully documented, and an unknown operation is treated as "refetch", which is safe.
+  operation String
+  /// `intuitentityid` — the entity's QuickBooks Id.
+  entityId String? @map("entity_id")
+  eventTime DateTime? @map("event_time") @db.Timestamptz(6)
+  /// The untouched CloudEvent, so debugging, replay and audit survive a lossy projection.
+  raw Json
+  /// queued | running | done | skipped | failed
+  status String @default("queued")
+  attempts Int @default(0)
+  lastError String? @map("last_error")
+  /// Set with `claimToken` when a drain pass takes the row, cleared when it settles. A row stuck
+  /// in `running` past the staleness window returns to `queued` — a killed task must not wedge an
+  /// event forever.
+  /// When this row may next be attempted. Set to a backed-off future time on every requeue, so a
+  /// stuck tenant cannot occupy every pass (head-of-line starvation) and five attempts span hours
+  /// rather than the ~50 seconds a fixed 10s interval gives -- long enough to outlast a QuickBooks
+  /// throttle window. Null means "eligible now".
+  nextAttemptAt DateTime? @map("next_attempt_at") @db.Timestamptz(6)
+  /// Companies that have already completed this event, for the realm fan-out. One realm can serve
+  /// several companies; without this, a permanently broken sibling requeues the row forever and
+  /// re-runs the healthy company's full mirror pull on every pass.
+  doneCompanies Int[] @default([]) @map("done_companies")
+  claimedAt DateTime? @map("claimed_at") @db.Timestamptz(6)
+  /// Identifies the drain pass that owns the row. A count alone cannot say WHICH rows a batch
+  /// claim won when two passes overlap on part of the same id list.
+  claimToken String? @map("claim_token")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, nextAttemptAt, createdAt], map: "qbo_webhook_events_drain_idx")
+  @@index([realmId, createdAt(sort: Desc)], map: "qbo_webhook_events_realm_idx")
+  @@map("qbo_webhook_events")
+  @@schema("public")
+}
+
 
 /// Estimating Agent: one chat = one quote, lifecycle DRAFT -> COMPLETED.
 /// Audit columns (architecture, 2026-09-08): `quotes` and `quote_line_items` are DELIBERATELY
@@ -766,6 +978,21 @@ model Quote {
   templateId        Int?            @map("template_id")
   /// The end-of-materials labor-hours ask fires at most once per quote (labor PRD US2).
   laborAsked        Boolean         @default(false) @map("labor_asked")
+  /// The customer-facing proposal template chosen in chat (template-library). Null = the
+  /// company's default template resolves at render time. Plain column, no FK — a deleted
+  /// template must fall through the render chain (chosen → default → built-in), never block.
+  proposalTemplateId Int?           @map("proposal_template_id")
+  /// The which-proposal-template ask fires at most once per quote (mirrors laborAsked).
+  templateAsked     Boolean         @default(false) @map("template_asked")
+  /// ZenTrades linkage (Estimates-tab flow): the originating ticket this quote was started
+  /// from, and the estimate it posted as. ztBillingMetaDataId comes back on the create and is
+  /// what ZenTrades' estimate UPDATE requires — persisted so reopen→re-complete can update in
+  /// place. Same outcome-recording rationale as the qbo_* trio.
+  ztTicketId          String?       @map("zt_ticket_id") @db.VarChar(64)
+  ztEstimateId        String?       @map("zt_estimate_id") @db.VarChar(64)
+  ztBillingMetaDataId String?       @map("zt_billing_meta_data_id") @db.VarChar(64)
+  ztSyncedAt          DateTime?     @map("zt_synced_at")
+  ztSyncError         String?       @map("zt_sync_error")
   /// QBO Estimate id once posted (companies with a QboConnection). Posted at completion;
   /// re-completing after a reopen UPDATES this same estimate in place (QBO PRD US6).
   qboEstimateId     String?         @map("qbo_estimate_id")
@@ -890,6 +1117,9 @@ model Pricebook {
   /// csv | excel | pdf — the format the book was ingested from.
   sourceFormat     String?  @map("source_format")
   originalFilename String?  @map("original_filename")
+  /// "MANUAL" (admin-uploaded) or "ZENTRADES" (synced catalog). Pricing priority rule: an
+  /// admin-uploaded book always outranks the synced catalog — fallback, never a merge.
+  source           String   @default("MANUAL") @db.VarChar(16)
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
@@ -920,6 +1150,28 @@ model LaborRate {
 /// registry in copilot/estimating/templates.ts — a custom client template is a new renderer
 /// implemented in code, referenced by a row here. At most one active template per company
 /// (validated at configuration time); no active row = the built-in default invoice.
+/// A named customer-facing proposal design (template-library). Replaces the single
+/// companies.proposal_template column: each company keeps a library of these, exactly one
+/// marked default. `blocks` is the same ordered ProposalBlock[] the column held (see
+/// copilot/estimating/proposalTemplate.ts) — format and renderers unchanged.
+///
+/// One default per company is enforced by the partial unique index
+/// proposal_templates_one_default_per_company (docs/sql/phase4.sql) — Prisma cannot express
+/// a partial unique index, so the schema declares only the columns.
+model ProposalTemplate {
+  id        Int      @id @default(autoincrement())
+  companyId Int      @map("company_id")
+  name      String   @db.VarChar(120)
+  blocks    Json
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([companyId])
+  @@map("proposal_templates")
+  @@schema("public")
+}
+
 model QuoteTemplate {
   id        Int      @id @default(autoincrement())
   companyId Int      @map("company_id")
@@ -976,6 +1228,7 @@ model PricebookItem {
 enum PricebookSource {
   MANUAL
   HOME_DEPOT
+  ZENTRADES
 
   @@map("pricebook_source")
   @@schema("public")

@@ -71,6 +71,10 @@ const quoteOf = (markupPercent: number, lineItems: LineItemInput[]): QuoteInput 
   qboEstimateId: null,
   qboSyncedAt: null,
   qboSyncError: null,
+    ztTicketId: null,
+    ztEstimateId: null,
+    ztSyncedAt: null,
+    ztSyncError: null,
   lineItems,
 });
 

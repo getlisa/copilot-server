@@ -9,6 +9,8 @@ import { estimateRoute } from "./api/routes/estimate.route";
 import { quoteRoute } from "./api/routes/quote.route";
 import { companyRoute } from "./api/routes/company.route";
 import { adminRoute } from "./api/routes/admin.route";
+import webhookRoute from "./api/routes/webhook.route";
+import { startQboWebhookDrain, qboWebhookDrainStatus } from "./lib/qboWebhookProcessor";
 import logger from "./lib/logger";
 
 dotenv.config();
@@ -32,6 +34,25 @@ app.use(
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
   })
 );
+// Inbound webhooks, mounted BEFORE the JSON parser below and with a raw-body parser of their
+// own. Intuit signs an HMAC over the exact bytes it sent, and the global parser keeps no raw
+// copy — by the time a controller ran, the bytes to verify would be gone.
+//
+// `type: "*/*"` is deliberate rather than lazy. CloudEvents deliveries can arrive as
+// `application/cloudevents-batch+json`, and collections' first live deliveries were REJECTED
+// because its raw-body middleware matched only `application/json`. On a path that receives
+// nothing but webhooks, matching everything costs nothing and removes the whole failure class.
+//
+// Adding a `verify` callback to the global parser instead would put a raw-body copy on every
+// 50 MB image upload in the app.
+// Scoped to the QBO path specifically, NOT the /api/v1/webhooks prefix. body-parser short-circuits
+// once a stream is consumed, so a sibling route added under a raw-parsed prefix would silently
+// receive a Buffer where it expected parsed JSON — a trap with no error to follow.
+app.use("/api/v1/webhooks/qbo", express.raw({ type: "*/*", limit: "5mb" }), (req, res, next) => {
+  req.url = "/qbo" + (req.url === "/" ? "" : req.url);
+  webhookRoute(req, res, next);
+});
+
 // Parse JSON bodies. Some native clients (ClaraWearables, AskAI) POST JSON without a
 // proper `Content-Type: application/json` header, which would otherwise leave req.body
 // undefined and surface as confusing "body Required" / destructure errors. So we also
@@ -87,7 +108,13 @@ app.use("/api/v1/op-x7k2", adminRoute);
 
 // Health check
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+  // The drain is a background loop with no request of its own, so a stall is otherwise
+  // indistinguishable from "QuickBooks sent nothing". lastPassAt is the heartbeat to alert on.
+  res.status(200).json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    qboWebhookDrain: qboWebhookDrainStatus(),
+  });
 });
 
 // OpenAI Realtime token endpoint (for voice)
@@ -161,4 +188,7 @@ app.listen(PORT, () => {
     port: PORT,
     environment: process.env.NODE_ENV || "development",
   });
+  // Acting on a webhook always costs a QuickBooks API read (the event's `data` is empty), so the
+  // receiver only records and this drains. The timer is unref'd — it never holds the process open.
+  startQboWebhookDrain();
 });

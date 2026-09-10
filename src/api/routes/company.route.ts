@@ -37,6 +37,30 @@ companyRoute.delete(
   CompanyController.disconnectQboForCompany
 );
 
+// ZenTrades. No OAuth — an admin submits the company's ZenTrades login, which is validated by
+// an actual login before being stored sealed. Status rides the shared /connections read above.
+companyRoute.post(
+  "/connections/zt/connect",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.connectZtForCompany
+);
+companyRoute.post(
+  "/connections/zt/sync",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.syncZtForCompany
+);
+// The job picker read stays open to every role — technicians start estimates from it.
+companyRoute.get("/connections/zt/jobs", authMiddleware, CompanyController.listZtJobsForCompany);
+companyRoute.get("/connections/zt/sync/progress", authMiddleware, CompanyController.ztSyncProgress);
+companyRoute.delete(
+  "/connections/zt",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.disconnectZtForCompany
+);
+
 // Reference data. The sync is a settings write, so admin-only. The reads a technician's estimate
 // screen needs — the customer picker — are open to every role, for the same reason the item list
 // is: gating them empties the picker with no error anywhere.
@@ -63,8 +87,20 @@ companyRoute.get(
 // Sales-tax rates are readable by every role: an estimate must show the rate it applies, and
 // gating this would blank the totals for technicians.
 companyRoute.get("/sales-tax", authMiddleware, CompanyController.listSalesTaxRates);
+// Whether tax applies to this company at all. Admin-only: it decides whether customer-facing
+// documents carry tax. Refused while QuickBooks or a CRM is connected — either forces it on.
+companyRoute.put("/tax-enabled", authMiddleware, requireAdmin, CompanyController.setTaxEnabled);
 // Writing a rate is admin-only: it is applied to money on customer-facing estimates.
 companyRoute.post("/sales-tax", authMiddleware, requireAdmin, CompanyController.saveSalesTax);
+// Availability only, and admin-only like every other tax write. Its own route rather than a
+// field on the POST above, because that one refuses all writes while QuickBooks owns the
+// company's tax — which is exactly when this has to work.
+companyRoute.put(
+  "/sales-tax/:id/active",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.setSalesTaxActiveState
+);
 companyRoute.put(
   "/sales-tax/default",
   authMiddleware,

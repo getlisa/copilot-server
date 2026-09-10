@@ -178,6 +178,10 @@ export function validateDocxTemplate(templateBuffer: Buffer): string | null {
     qboEstimateId: null,
     qboSyncedAt: null,
     qboSyncError: null,
+    ztTicketId: null,
+    ztEstimateId: null,
+    ztSyncedAt: null,
+    ztSyncError: null,
     blockingFlagCount: 0,
   };
   const branding: InvoiceBranding = {

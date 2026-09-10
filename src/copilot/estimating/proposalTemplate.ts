@@ -90,9 +90,21 @@ export interface ProposalBlock {
   style?: BlockStyle;
   /** Set for a dynamic block; `content` is then ignored. */
   dynamic?: DynamicBlockType;
+  /**
+   * projectBlock only: the uploaded document presented this section as boxed info tables
+   * (header bar + label/value rows), so it renders as the side-by-side box pair. Unset =
+   * plain lines. Set by the import classifier from what the document actually looks like.
+   */
+  boxed?: boolean;
+  /** logo only: rendered size in points (width and height of the fit box). Default 90. */
+  logoSize?: number;
   /** Set for a static block. */
   content?: StaticPart[];
 }
+
+/** The logo block's rendered size in points, clamped to something that fits a letterhead. */
+export const logoSizeOf = (b: ProposalBlock): number =>
+  Math.min(Math.max(b.logoSize ?? 90, 24), 240);
 
 /**
  * Tokens usable inside static text. Kept tiny and quote-independent: a company writes
@@ -180,6 +192,8 @@ export function validateProposalBlocks(value: unknown): string[] {
     else if (ids.has(b.id)) problems.push(`${at}: duplicate id "${b.id}"`);
     else ids.add(b.id);
     if (typeof b.visible !== "boolean") problems.push(`${at}: visible must be true or false`);
+    if (b.logoSize !== undefined && (typeof b.logoSize !== "number" || !Number.isFinite(b.logoSize)))
+      problems.push(`${at}: logoSize must be a number`);
     const isDynamic = b.dynamic !== undefined;
     if (isDynamic && !DYNAMIC_BLOCK_TYPES.includes(b.dynamic as DynamicBlockType))
       problems.push(`${at}: unknown dynamic type "${b.dynamic}"`);

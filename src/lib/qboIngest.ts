@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import prisma from "./prisma";
 import logger from "./logger";
 import { queryAll, qboFetch, qboConnectionFor, qboConnected } from "./qbo";
+import { ztConnectionFor, ztConnected } from "./zt";
 import { parseAddress, toBillAddr, fromBillAddr } from "./addressParse";
 import { UserFacingError } from "./clientError";
 
@@ -633,13 +634,6 @@ async function ingestAccounts(conn: QboConnection, companyId: number): Promise<n
 // ---------- the sync ----------
 
 /**
- * Pull every reference entity for one company. Entities are ingested in sequence, not in
- * parallel: they share one access token whose refresh is not yet serialised (T-02), and Intuit
- * rate-limits per app — which for a Clara-owned app is shared across every client.
- *
- * Throws if the company is not connected. Callers decide whether that is a 409 or a no-op.
- */
-/**
  * How long a sync may hold its claim before another run may take it (T-44). A task killed
  * mid-sync cannot release its own claim, so without an expiry the company could never sync
  * again; ten minutes is far longer than the observed run (about four seconds for 39 customers,
@@ -647,7 +641,51 @@ async function ingestAccounts(conn: QboConnection, companyId: number): Promise<n
  */
 const SYNC_CLAIM_STALE_MS = 10 * 60 * 1000;
 
+/** The independent mirrors a sync refreshes. Each is attempted even when another fails. */
+export type QboSyncStage = "taxPrefs" | "customers" | "items" | "salesTax" | "accounts";
+
+export const ALL_QBO_SYNC_STAGES: readonly QboSyncStage[] = [
+  "taxPrefs",
+  "customers",
+  "items",
+  "salesTax",
+  "accounts",
+];
+
+/**
+ * Another sync already holds this company's claim. Its own class so a caller that can wait — the
+ * webhook drain — can RE-QUEUE rather than treat it as a failure: the running sync will finish,
+ * but it may have started before the change that triggered us, so skipping would lose the update.
+ */
+export class QboSyncBusyError extends UserFacingError {}
+
+/**
+ * Refresh every mirror and record the run as complete. This is the admin's "Sync" button.
+ */
 export async function syncQboReferenceData(companyId: number): Promise<IngestCounts> {
+  return runQboSync(companyId, ALL_QBO_SYNC_STAGES, { markComplete: true });
+}
+
+/**
+ * The sync itself, with a selectable stage list.
+ *
+ * Entities are ingested in sequence, not in parallel: they share one access token whose refresh is
+ * not yet serialised (T-02), and Intuit rate-limits per app — which for a Clara-owned app is
+ * shared across every client. Throws if the company is not connected; callers decide whether that
+ * is a 409 or a no-op, and `QboSyncBusyError` separately means "someone else holds the claim".
+ *
+ * `markComplete` is the load-bearing option and is REQUIRED, with no default. `lastSyncAt` means
+ * "last COMPLETE sync" (T-45) — a partial, webhook-driven refresh of one mirror must not advance
+ * it, or the Connections card claims a freshness the other mirrors cannot back. A default would
+ * quietly decide that for whoever forgot to think about it, and the wrong answer is invisible.
+ * For the same reason a partial sync does not write `lastSyncError`: those two fields describe the
+ * manual sync, and a webhook's outcome belongs on its own `qbo_webhook_events` row.
+ */
+export async function runQboSync(
+  companyId: number,
+  stages: readonly QboSyncStage[],
+  { markComplete }: { markComplete: boolean }
+): Promise<IngestCounts> {
   const conn = await qboConnectionFor(companyId);
   if (!qboConnected(conn))
     throw new UserFacingError("QuickBooks is not connected for this company");
@@ -673,7 +711,7 @@ export async function syncQboReferenceData(companyId: number): Promise<IngestCou
     data: { syncStartedAt: new Date() },
   });
   if (claim.count === 0)
-    throw new UserFacingError("A QuickBooks sync is already running for this company");
+    throw new QboSyncBusyError("A QuickBooks sync is already running for this company");
 
   // Each stage is attempted even when an earlier one failed: the stages are independent mirrors,
   // upserts are idempotent, and refusing to ingest tax because items timed out helps nobody.
@@ -689,38 +727,50 @@ export async function syncQboReferenceData(companyId: number): Promise<IngestCou
     }
   };
 
-  try {
-    await stage("taxPrefs", async () => {
+  // A table rather than a run of `if` blocks: `Record<QboSyncStage, ...>` makes a stage added to
+  // the union without a runner a COMPILE error. As parallel ifs, the same omission was a silent
+  // no-op — the mirror simply never refreshed, with nothing anywhere to say so.
+  const runners: Record<QboSyncStage, () => Promise<void>> = {
+    taxPrefs: async () => {
       await ingestTaxPrefs(conn, companyId);
-    });
-    await stage("customers", async () => {
+    },
+    customers: async () => {
       counts.customers = await ingestCustomers(conn, companyId, realmId);
-    });
-    await stage("items", async () => {
+    },
+    items: async () => {
       counts.items = await ingestItems(conn, companyId);
-    });
-    await stage("salesTax", async () => {
+    },
+    salesTax: async () => {
       Object.assign(counts, await ingestSalesTax(conn, companyId, realmId));
-    });
-    await stage("accounts", async () => {
+    },
+    accounts: async () => {
       counts.accounts = await ingestAccounts(conn, companyId);
-    });
+    },
+  };
+
+  try {
+    // Iterated in ALL_QBO_SYNC_STAGES order, not caller order: taxPrefs before salesTax is a real
+    // dependency, and a caller listing stages in an arbitrary order must not change the outcome.
+    for (const name of ALL_QBO_SYNC_STAGES)
+      if (stages.includes(name)) await stage(name, runners[name]);
 
     if (failures.length) {
       // Record the failure and keep whatever did land. `lastSyncAt` is deliberately NOT advanced:
       // "last synced" must mean "last complete sync", or it is a claim the mirrors cannot back.
-      await prisma.qboConnection.update({
-        where: { companyId },
-        data: { lastSyncError: failures.join("; ").slice(0, 1000) },
-      });
+      if (markComplete)
+        await prisma.qboConnection.update({
+          where: { companyId },
+          data: { lastSyncError: failures.join("; ").slice(0, 1000) },
+        });
       throw new Error(`QuickBooks sync incomplete — ${failures.join("; ")}`);
     }
 
-    await prisma.qboConnection.update({
-      where: { companyId },
-      data: { lastSyncAt: new Date(), lastSyncError: null },
-    });
-    logger.info("QBO reference data synced", { companyId, realmId, ...counts });
+    if (markComplete)
+      await prisma.qboConnection.update({
+        where: { companyId },
+        data: { lastSyncAt: new Date(), lastSyncError: null },
+      });
+    logger.info("QBO reference data synced", { companyId, realmId, stages, ...counts });
     return counts;
   } finally {
     // Released whatever happened — a failed sync must not block the retry it is asking for.
@@ -831,10 +881,66 @@ export function qboIncomeAccounts(companyId: number) {
  */
 export async function taxSourceIsExternal(companyId: number): Promise<{
   external: boolean;
-  via: "quickbooks" | null;
+  via: "quickbooks" | "zentrades" | null;
 }> {
-  const conn = await qboConnectionFor(companyId);
-  return qboConnected(conn) ? { external: true, via: "quickbooks" } : { external: false, via: null };
+  const [conn, ztConn] = await Promise.all([
+    qboConnectionFor(companyId),
+    ztConnectionFor(companyId),
+  ]);
+  if (qboConnected(conn)) return { external: true, via: "quickbooks" };
+  // A ZenTrades connection is an external tax source the same way: its zone rates (source
+  // ZENTRADES, ingested at quote seeding) are usable and MANUAL rates stop applying.
+  if (ztConnected(ztConn)) return { external: true, via: "zentrades" };
+  return { external: false, via: null };
+}
+
+/**
+ * Whether sales tax applies to this company at all.
+ *
+ * Two inputs, and an integration wins. The stored flag defaults OFF, because most companies do
+ * not charge sales tax and a rate that starts applying itself as soon as one is configured is a
+ * surprise measured in money. A company with **either** a QuickBooks connection **or** a CRM
+ * connection is FORCED ON: both mean this company invoices through a system that charges tax, and
+ * an estimate that declared none would disagree with what that system bills for the same job.
+ *
+ * **Forcing tax on is NOT the same as making that system the tax SOURCE, and the difference is
+ * load-bearing.** `taxSourceIsExternal` stays QuickBooks-only on purpose: it decides whether the
+ * company may create its own MANUAL rates, and an earlier draft that also treated a
+ * `crm_connections` row as external locked ServiceTitan companies out of tax completely — they
+ * could not create a rate, and nothing ingests tax from a CRM, so they ended up with none at all.
+ * A CRM company must charge tax AND must type its own rates. Those two facts live in two
+ * functions, and merging them re-creates that hole.
+ *
+ * `enforcedBy` names which integration is doing it, so the refusal and the settings screen can
+ * say the true reason rather than blaming QuickBooks for a CRM.
+ *
+ * Deliberately NOT the same question as "is a default rate set". Off means this company does not
+ * charge tax; no default means they do but have not said which rate. The first is a decision, the
+ * second is an unfinished setup, and collapsing them loses the ability to tell a configured
+ * company from an untaxed one.
+ */
+export async function taxEnabledFor(companyId: number): Promise<{
+  enabled: boolean;
+  stored: boolean;
+  enforced: boolean;
+  enforcedBy: "quickbooks" | "crm" | null;
+}> {
+  const [config, { external }, crm] = await Promise.all([
+    prisma.company_configs.findUnique({
+      where: { company_id: companyId },
+      select: { tax_enabled: true },
+    }),
+    taxSourceIsExternal(companyId),
+    // Read, not joined into taxSourceIsExternal — see the note above about why the CRM forces tax
+    // on without owning the rates.
+    prisma.crm_connections.findUnique({
+      where: { company_id: companyId },
+      select: { provider: true },
+    }),
+  ]);
+  const stored = config?.tax_enabled ?? false;
+  const enforcedBy = external ? "quickbooks" : crm ? "crm" : null;
+  return { enabled: stored || enforcedBy != null, stored, enforced: enforcedBy != null, enforcedBy };
 }
 
 /**
@@ -874,8 +980,14 @@ export async function listSalesTax(companyId: number) {
     },
     orderBy: [{ isDefault: "desc" }, { name: "asc" }],
   });
+  const tax = await taxEnabledFor(companyId);
   return {
     taxSource: external ? via : "manual",
+    taxEnabled: tax.enabled,
+    /** True when a connection forces it on, so the screen can lock the switch and say why. */
+    taxEnforced: tax.enforced,
+    /** Which integration is forcing it — so the reason names the right one. */
+    taxEnforcedBy: tax.enforcedBy,
     rates: rows.map((r) => ({
       ...r,
       usable: salesTaxUsable(r, external),
@@ -891,6 +1003,13 @@ export async function listSalesTax(companyId: number) {
  * the settings screen shows as unusable would be the worst of both.
  */
 export async function defaultSalesTax(companyId: number) {
+  // Tax off means no snapshot, which is the whole effect of the switch. Both callers come through
+  // here — quote creation and completion's gap-fill — so gating it once covers the pair, and a
+  // company that turns tax off does not silently keep taxing the estimates it makes afterwards.
+  // Estimates that already carry a rate keep it: the snapshot is theirs, and re-pricing a sent
+  // document is exactly what the snapshot exists to prevent.
+  const { enabled } = await taxEnabledFor(companyId);
+  if (!enabled) return null;
   const { external } = await taxSourceIsExternal(companyId);
   return prisma.salesTax.findFirst({
     where: {
@@ -1645,6 +1764,51 @@ export async function upsertSalesTax(
         ...(input.isDefault === undefined ? {} : { isDefault: input.isDefault }),
         updatedBy: actingUserId,
       },
+    });
+  });
+}
+
+/**
+ * Turn a rate off, or back on — including a rate that came from QuickBooks.
+ *
+ * Deliberately NOT routed through `upsertSalesTax`, whose first act is to refuse every write
+ * while a connected system owns the company's tax. That guard is right for what it was written
+ * for: a name or a percentage typed here would be saved and then never applied, so refusing with
+ * the reason beats accepting it silently. It is wrong for this, and it made the ingested rates —
+ * the only ones a connected company has — the exact set that could not be switched off.
+ *
+ * Availability is a CLARA-side decision about what this company is offered, not a claim about
+ * what QuickBooks holds. The ingest already assumes an admin can make it: it refreshes a rate's
+ * name on rename but deliberately never forces `is_active` back to true, precisely so a rate
+ * someone switched off is not silently switched on by the next sync. Until now nothing could
+ * write the flag it was protecting.
+ *
+ * Nothing is sent to QuickBooks. The rate still exists there, and a later sync still sees it.
+ *
+ * Deactivating the default clears the default in the same transaction. Left set, the settings
+ * screen would keep showing it as the default while every new estimate started untaxed — and
+ * `defaultSalesTax` filters on `is_active`, so the two would disagree with nothing to explain it.
+ */
+export async function setSalesTaxActive(
+  companyId: number,
+  id: number,
+  isActive: boolean,
+  actingUserId: bigint | null
+) {
+  return prisma.$transaction(async (tx) => {
+    const owned = await tx.salesTax.findFirst({
+      where: { id, companyId, isDeleted: false },
+      select: { id: true, isDefault: true },
+    });
+    if (!owned) throw new UserFacingError("That rate does not belong to this company");
+    if (!isActive && owned.isDefault)
+      await tx.salesTax.updateMany({
+        where: { companyId, isDefault: true },
+        data: { isDefault: false },
+      });
+    return tx.salesTax.update({
+      where: { id },
+      data: { isActive, ...(isActive ? {} : { isDefault: false }), updatedBy: actingUserId },
     });
   });
 }
