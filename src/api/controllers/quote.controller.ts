@@ -6,6 +6,7 @@ import { runEstimatingTurn } from "../../copilot/estimating/estimatingAgent";
 import { dedupeSharedRows } from "../../copilot/estimating/pricebookMatch";
 import { resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
 import { loadCompanyPricing } from "../../copilot/estimating/companyPricing";
+import { updateDraftLineItem } from "../../copilot/estimating/draftWrite";
 import { packAwareQuantity, unitsCompatible } from "../../copilot/estimating/packMath";
 import {
   toQuoteDto,
@@ -1091,17 +1092,30 @@ export class QuoteController {
       resolved.packageQuantity ?? null,
       resolved.unit
     );
-    await prisma.quoteLineItem.update({
-      where: { id: item.id },
-      data: {
-        unitPrice: resolved.unitPrice,
-        pricebookCode: resolved.code,
-        sourcePricebookId: match?.sourcePricebookId ?? null,
-        manuallyEdited: false,
-        ...(resolved.unit ? { unit: resolved.unit } : {}),
-        ...(packed.rounded ? { quantity: packed.quantity } : {}),
-      },
+    /**
+     * Re-assert the Draft status in the write itself. The COMPLETED check at the top of this
+     * handler ran BEFORE `resolveFromHomeDepot`, which measured 13.1s cold and 14–32s when
+     * several run at once — and the Invoice tab fires one of these per unmatched line, all in
+     * parallel, the moment it mounts. A technician who tires of watching the spinner types the
+     * price themselves, which clears the line's blocking flag and lets them complete; this
+     * request then returned and overwrote their figure — resetting `manuallyEdited` to false —
+     * on a quote already posted to QuickBooks and ZenTrades from a payload captured at the
+     * flip. Our row showed the Home Depot price, the CRM showed the typed one, and nothing
+     * ever reconciled them because a completed quote is frozen.
+     *
+     * Note this deliberately does NOT guard on `manuallyEdited`: an explicit search is the one
+     * path whose whole purpose is to replace whatever the line currently carries. Only the
+     * quote's status decides whether the write is still welcome.
+     */
+    const wrote = await updateDraftLineItem(item.id, user.companyId, {
+      unitPrice: resolved.unitPrice,
+      pricebookCode: resolved.code,
+      sourcePricebookId: match?.sourcePricebookId ?? null,
+      manuallyEdited: false,
+      ...(resolved.unit ? { unit: resolved.unit } : {}),
+      ...(packed.rounded ? { quantity: packed.quantity } : {}),
     });
+    if (!wrote) return fail(res, 409, "Quote is Completed and frozen");
     await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });

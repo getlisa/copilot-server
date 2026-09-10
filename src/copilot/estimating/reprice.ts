@@ -2,6 +2,7 @@ import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { loadCompanyPricing } from "./companyPricing";
 import { unitsCompatible } from "./packMath";
+import { updateDraftLineItem } from "./draftWrite";
 
 /**
  * Config changes propagate to open Drafts immediately (both PRDs' shared rule):
@@ -37,24 +38,28 @@ export async function repriceDrafts(companyId: number): Promise<number> {
         Number(line.unitPrice) !== hit.unitPrice ||
         line.sourcePricebookId !== hit.sourcePricebookId;
       if (!changed) continue;
-      await prisma.quoteLineItem.update({
-        where: { id: line.id },
-        data: {
+      if (
+        !(await updateDraftLineItem(line.id, companyId, {
           unitPrice: hit.unitPrice,
           pricebookCode: hit.code,
           sourcePricebookId: hit.sourcePricebookId,
           ...(hit.unit && line.unit == null ? { unit: hit.unit } : {}),
-        },
-      });
+        }))
+      )
+        continue;
       updated++;
     } else if (line.sourcePricebookId != null) {
       // The line was priced from a book that no longer covers it (item removed, book
       // deleted). Un-price it so the unmatched flag surfaces, rather than keeping a price
       // no configuration stands behind. Fallback-priced (HD-/EST) lines are left alone.
-      await prisma.quoteLineItem.update({
-        where: { id: line.id },
-        data: { unitPrice: null, pricebookCode: null, sourcePricebookId: null },
-      });
+      if (
+        !(await updateDraftLineItem(line.id, companyId, {
+          unitPrice: null,
+          pricebookCode: null,
+          sourcePricebookId: null,
+        }))
+      )
+        continue;
       updated++;
     }
   }
@@ -82,10 +87,8 @@ export async function repriceLaborDrafts(companyId: number): Promise<number> {
     const rate = byId.get(line.laborRateId!);
     if (rate) {
       if (Number(line.unitPrice) === Number(rate.hourlyRate)) continue;
-      await prisma.quoteLineItem.update({
-        where: { id: line.id },
-        data: { unitPrice: rate.hourlyRate },
-      });
+      if (!(await updateDraftLineItem(line.id, companyId, { unitPrice: rate.hourlyRate })))
+        continue;
       logger.info("Labor line re-priced after rate change", {
         companyId,
         lineItemId: line.id,
@@ -95,10 +98,7 @@ export async function repriceLaborDrafts(companyId: number): Promise<number> {
     } else {
       // The configured type was deleted: keep the price the technician already saw, but
       // detach it so it reads as an ad-hoc rate rather than pointing at a dead config row.
-      await prisma.quoteLineItem.update({
-        where: { id: line.id },
-        data: { laborRateId: null },
-      });
+      if (!(await updateDraftLineItem(line.id, companyId, { laborRateId: null }))) continue;
       logger.info("Labor line detached from deleted labor type", {
         companyId,
         lineItemId: line.id,

@@ -4,6 +4,7 @@ import { callStructured, EstimateTurn } from "../estimate/estimateService";
 import { ESTIMATED_PRICE_CODE } from "./quoteDto";
 import { packAwareQuantity, unitsCompatible } from "./packMath";
 import { enqueueResolve } from "./homeDepotCatalog";
+import { quoteIsDraft } from "./draftWrite";
 import { loadCompanyPricing } from "./companyPricing";
 import { listProposalTemplateChoices } from "../../lib/proposalTemplates";
 import { ztChatContext } from "../../lib/ztIngest";
@@ -573,6 +574,32 @@ export async function runEstimatingTurn(opts: {
       enqueueResolve(priced.resolveTerm, opts.companyId, row.description, [row.id]);
     }
   };
+
+  /**
+   * The quote can be marked Completed while the model is thinking. The chat endpoint refuses a
+   * completed quote, but it checked before the LLM call, and everything below this line writes
+   * — line items, markup, customer details, the ask latches. Applying any of it now would
+   * mutate a quote already posted to QuickBooks and ZenTrades from a payload captured at the
+   * status flip, leaving our copy and the CRM's disagreeing with nothing to reconcile them.
+   *
+   * The reply is replaced rather than passed through: the model wrote "added three breakers"
+   * on the assumption its operations would land, and showing that over a quote where nothing
+   * changed is worse than saying plainly that the estimate is closed. See draftWrite.ts for
+   * why this is a check rather than a lock, and what remains open.
+   */
+  if (!(await quoteIsDraft(opts.quoteId, opts.companyId))) {
+    logger.info("Estimating turn discarded: the quote was completed while the model ran", {
+      quoteId: opts.quoteId,
+      operations: output.operations.length,
+    });
+    return {
+      reply:
+        "This estimate was marked Completed while I was working on that, so I haven't changed " +
+        "anything. Move it back to Draft if you still want that edit.",
+      isFollowUpQuestion: false,
+      questions: [],
+    };
+  }
 
   for (const op of output.operations) {
     try {

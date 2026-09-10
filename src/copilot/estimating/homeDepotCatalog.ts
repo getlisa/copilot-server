@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { callStructured } from "../estimate/estimateService";
@@ -14,6 +15,7 @@ import { isLengthUnit, packAwareQuantity, unitsCompatible } from "./packMath";
 import { lookupHomeDepotViaWebSearch } from "./modelPriceEstimate";
 import { ESTIMATED_PRICE_CODE } from "./quoteDto";
 import { hdFallbackEnabledFor } from "./companyPricing";
+import { updateDraftLineItem } from "./draftWrite";
 
 /**
  * Home Depot catalog resolver for the Estimating Agent.
@@ -710,6 +712,19 @@ async function resolveThrottled(
  * prices must never become the company's remembered price for a part, and must never be matched
  * against by a later line.
  */
+/**
+ * Price one line from an automatic lookup: Draft-only, and never over a technician's own
+ * figure. Both conditions live in the UPDATE's WHERE clause — see draftWrite.ts for why a
+ * status check made before a 30-to-90-second resolve cannot be trusted by the write after it.
+ */
+async function priceDraftLine(
+  lineItemId: string,
+  companyId: number,
+  data: Prisma.QuoteLineItemUpdateManyMutationInput
+): Promise<boolean> {
+  return updateDraftLineItem(lineItemId, companyId, data, { manuallyEdited: false });
+}
+
 async function webSearchFallback(
   searchTerm: string,
   companyId: number,
@@ -731,6 +746,7 @@ async function webSearchFallback(
   const found = await lookupHomeDepotViaWebSearch(searchTerm);
   if (!found) return;
 
+  let written = 0;
   for (const row of targets) {
     // Same pack rule as a catalog price: the supplier still only sells whole packs, so a count
     // rounds up. A length keeps the technician's own figure — see packMath.
@@ -739,9 +755,8 @@ async function webSearchFallback(
       found.unit ?? row.unit,
       found.packQuantity
     );
-    await prisma.quoteLineItem.update({
-      where: { id: row.id },
-      data: {
+    if (
+      await priceDraftLine(row.id, companyId, {
         unitPrice: found.unitPrice,
         unit: found.unit ?? row.unit,
         // The sentinel IS the marker; there is no column to store a link in, so the DTO derives
@@ -750,13 +765,15 @@ async function webSearchFallback(
         // always resolves.
         pricebookCode: ESTIMATED_PRICE_CODE,
         ...(packed.rounded ? { quantity: packed.quantity } : {}),
-      },
-    });
+      })
+    )
+      written++;
   }
+  if (written === 0) return;
 
   logger.info("Priced from web search as an estimate", {
     searchTerm,
-    lines: targets.length,
+    lines: written,
     unitPrice: found.unitPrice,
     packQuantity: found.packQuantity,
     linkKind: found.productLink ? "product" : "search",
@@ -869,18 +886,16 @@ export function enqueueResolve(
           resolved.packageQuantity,
           resolved.unit
         );
-        await prisma.quoteLineItem.update({
-          where: { id: row.id },
-          data: {
-            unitPrice: resolved.unitPrice,
-            unit: resolved.unit,
-            // A verified catalog price supersedes any web-search estimate: writing the real
-            // code over the EST sentinel is what retires it.
-            pricebookCode: resolved.code,
-            sourcePricebookId: null, // fallback-sourced, not from a named book
-            ...(packed.rounded ? { quantity: packed.quantity } : {}),
-          },
+        const wrote = await priceDraftLine(row.id, companyId, {
+          unitPrice: resolved.unitPrice,
+          unit: resolved.unit,
+          // A verified catalog price supersedes any web-search estimate: writing the real
+          // code over the EST sentinel is what retires it.
+          pricebookCode: resolved.code,
+          sourcePricebookId: null, // fallback-sourced, not from a named book
+          ...(packed.rounded ? { quantity: packed.quantity } : {}),
         });
+        if (!wrote) continue;
         count++;
         if (packed.rounded)
           logger.info("Backfill rounded quantity up to a whole pack", {
