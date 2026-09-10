@@ -39,12 +39,17 @@ export async function repriceDrafts(companyId: number): Promise<number> {
         line.sourcePricebookId !== hit.sourcePricebookId;
       if (!changed) continue;
       if (
-        !(await updateDraftLineItem(line.id, companyId, {
-          unitPrice: hit.unitPrice,
-          pricebookCode: hit.code,
-          sourcePricebookId: hit.sourcePricebookId,
-          ...(hit.unit && line.unit == null ? { unit: hit.unit } : {}),
-        }))
+        !(await updateDraftLineItem(
+          line.id,
+          companyId,
+          {
+            unitPrice: hit.unitPrice,
+            pricebookCode: hit.code,
+            sourcePricebookId: hit.sourcePricebookId,
+            ...(hit.unit && line.unit == null ? { unit: hit.unit } : {}),
+          },
+          { manuallyEdited: false }
+        ))
       )
         continue;
       updated++;
@@ -53,11 +58,12 @@ export async function repriceDrafts(companyId: number): Promise<number> {
       // deleted). Un-price it so the unmatched flag surfaces, rather than keeping a price
       // no configuration stands behind. Fallback-priced (HD-/EST) lines are left alone.
       if (
-        !(await updateDraftLineItem(line.id, companyId, {
-          unitPrice: null,
-          pricebookCode: null,
-          sourcePricebookId: null,
-        }))
+        !(await updateDraftLineItem(
+          line.id,
+          companyId,
+          { unitPrice: null, pricebookCode: null, sourcePricebookId: null },
+          { manuallyEdited: false }
+        ))
       )
         continue;
       updated++;
@@ -87,7 +93,14 @@ export async function repriceLaborDrafts(companyId: number): Promise<number> {
     const rate = byId.get(line.laborRateId!);
     if (rate) {
       if (Number(line.unitPrice) === Number(rate.hourlyRate)) continue;
-      if (!(await updateDraftLineItem(line.id, companyId, { unitPrice: rate.hourlyRate })))
+      if (
+        !(await updateDraftLineItem(
+          line.id,
+          companyId,
+          { unitPrice: rate.hourlyRate },
+          { manuallyEdited: false }
+        ))
+      )
         continue;
       logger.info("Labor line re-priced after rate change", {
         companyId,
@@ -98,6 +111,10 @@ export async function repriceLaborDrafts(companyId: number): Promise<number> {
     } else {
       // The configured type was deleted: keep the price the technician already saw, but
       // detach it so it reads as an ad-hoc rate rather than pointing at a dead config row.
+      // Deliberately WITHOUT the manuallyEdited guard the three price writes above carry.
+      // This clears a pointer to a labor type that no longer exists; it touches no money. A
+      // technician who overrode the rate still keeps their number, and skipping the detach
+      // would strand the line pointing at a deleted config row.
       if (!(await updateDraftLineItem(line.id, companyId, { laborRateId: null }))) continue;
       logger.info("Labor line detached from deleted labor type", {
         companyId,
