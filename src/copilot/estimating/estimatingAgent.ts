@@ -622,8 +622,30 @@ export async function runEstimatingTurn(opts: {
     };
   }
 
+  /**
+   * Operations that CREATE a row. A create has no WHERE clause, so the Draft condition cannot
+   * ride along inside the statement the way it does for every update and delete in this module
+   * — these are re-checked instead, immediately before each one.
+   *
+   * Why a re-check and not a transaction around the whole loop, which is the stronger fix: the
+   * per-operation try/catch below is load-bearing. The model emits imperfect operations
+   * routinely, and today a single bad one is logged and skipped while the rest of the turn
+   * applies. Inside one Postgres transaction a failed statement aborts the whole transaction,
+   * so that same bad operation would discard every good one alongside it. Trading a
+   * millisecond-wide race for losing entire turns is a bad trade. Holding the app's only
+   * connection — `connection_limit=1` in lib/prisma.ts — for the length of the loop is a second
+   * reason. This leaves creates at exactly the guarantee the guarded writes have: a window one
+   * statement wide, not zero.
+   */
+  const CREATING_OPS = new Set(["add_item", "add_labor", "kb_proposal", "ambiguous_reference"]);
+  let skippedLate = 0;
+
   for (const op of output.operations) {
     try {
+      if (CREATING_OPS.has(op.type) && !(await quoteIsDraft(opts.quoteId, opts.companyId))) {
+        skippedLate++;
+        continue;
+      }
       switch (op.type) {
         case "add_item": {
           if (!op.description) break;
@@ -889,6 +911,11 @@ export async function runEstimatingTurn(opts: {
       });
     }
   }
+  if (skippedLate > 0)
+    logger.info("Skipped operations that would have created rows on a completed quote", {
+      quoteId: opts.quoteId,
+      skipped: skippedLate,
+    });
 
   // A markup stated in the chat and one typed on the Invoice tab are the same single value on
   // the quote, so this writes the same column the PATCH endpoint does. Negatives are refused

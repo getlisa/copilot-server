@@ -91,6 +91,40 @@ export async function updateDraftLineItem(
 }
 
 /**
+ * The many-row form: apply one identical payload to a set of line items, still Draft-only.
+ *
+ * Prisma wraps every `updateMany` in its own BEGIN/COMMIT, so the guard costs three round
+ * trips where a bare `update` cost one. Per line that is invisible next to a 13-to-32-second
+ * supplier lookup, but the pricebook sweep writes every open Draft line a company has —
+ * sequentially, from a synchronous admin request, through a pool `lib/prisma.ts` caps at one
+ * connection. Tripling the round trips there is the difference between a slow endpoint and a
+ * stalled one.
+ *
+ * A sweep assigns the same price to every line matching a term, so batching by payload
+ * collapses those N statements into one per distinct payload. Returns the number of rows
+ * actually written, which is what the admin endpoints report back.
+ */
+export async function updateDraftLineItems(
+  lineItemIds: string[],
+  companyId: number,
+  data: Prisma.QuoteLineItemUpdateManyMutationInput,
+  extraWhere: Prisma.QuoteLineItemWhereInput = {}
+): Promise<number> {
+  if (lineItemIds.length === 0) return 0;
+  const { count } = await prisma.quoteLineItem.updateMany({
+    where: { ...extraWhere, id: { in: lineItemIds }, quote: { companyId, status: "DRAFT" } },
+    data,
+  });
+  if (count < lineItemIds.length)
+    logger.info("Some line-item writes skipped: those quotes are no longer Drafts", {
+      companyId,
+      requested: lineItemIds.length,
+      written: count,
+    });
+  return count;
+}
+
+/**
  * Update quote-level columns if, and only if, the quote is still a DRAFT owned by this company.
  *
  * The line-item guard's sibling, for the agent turn's own writes — markup, customer details,
