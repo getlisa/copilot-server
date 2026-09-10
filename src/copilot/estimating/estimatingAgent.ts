@@ -4,7 +4,7 @@ import { callStructured, EstimateTurn } from "../estimate/estimateService";
 import { ESTIMATED_PRICE_CODE } from "./quoteDto";
 import { packAwareQuantity, unitsCompatible } from "./packMath";
 import { enqueueResolve } from "./homeDepotCatalog";
-import { quoteIsDraft } from "./draftWrite";
+import { quoteIsDraft, updateDraftLineItem, updateDraftQuote } from "./draftWrite";
 import { loadCompanyPricing } from "./companyPricing";
 import { listProposalTemplateChoices } from "../../lib/proposalTemplates";
 import { ztChatContext } from "../../lib/ztIngest";
@@ -401,6 +401,12 @@ export interface AgentTurnResult {
   isFollowUpQuestion: boolean;
   /** Clarifying questions as multiple-choice (rendered with an "Other" box in the UI). */
   questions: AgentQuestion[];
+  /**
+   * The quote was completed mid-turn and every write was dropped. The caller uses this to skip
+   * `touchQuote`, which would otherwise stamp `updatedAt` on a frozen quote and reorder it in
+   * the "last worked on" list on the strength of a turn that changed nothing.
+   */
+  discarded?: boolean;
 }
 
 export async function runEstimatingTurn(opts: {
@@ -587,7 +593,21 @@ export async function runEstimatingTurn(opts: {
    * changed is worse than saying plainly that the estimate is closed. See draftWrite.ts for
    * why this is a check rather than a lock, and what remains open.
    */
-  if (!(await quoteIsDraft(opts.quoteId, opts.companyId))) {
+  /**
+   * Only a turn that would WRITE has anything to discard. A technician who asks "what's the
+   * total on this?" gets a read-only turn, and answering it costs a completed quote nothing —
+   * swallowing that answer to announce a change nobody requested would be a worse outcome than
+   * the write this guard exists to prevent.
+   */
+  const turnWrites =
+    output.operations.length > 0 ||
+    typeof output.markupPercent === "number" ||
+    Boolean(output.customerName || output.customerAddress || output.customerPhone) ||
+    output.askedLaborHours === true ||
+    output.askedProposalTemplate === true ||
+    Boolean(output.proposalTemplateName);
+
+  if (turnWrites && !(await quoteIsDraft(opts.quoteId, opts.companyId))) {
     logger.info("Estimating turn discarded: the quote was completed while the model ran", {
       quoteId: opts.quoteId,
       operations: output.operations.length,
@@ -598,11 +618,34 @@ export async function runEstimatingTurn(opts: {
         "anything. Move it back to Draft if you still want that edit.",
       isFollowUpQuestion: false,
       questions: [],
+      discarded: true,
     };
   }
 
+  /**
+   * Operations that CREATE a row. A create has no WHERE clause, so the Draft condition cannot
+   * ride along inside the statement the way it does for every update and delete in this module
+   * — these are re-checked instead, immediately before each one.
+   *
+   * Why a re-check and not a transaction around the whole loop, which is the stronger fix: the
+   * per-operation try/catch below is load-bearing. The model emits imperfect operations
+   * routinely, and today a single bad one is logged and skipped while the rest of the turn
+   * applies. Inside one Postgres transaction a failed statement aborts the whole transaction,
+   * so that same bad operation would discard every good one alongside it. Trading a
+   * millisecond-wide race for losing entire turns is a bad trade. Holding the app's only
+   * connection — `connection_limit=1` in lib/prisma.ts — for the length of the loop is a second
+   * reason. This leaves creates at exactly the guarantee the guarded writes have: a window one
+   * statement wide, not zero.
+   */
+  const CREATING_OPS = new Set(["add_item", "add_labor", "kb_proposal", "ambiguous_reference"]);
+  let skippedLate = 0;
+
   for (const op of output.operations) {
     try {
+      if (CREATING_OPS.has(op.type) && !(await quoteIsDraft(opts.quoteId, opts.companyId))) {
+        skippedLate++;
+        continue;
+      }
       switch (op.type) {
         case "add_item": {
           if (!op.description) break;
@@ -818,10 +861,7 @@ export async function runEstimatingTurn(opts: {
             if (packed.rounded) data.quantity = packed.quantity;
           }
           if (Object.keys(data).length > 0)
-            await prisma.quoteLineItem.update({
-              where: { id: op.itemId },
-              data,
-            });
+            await updateDraftLineItem(op.itemId, opts.companyId, data);
           if (repriced)
             resolveFor(repriced, {
               id: op.itemId,
@@ -831,7 +871,12 @@ export async function runEstimatingTurn(opts: {
         }
         case "remove_item": {
           if (!op.itemId || !validIds.has(op.itemId)) break;
-          await prisma.quoteLineItem.delete({ where: { id: op.itemId } });
+          // deleteMany, not delete: the relation filter is the only way to hang the Draft
+          // condition on a removal, and a delete landing on an already-synced quote would
+          // strip a line the CRM still shows. A no-op here is the turn being discarded.
+          await prisma.quoteLineItem.deleteMany({
+            where: { id: op.itemId, quote: { companyId: opts.companyId, status: "DRAFT" } },
+          });
           break;
         }
         case "ambiguous_reference": {
@@ -866,6 +911,11 @@ export async function runEstimatingTurn(opts: {
       });
     }
   }
+  if (skippedLate > 0)
+    logger.info("Skipped operations that would have created rows on a completed quote", {
+      quoteId: opts.quoteId,
+      skipped: skippedLate,
+    });
 
   // A markup stated in the chat and one typed on the Invoice tab are the same single value on
   // the quote, so this writes the same column the PATCH endpoint does. Negatives are refused
@@ -873,10 +923,7 @@ export async function runEstimatingTurn(opts: {
   // like the request was honoured.
   const stated = output.markupPercent;
   if (typeof stated === "number" && Number.isFinite(stated) && stated >= 0 && stated <= 999.99) {
-    await prisma.quote.update({
-      where: { id: opts.quoteId },
-      data: { markupPercent: stated },
-    });
+    await updateDraftQuote(opts.quoteId, opts.companyId, { markupPercent: stated });
   }
 
   // Customer details stated in chat write the same columns the Invoice tab's fields PATCH, so
@@ -890,26 +937,20 @@ export async function runEstimatingTurn(opts: {
     }
   }
   if (Object.keys(customerData).length > 0) {
-    await prisma.quote.update({ where: { id: opts.quoteId }, data: customerData });
+    await updateDraftQuote(opts.quoteId, opts.companyId, customerData);
   }
 
   // The end-of-materials labor ask fires at most once per quote (labor PRD US2): record
   // that it happened so every later turn's context says "never ask again".
   if (output.askedLaborHours === true && quoteRow?.laborAsked !== true) {
-    await prisma.quote.update({
-      where: { id: opts.quoteId },
-      data: { laborAsked: true },
-    });
+    await updateDraftQuote(opts.quoteId, opts.companyId, { laborAsked: true });
   }
 
   // The template ask latches the same way (template-library). A named template is matched
   // against the company's real list — the model echoes a name, never an id, so a hallucinated
   // or misspelled name simply writes nothing and the default design applies.
   if (output.askedProposalTemplate === true && quoteRow?.templateAsked !== true) {
-    await prisma.quote.update({
-      where: { id: opts.quoteId },
-      data: { templateAsked: true },
-    });
+    await updateDraftQuote(opts.quoteId, opts.companyId, { templateAsked: true });
   }
   const namedTemplate = output.proposalTemplateName;
   if (typeof namedTemplate === "string" && namedTemplate.trim()) {
@@ -917,9 +958,9 @@ export async function runEstimatingTurn(opts: {
       (t) => t.name.toLowerCase() === namedTemplate.trim().toLowerCase()
     );
     if (match) {
-      await prisma.quote.update({
-        where: { id: opts.quoteId },
-        data: { proposalTemplateId: match.id, templateAsked: true },
+      await updateDraftQuote(opts.quoteId, opts.companyId, {
+        proposalTemplateId: match.id,
+        templateAsked: true,
       });
     }
   }

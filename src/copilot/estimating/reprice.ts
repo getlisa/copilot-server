@@ -2,7 +2,8 @@ import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { loadCompanyPricing } from "./companyPricing";
 import { unitsCompatible } from "./packMath";
-import { updateDraftLineItem } from "./draftWrite";
+import { Prisma } from "@prisma/client";
+import { updateDraftLineItems } from "./draftWrite";
 
 /**
  * Config changes propagate to open Drafts immediately (both PRDs' shared rule):
@@ -26,7 +27,20 @@ export async function repriceDrafts(companyId: number): Promise<number> {
     }),
   ]);
 
-  let updated = 0;
+  /**
+   * Group by payload rather than writing row by row. A sweep gives every line matching a term
+   * the same price, and the un-price branch gives them all the same three nulls, so the whole
+   * company collapses to a handful of statements instead of one per line — see
+   * updateDraftLineItems for why that matters on a pool capped at one connection.
+   */
+  const batches = new Map<string, { data: Prisma.QuoteLineItemUpdateManyMutationInput; ids: string[] }>();
+  const enqueue = (data: Prisma.QuoteLineItemUpdateManyMutationInput, id: string) => {
+    const key = JSON.stringify(data);
+    const batch = batches.get(key);
+    if (batch) batch.ids.push(id);
+    else batches.set(key, { data, ids: [id] });
+  };
+
   for (const line of lines) {
     if (line.ambiguousAction) continue; // pending tap-to-select placeholder, not a priced line
     const term = line.searchTerm?.trim() || line.description;
@@ -38,31 +52,27 @@ export async function repriceDrafts(companyId: number): Promise<number> {
         Number(line.unitPrice) !== hit.unitPrice ||
         line.sourcePricebookId !== hit.sourcePricebookId;
       if (!changed) continue;
-      if (
-        !(await updateDraftLineItem(line.id, companyId, {
+      enqueue(
+        {
           unitPrice: hit.unitPrice,
           pricebookCode: hit.code,
           sourcePricebookId: hit.sourcePricebookId,
           ...(hit.unit && line.unit == null ? { unit: hit.unit } : {}),
-        }))
-      )
-        continue;
-      updated++;
+        },
+        line.id
+      );
     } else if (line.sourcePricebookId != null) {
       // The line was priced from a book that no longer covers it (item removed, book
       // deleted). Un-price it so the unmatched flag surfaces, rather than keeping a price
       // no configuration stands behind. Fallback-priced (HD-/EST) lines are left alone.
-      if (
-        !(await updateDraftLineItem(line.id, companyId, {
-          unitPrice: null,
-          pricebookCode: null,
-          sourcePricebookId: null,
-        }))
-      )
-        continue;
-      updated++;
+      enqueue({ unitPrice: null, pricebookCode: null, sourcePricebookId: null }, line.id);
     }
   }
+
+  let updated = 0;
+  for (const { data, ids } of batches.values())
+    updated += await updateDraftLineItems(ids, companyId, data, { manuallyEdited: false });
+
   if (updated > 0)
     logger.info("Re-priced Draft lines after pricebook config change", { companyId, updated });
   return updated;
@@ -82,14 +92,20 @@ export async function repriceLaborDrafts(companyId: number): Promise<number> {
   ]);
   const byId = new Map(rates.map((r) => [r.id, r]));
 
-  let updated = 0;
+  const rateBatches = new Map<string, { hourlyRate: Prisma.Decimal; ids: string[] }>();
+  const detachIds: string[] = [];
+
   for (const line of lines) {
     const rate = byId.get(line.laborRateId!);
     if (rate) {
       if (Number(line.unitPrice) === Number(rate.hourlyRate)) continue;
-      if (!(await updateDraftLineItem(line.id, companyId, { unitPrice: rate.hourlyRate })))
-        continue;
-      logger.info("Labor line re-priced after rate change", {
+      const key = String(rate.hourlyRate);
+      const batch = rateBatches.get(key);
+      if (batch) batch.ids.push(line.id);
+      else rateBatches.set(key, { hourlyRate: rate.hourlyRate, ids: [line.id] });
+      // Logged where the decision is made, not where it lands: the batched write below
+      // reports its own skips. This records what the rate change asked for.
+      logger.info("Labor line re-price queued after rate change", {
         companyId,
         lineItemId: line.id,
         from: Number(line.unitPrice),
@@ -98,13 +114,24 @@ export async function repriceLaborDrafts(companyId: number): Promise<number> {
     } else {
       // The configured type was deleted: keep the price the technician already saw, but
       // detach it so it reads as an ad-hoc rate rather than pointing at a dead config row.
-      if (!(await updateDraftLineItem(line.id, companyId, { laborRateId: null }))) continue;
-      logger.info("Labor line detached from deleted labor type", {
+      detachIds.push(line.id);
+      logger.info("Labor line detach queued: its labor type was deleted", {
         companyId,
         lineItemId: line.id,
       });
     }
-    updated++;
   }
+
+  let updated = 0;
+  for (const { hourlyRate, ids } of rateBatches.values())
+    updated += await updateDraftLineItems(ids, companyId, { unitPrice: hourlyRate }, {
+      manuallyEdited: false,
+    });
+  // Deliberately WITHOUT the manuallyEdited guard the rate writes carry: this clears a pointer
+  // to a labor type that no longer exists and touches no money. A technician who overrode the
+  // rate keeps their number, and skipping the detach would strand the line on a dead config row.
+  updated += await updateDraftLineItems(detachIds, companyId, { laborRateId: null });
+
+  if (updated > 0) logger.info("Re-priced Draft labor lines after a rate change", { companyId, updated });
   return updated;
 }

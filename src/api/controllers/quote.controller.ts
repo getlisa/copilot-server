@@ -12,6 +12,8 @@ import {
   toQuoteDto,
   toLineItemDto,
   stripMarkup,
+  flagsFor,
+  BLOCKING_FLAGS,
   ESTIMATED_PRICE_CODE,
   type CatalogIndex,
   type PricebookNameIndex,
@@ -678,7 +680,12 @@ export class QuoteController {
     // An agent turn is work on the estimate: it adds, re-prices and removes line items, and it
     // writes the quote row only when a customer detail was stated. Without this a conversation
     // that reshaped the whole estimate would not move it up the list.
-    await touchQuote(quote.id);
+    //
+    // A discarded turn is the exception. `touchQuote` is an empty-data update whose whole
+    // purpose is to fire `@updatedAt`, so calling it on a turn that deliberately wrote nothing
+    // would stamp a frozen quote and float it up the "last worked on" list — the one write this
+    // guard is supposed to have prevented.
+    if (!turn.discarded) await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({
       success: true,
@@ -977,15 +984,19 @@ export class QuoteController {
       if (!action) return fail(res, 400, "Item has no pending ambiguous action");
       if (!action.candidateItemIds.includes(body.resolveCandidateId))
         return fail(res, 400, "Not one of the ambiguous candidates");
+      // All three writes carry the Draft condition, like every other line-item write in the
+      // codebase now. The COMPLETED check above ran before this branch resolved the pending
+      // action; a completion arriving in between would otherwise edit and delete lines on an
+      // estimate the CRM has already been sent.
+      const draftScope = { quote: { companyId: user.companyId, status: "DRAFT" as const } };
       if (action.action === "remove") {
-        await prisma.quoteLineItem.delete({ where: { id: body.resolveCandidateId } });
-      } else {
-        await prisma.quoteLineItem.update({
-          where: { id: body.resolveCandidateId },
-          data: { ...action.fields },
+        await prisma.quoteLineItem.deleteMany({
+          where: { id: body.resolveCandidateId, ...draftScope },
         });
+      } else {
+        await updateDraftLineItem(body.resolveCandidateId, user.companyId, { ...action.fields });
       }
-      await prisma.quoteLineItem.delete({ where: { id: item.id } }); // drop placeholder
+      await prisma.quoteLineItem.deleteMany({ where: { id: item.id, ...draftScope } }); // placeholder
       await touchQuote(quote.id);
       const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
       return res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
@@ -1044,7 +1055,10 @@ export class QuoteController {
       if (item.pricebookCode === ESTIMATED_PRICE_CODE) data.pricebookCode = null;
     }
     if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
-    await prisma.quoteLineItem.update({ where: { id: item.id }, data });
+    // `matcherFor` above loads the company's pricebooks, so the COMPLETED check at the top of
+    // this handler is a DB round trip away from this write — enough for a completion to land.
+    if (!(await updateDraftLineItem(item.id, user.companyId, data)))
+      return fail(res, 409, "Quote is Completed and frozen");
     await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
@@ -1059,7 +1073,10 @@ export class QuoteController {
     if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
     const item = quote.lineItems.find((i) => i.id === req.params.itemId);
     if (!item) return fail(res, 404, "Line item not found");
-    await prisma.quoteLineItem.delete({ where: { id: item.id } });
+    const { count } = await prisma.quoteLineItem.deleteMany({
+      where: { id: item.id, quote: { companyId: user.companyId, status: "DRAFT" } },
+    });
+    if (count === 0) return fail(res, 409, "Quote is Completed and frozen");
     await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
@@ -1142,7 +1159,20 @@ export class QuoteController {
       ...(resolved.unit ? { unit: resolved.unit } : {}),
       ...(packed.rounded ? { quantity: packed.quantity } : {}),
     });
-    if (!wrote) return fail(res, 409, "Quote is Completed and frozen");
+    if (!wrote) {
+      // A refused write means the row stopped matching, and completion is only one reason —
+      // a concurrent DELETE of the line item during the same 13-32s search is the other. Both
+      // are rare, so paying one extra read here to answer accurately costs nothing on the path
+      // that matters, and "Completed and frozen" is actively misleading for a Draft whose line
+      // the technician simply removed while it was still searching.
+      const stillDraft = await prisma.quote.findFirst({
+        where: { id: quote.id, companyId: user.companyId, status: "DRAFT" },
+        select: { id: true },
+      });
+      return stillDraft
+        ? fail(res, 404, "Line item not found")
+        : fail(res, 409, "Quote is Completed and frozen");
+    }
     await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
@@ -1240,16 +1270,81 @@ export class QuoteController {
       }
     }
 
-    const updated = await prisma.quote.update({
-      where: { id: quote.id },
-      data: {
-        status: "COMPLETED",
-        completedAt: new Date(),
-        chosenOptionGroup: chosenOption,
-        ...(lateTax ? { salesTaxId: lateTax.id, taxRatePercent: lateTax.ratePercent } : {}),
-      },
-      include: { lineItems: true },
-    });
+    /**
+     * The flip only fires on a quote that is still a DRAFT, and the row count is what says
+     * whether this request is the one that completed it.
+     *
+     * Unconditional, this was reachable twice for one estimate. Everything above — the QuickBooks
+     * connection lookup, the TaxCode read, sometimes a full listSalesTax — is network and DB
+     * latency during which a second Complete can arrive: a double-tap, two tabs, or the ordinary
+     * Complete → Reopen → Complete sequence. Each one posted its own estimate to QuickBooks while
+     * `qboEstimateId` was still null, so neither saw the other's id and the customer's job ended
+     * up with two estimates that no later sync reconciles.
+     */
+    /**
+     * Flip FIRST, then re-derive the blocking flags from the rows the flip itself locked, and
+     * roll back if they disagree with the pre-check above.
+     *
+     * The obvious order — gate, then flip — is what shipped, and it reads two different
+     * snapshots. `blockingFlagCount` came from the read at the top of this handler, while the
+     * payload posted to QuickBooks and ZenTrades came from the flip; between them sit a
+     * QuickBooks connection lookup and a TaxCode read. A pricebook replacement un-pricing a
+     * line in that gap passed a gate computed against the older rows and shipped the newer
+     * ones. Wrapping that order in a transaction does not help: under READ COMMITTED the gate
+     * read still takes its own snapshot.
+     *
+     * Flipping first inverts it. The UPDATE takes the quote row lock, so any writer that got
+     * there first has already committed and is visible to the read that follows; a late
+     * blocking flag throws, the flip rolls back, and the technician gets the same 409 they
+     * would have got from the pre-check. The gate and the payload are now the same rows.
+     *
+     * `flagsFor` is pure and needs only the line item, so nothing inside this transaction
+     * reaches for the global client — which matters, because `connection_limit=1` means a
+     * nested query here would wait on the connection this transaction is holding.
+     */
+    class LateBlockingFlags extends Error {
+      constructor(readonly blocking: number) {
+        super("blocked");
+      }
+    }
+    let updated: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>;
+    try {
+      updated = await prisma.$transaction(async (tx) => {
+        const flipped = await tx.quote.updateMany({
+          where: { id: quote.id, status: "DRAFT" },
+          data: {
+            status: "COMPLETED",
+            completedAt: new Date(),
+            chosenOptionGroup: chosenOption,
+            ...(lateTax ? { salesTaxId: lateTax.id, taxRatePercent: lateTax.ratePercent } : {}),
+          },
+        });
+        // Unconditional, the flip was reachable twice for one estimate — a double-tap, two
+        // tabs, or the ordinary Complete → Reopen → Complete. Each posted its own estimate
+        // while `qboEstimateId` was still null, so neither saw the other's id and the job
+        // ended up with two QuickBooks estimates nothing later reconciles.
+        if (flipped.count === 0) throw new LateBlockingFlags(-1);
+        const fresh = await tx.quote.findFirst({
+          where: { id: quote.id, userId: user.userId, companyId: user.companyId },
+          include: { lineItems: true },
+        });
+        const blocking = fresh!.lineItems.filter((li) =>
+          flagsFor(li).some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
+        ).length;
+        if (blocking > 0) throw new LateBlockingFlags(blocking);
+        return fresh!;
+      });
+    } catch (e) {
+      if (e instanceof LateBlockingFlags)
+        return e.blocking < 0
+          ? fail(res, 409, "This estimate has already been marked Completed")
+          : fail(
+              res,
+              409,
+              `${e.blocking} line item(s) still need attention before this quote can be marked Completed`
+            );
+      throw e;
+    }
     QuoteController.postToQboInBackground(updated);
     QuoteController.postToZtInBackground(updated);
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });
