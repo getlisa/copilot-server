@@ -923,9 +923,9 @@ export async function taxEnabledFor(companyId: number): Promise<{
   enabled: boolean;
   stored: boolean;
   enforced: boolean;
-  enforcedBy: "quickbooks" | "crm" | null;
+  enforcedBy: "quickbooks" | "zentrades" | "crm" | null;
 }> {
-  const [config, { external }, crm] = await Promise.all([
+  const [config, { external, via }, crm] = await Promise.all([
     prisma.company_configs.findUnique({
       where: { company_id: companyId },
       select: { tax_enabled: true },
@@ -939,7 +939,9 @@ export async function taxEnabledFor(companyId: number): Promise<{
     }),
   ]);
   const stored = config?.tax_enabled ?? false;
-  const enforcedBy = external ? "quickbooks" : crm ? "crm" : null;
+  // `via` names the actual external source — hardcoding "quickbooks" here told ZenTrades
+  // companies that QuickBooks was forcing tax on (rebase seam, 2026-09-10).
+  const enforcedBy = external ? via : crm ? "crm" : null;
   return { enabled: stored || enforcedBy != null, stored, enforced: enforcedBy != null, enforcedBy };
 }
 
