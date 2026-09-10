@@ -618,10 +618,24 @@ export async function renderTemplatedProposalPdf(
       const footer = () => {
         if (!footerText) return;
         const keep = { x: doc.x, y: doc.y };
+        // This fires MID-TEXT-CALL when a heading or paragraph breaks across the page, and
+        // pdfkit keeps writing with whatever state it finds afterwards. Restoring only x/y
+        // left the footer's font in charge, so the continuation — one heading per document,
+        // whichever landed on the boundary — printed 7.5pt grey Helvetica instead of its own
+        // style (user report 2026-09-10, the "Exclusions" heading). Save/restore the graphics
+        // state (colors, line width) and put the font back by hand: pdfkit's font is not part
+        // of the PDF graphics state, so q/Q alone does not restore it.
+        const keepFont = (doc as unknown as { _font?: { name?: string } })._font?.name;
+        const keepFontSize = (doc as unknown as { _fontSize?: number })._fontSize;
+        // fillColor lives in pdfkit's own bookkeeping (re-emitted per page), which q/Q does
+        // NOT restore — verified: with save/restore alone the boundary heading kept the right
+        // font but the footer's grey.
+        const keepFill = (doc as unknown as { _fillColor?: [unknown, number] })._fillColor;
         // Writing below the bottom margin makes pdfkit auto-page, which fires pageAdded,
         // which draws the footer… (a live stack overflow). Zero the margin while drawing.
         const keepBottom = doc.page.margins.bottom;
         doc.page.margins.bottom = 0;
+        doc.save();
         const fy = PAGE_H - 34;
         if (accent)
           doc.moveTo(MARGIN, fy - 4).lineTo(PAGE_W - MARGIN, fy - 4).strokeColor(accent).lineWidth(1).stroke();
@@ -630,6 +644,11 @@ export async function renderTemplatedProposalPdf(
           .fontSize(7.5)
           .fillColor("#888888")
           .text(footerText, MARGIN, fy, { width: CONTENT_W, align: "center", lineBreak: false });
+        doc.restore();
+        if (keepFont) doc.font(keepFont);
+        if (keepFontSize) doc.fontSize(keepFontSize);
+        if (keepFill)
+          doc.fillColor(keepFill[0] as string | [number, number, number], keepFill[1]);
         doc.page.margins.bottom = keepBottom;
         doc.x = keep.x;
         doc.y = keep.y;
