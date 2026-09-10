@@ -3,6 +3,7 @@ import { Prisma, ZtConnection } from "@prisma/client";
 import prisma from "./prisma";
 import logger from "./logger";
 import { ztConnectionFor, ztConnected, ztFetch } from "./zt";
+import { listProposalTemplateChoices, matchTemplateToJobType } from "./proposalTemplates";
 
 /**
  * ZenTrades sync engine (plan 2.3-2.6), structured on qboIngest.ts:
@@ -620,6 +621,12 @@ export interface ZtQuoteSeed {
   customerPhone: string | null;
   salesTaxId: number | null;
   taxRatePercent: number | null;
+  /** Template auto-picked from the ticket's jobType; null = no confident match, chat asks. */
+  proposalTemplateId: number | null;
+  proposalTemplateName: string | null;
+  jobType: string | null;
+  /** The company's template library, for the welcome message's pick-or-switch line. */
+  templateChoices: { id: number; name: string }[];
 }
 
 const addrLine = (a: Record<string, unknown> | undefined): string | null => {
@@ -755,6 +762,16 @@ export async function seedQuoteFromZtTicket(
     }
   }
 
+  // -- proposal template from the ticket's job type --
+  // Name-matched against the company's template library; no match (or a tie) leaves the
+  // quote templateless and the welcome message asks, listing the choices. Best-effort:
+  // template matching must never fail a quote creation.
+  const jobType = typeof p.jobType === "string" && p.jobType.trim() ? p.jobType.trim() : null;
+  const templateChoices = await listProposalTemplateChoices(companyId).catch(
+    () => [] as { id: number; name: string }[]
+  );
+  const matched = jobType ? matchTemplateToJobType(templateChoices, jobType) : null;
+
   return {
     customerId,
     customerName: name || null,
@@ -763,6 +780,10 @@ export async function seedQuoteFromZtTicket(
       typeof customer?.landline === "string" && customer.landline ? customer.landline : null,
     salesTaxId,
     taxRatePercent,
+    proposalTemplateId: matched?.id ?? null,
+    proposalTemplateName: matched?.name ?? null,
+    jobType,
+    templateChoices,
   };
 }
 

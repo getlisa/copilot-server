@@ -429,6 +429,16 @@ export class QuoteController {
               customerName: ztSeed.customerName,
               customerAddress: ztSeed.customerAddress,
               customerPhone: ztSeed.customerPhone,
+              // Template auto-picked from the ticket's jobType. templateAsked latches in BOTH
+              // branches: on a match the welcome names the choice (asking again would second-
+              // guess it), and without one the welcome itself asks, listing the choices — the
+              // agent's own ask would repeat the question one turn later. Naming a template in
+              // chat works either way. With fewer than two templates there is nothing to ask.
+              ...(ztSeed.proposalTemplateId != null
+                ? { proposalTemplateId: ztSeed.proposalTemplateId, templateAsked: true }
+                : ztSeed.templateChoices.length >= 2
+                ? { templateAsked: true }
+                : {}),
             }
           : {}),
       },
@@ -438,7 +448,24 @@ export class QuoteController {
     // message, so the technician reacts instead of dictating. Best-effort — a failed welcome
     // must not fail the creation.
     if (ztSeed && ztTicketId) {
-      const welcome = await ztWelcomeMessage(user.companyId, ztTicketId).catch(() => null);
+      let welcome = await ztWelcomeMessage(user.companyId, ztTicketId).catch(() => null);
+      // An auto-picked template is stated, never silent — with the alternatives listed so
+      // switching is one sentence. No confident match with 2+ templates = the welcome asks,
+      // which is this quote's once-per-quote template ask (templateAsked above).
+      if (welcome && ztSeed.proposalTemplateName) {
+        const others = ztSeed.templateChoices
+          .filter((t) => t.id !== ztSeed.proposalTemplateId)
+          .map((t) => `“${t.name}”`);
+        welcome +=
+          `\n\n_Using your “${ztSeed.proposalTemplateName}” proposal template` +
+          (ztSeed.jobType ? ` (matched to job type “${ztSeed.jobType}”)` : "") +
+          (others.length ? `. Also available: ${others.join(", ")} — just say the word to switch._` : `._`);
+      } else if (welcome && ztSeed.templateChoices.length >= 2) {
+        welcome +=
+          `\n\nWhich proposal template should I use for this one? Your templates: ` +
+          ztSeed.templateChoices.map((t) => `“${t.name}”`).join(", ") +
+          `. If you don't pick, your default applies.`;
+      }
       if (welcome) {
         await prisma.message
           .create({
