@@ -19,6 +19,14 @@ import {
   QBO_ENVIRONMENT,
   QBO_APP_RETURN_URL,
 } from "../../lib/qbo";
+import { isZtConfigured, ztConnected, ztConnectionFor, connectZt, disconnectZt } from "../../lib/zt";
+import {
+  syncZtData,
+  listZtJobs,
+  ztSyncProgressFor,
+  ZtSyncRunningError,
+  ZT_SYNC_CLAIM_STALE_MS,
+} from "../../lib/ztIngest";
 import {
   syncQboReferenceData,
   QboSyncBusyError,
@@ -167,7 +175,10 @@ export class CompanyController {
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const conn = await qboConnectionFor(companyId);
+    const [conn, ztConn] = await Promise.all([
+      qboConnectionFor(companyId),
+      ztConnectionFor(companyId),
+    ]);
     res.json({
       success: true,
       data: {
@@ -193,10 +204,132 @@ export class CompanyController {
           /** When reference data was last pulled; null means never. Drives the Sync button. */
           referenceSyncedAt: (await qboSyncedAt(companyId))?.toISOString() ?? null,
         },
-        // ponytail: ZenTrades is a display-only row in the UI for now; add a real entry
-        // here when that integration exists.
+        zt: {
+          /** Server has ZT_TOKEN_KEY set — connect 503s before touching ZenTrades without it. */
+          configured: isZtConfigured(),
+          connected: ztConnected(ztConn),
+          ztCompanyId: ztConn?.ztCompanyId ?? null,
+          ztCompanyName: ztConn?.ztCompanyName ?? null,
+          /** Last COMPLETE sync (every stage succeeded); drives the Sync button's caption. */
+          lastSyncAt: ztConn?.lastSyncAt?.toISOString() ?? null,
+          lastSyncError: ztConn?.lastSyncError ?? null,
+          /**
+           * The one-sync-at-a-time claim is held (and not yet stale). The card pairs this
+           * with the progress read to tell a LIVE sync (lock + progress line → watch it,
+           * disable the button) from an ORPHANED lock (no line → button stays usable).
+           */
+          syncRunning:
+            !!ztConn?.syncStartedAt &&
+            Date.now() - ztConn.syncStartedAt.getTime() < ZT_SYNC_CLAIM_STALE_MS,
+        },
       },
     });
+  }
+
+  /**
+   * POST /api/v1/companies/connections/zt/connect — connect ZenTrades with a login.
+   * Admin-only, scoped to the caller's company. The credentials are validated by actually
+   * logging in to ZenTrades before anything is stored; a rejected login stores nothing.
+   */
+  static async connectZtForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    if (!isZtConfigured())
+      return res.status(503).json({
+        success: false,
+        error: { status: 503, message: "ZenTrades is not configured on this server" },
+      });
+    const username = typeof req.body?.username === "string" ? req.body.username.trim() : "";
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    if (!username || !password)
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "A ZenTrades username and password are required" },
+      });
+    try {
+      const conn = await connectZt(companyId, username, password);
+      res.json({ success: true, data: { connected: true, ztCompanyId: conn.ztCompanyId } });
+    } catch (err) {
+      // The message is already user-facing prose from ztLogin; no credentials are logged.
+      logger.warn("ZenTrades connect failed", {
+        companyId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return res.status(502).json({
+        success: false,
+        error: {
+          status: 502,
+          message: err instanceof Error ? err.message : "ZenTrades login failed",
+        },
+      });
+    }
+  }
+
+  /**
+   * POST /api/v1/companies/connections/zt/sync — pull jobs, deficiencies and the price
+   * catalog. Admin-only: a write, and it polls another company's API. One run at a time per
+   * company (row claim inside syncZtData); stage failures come back in `errors` and are also
+   * recorded on the connection.
+   */
+  static async syncZtForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    try {
+      const result = await syncZtData(companyId);
+      res.json({ success: true, data: result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "ZenTrades sync failed";
+      // A held claim is a conflict the UI can act on (watch the running sync), not a gateway
+      // failure — the status code is how the client tells the two apart.
+      const status = err instanceof ZtSyncRunningError ? 409 : 502;
+      return res.status(status).json({ success: false, error: { status, message } });
+    }
+  }
+
+  /**
+   * GET /api/v1/companies/connections/zt/jobs?q= — the Estimates-tab job picker's rows.
+   * Deliberately ungated beyond auth (any role): technicians start estimates from it, the same
+   * reasoning as the QBO item list staying open.
+   */
+  static async listZtJobsForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const q = typeof req.query.q === "string" ? req.query.q : undefined;
+    res.json({ success: true, data: await listZtJobs(companyId, q) });
+  }
+
+  /**
+   * GET /api/v1/companies/connections/zt/sync/progress — what the running sync is doing,
+   * for the Connections card's live caption. Null when no sync is running.
+   */
+  static async ztSyncProgress(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    res.json({ success: true, data: { progress: ztSyncProgressFor(companyId) } });
+  }
+
+  /** DELETE /api/v1/companies/connections/zt — self-serve disconnect, same shape as QBO. */
+  static async disconnectZtForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    await disconnectZt(companyId);
+    logger.info("ZenTrades disconnected", { companyId });
+    res.json({ success: true });
   }
 
   /**

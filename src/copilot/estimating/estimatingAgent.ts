@@ -6,6 +6,7 @@ import { packAwareQuantity, unitsCompatible } from "./packMath";
 import { enqueueResolve } from "./homeDepotCatalog";
 import { loadCompanyPricing } from "./companyPricing";
 import { listProposalTemplateChoices } from "../../lib/proposalTemplates";
+import { ztChatContext } from "../../lib/ztIngest";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
 
 /**
@@ -326,7 +327,9 @@ function buildTurnContext(
   laborAsked = false,
   /** Names offered in the template ask; empty = 0-1 templates, never ask (template-library). */
   proposalTemplates: string[] = [],
-  templateAsked = false
+  templateAsked = false,
+  /** ZenTrades job context for a ZT-seeded quote (ztChatContext); null otherwise. */
+  ztContext: string | null = null
 ): string {
   // Product provenance is included so the agent can answer "what's the link / brand / price"
   // from context instead of guessing or web-searching. Keyed off the line's pricebookCode.
@@ -368,7 +371,7 @@ function buildTurnContext(
       : laborRates
           .map((r) => `- ${r.name} — $${r.hourlyRate}/hr`)
           .join("\n");
-  return `CURRENT LINE ITEMS:
+  return `${ztContext ? `${ztContext}\n\n` : ""}CURRENT LINE ITEMS:
 ${itemLines}
 
 KNOWLEDGE BASE ENTRIES (problem → material):
@@ -417,10 +420,15 @@ export async function runEstimatingTurn(opts: {
     prisma.laborRate.findMany({ where: { companyId: opts.companyId } }),
     prisma.quote.findUnique({
       where: { id: opts.quoteId },
-      select: { laborAsked: true, templateAsked: true },
+      select: { laborAsked: true, templateAsked: true, ztTicketId: true },
     }),
     listProposalTemplateChoices(opts.companyId),
   ]);
+  // ZT-seeded quotes carry their job's description + open deficiencies into every turn, so the
+  // agent's first reply reflects the actual scope instead of asking what the job is.
+  const ztContext = quoteRow?.ztTicketId
+    ? await ztChatContext(opts.companyId, quoteRow.ztTicketId)
+    : null;
   const laborRatesLite: LaborRateLite[] = laborRates.map((r) => ({
     id: r.id,
     name: r.name,
@@ -462,7 +470,8 @@ export async function runEstimatingTurn(opts: {
     quoteRow?.laborAsked === true,
     // The ask needs a real choice: 0-1 templates → no list in context, the rule never fires.
     proposalTemplates.length >= 2 ? proposalTemplates.map((t) => t.name) : [],
-    quoteRow?.templateAsked === true
+    quoteRow?.templateAsked === true,
+    ztContext
   );
   const { raw } = await callStructured({
     system: SYSTEM_PROMPT + MARKUP_PROMPT + CUSTOMER_PROMPT + TEMPLATE_PROMPT,

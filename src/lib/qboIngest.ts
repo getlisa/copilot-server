@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import prisma from "./prisma";
 import logger from "./logger";
 import { queryAll, qboFetch, qboConnectionFor, qboConnected } from "./qbo";
+import { ztConnectionFor, ztConnected } from "./zt";
 import { parseAddress, toBillAddr, fromBillAddr } from "./addressParse";
 import { UserFacingError } from "./clientError";
 
@@ -880,10 +881,17 @@ export function qboIncomeAccounts(companyId: number) {
  */
 export async function taxSourceIsExternal(companyId: number): Promise<{
   external: boolean;
-  via: "quickbooks" | null;
+  via: "quickbooks" | "zentrades" | null;
 }> {
-  const conn = await qboConnectionFor(companyId);
-  return qboConnected(conn) ? { external: true, via: "quickbooks" } : { external: false, via: null };
+  const [conn, ztConn] = await Promise.all([
+    qboConnectionFor(companyId),
+    ztConnectionFor(companyId),
+  ]);
+  if (qboConnected(conn)) return { external: true, via: "quickbooks" };
+  // A ZenTrades connection is an external tax source the same way: its zone rates (source
+  // ZENTRADES, ingested at quote seeding) are usable and MANUAL rates stop applying.
+  if (ztConnected(ztConn)) return { external: true, via: "zentrades" };
+  return { external: false, via: null };
 }
 
 /**

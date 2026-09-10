@@ -37,6 +37,30 @@ companyRoute.delete(
   CompanyController.disconnectQboForCompany
 );
 
+// ZenTrades. No OAuth — an admin submits the company's ZenTrades login, which is validated by
+// an actual login before being stored sealed. Status rides the shared /connections read above.
+companyRoute.post(
+  "/connections/zt/connect",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.connectZtForCompany
+);
+companyRoute.post(
+  "/connections/zt/sync",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.syncZtForCompany
+);
+// The job picker read stays open to every role — technicians start estimates from it.
+companyRoute.get("/connections/zt/jobs", authMiddleware, CompanyController.listZtJobsForCompany);
+companyRoute.get("/connections/zt/sync/progress", authMiddleware, CompanyController.ztSyncProgress);
+companyRoute.delete(
+  "/connections/zt",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.disconnectZtForCompany
+);
+
 // Reference data. The sync is a settings write, so admin-only. The reads a technician's estimate
 // screen needs — the customer picker — are open to every role, for the same reason the item list
 // is: gating them empties the picker with no error anywhere.

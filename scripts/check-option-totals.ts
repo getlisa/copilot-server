@@ -57,6 +57,10 @@ const quote: QuoteInput = {
   qboEstimateId: null,
   qboSyncedAt: null,
   qboSyncError: null,
+    ztTicketId: null,
+    ztEstimateId: null,
+    ztSyncedAt: null,
+    ztSyncError: null,
   lineItems: [
     line("base-labor", 2842, null, 0),
     line("optA-trench", 588, "Option A – Trench Only", 1),

@@ -119,7 +119,23 @@ Zero-risk to the app — it connects as `app_user`, not `postgres`.
 | Connection string auth fails with correct password | Password has `: # ? ] *` etc. — URL-encode it (step 4) |
 | Which DB is prod? | NOT the Supabase URLs in local `.env` — prod is the Aurora us-east-1 instance |
 
-## Pending migration: proposal template library — phase4 (2026-09-09)
+## APPLIED 2026-09-10: catch-up — ONE file for everything below
+
+`docs/sql/prod-catchup-2026-09-10.sql` bundles every previously pending block in dependency
+order: the entity expand (next section), phase1b, phase3, phase4 (next section), and the ZenTrades
+migrations now filed as phase7.sql/phase8.sql (they ran under the names phase5/phase6;
+renumbered when main claimed those numbers for tax-enable and the webhook ledger), plus the ownership/grants the individual files were missing. Applied
+2026-09-10 from a CloudShell VPC environment per `docs/CLOUDSHELL_PROD_SQL.md`; finished with
+`PROD_CATCHUP_2026_09_10_APPLIED`. Findings from the run: entities + phase1b were already
+present in prod (skipped idempotently), everything ZenTrades/template was created fresh, and
+one company's proposal design migrated to a 'Default' template row (`INSERT 0 1`).
+
+**Still pending: the CONTRACT phase (`docs/sql/phase2.sql`)** — drops
+`quotes.qbo_customer_id`/`qbo_customer_name` and the superseded `raw_customer_qb`/
+`raw_taxcode_qb`/`raw_taxrate_qb`. Run it ONLY after the new image is deployed and a quote
+read + estimate post have been exercised; it is the rollback point of no return.
+
+## APPLIED 2026-09-10 (via catch-up): proposal template library — phase4 (2026-09-09)
 
 The single `companies.proposal_template` Json column becomes a per-company library
 (`proposal_templates` table, one default enforced by a partial unique index); existing designs
@@ -157,7 +173,7 @@ const{PrismaClient}=require('@prisma/client');const p=new PrismaClient();
 When applied, retitle this section `## APPLIED <date>: …` immediately — three "Pending" blocks
 at once is how "run the pending SQL" becomes ambiguous.
 
-## Pending migration: customers + sales tax as entities (2026-09-08)
+## APPLIED 2026-09-10 (expand only, via catch-up; was already largely present): customers + sales tax as entities (2026-09-08)
 
 The entity + `<entity>_qb` architecture. CLARA owns the entity; a sibling `_qb` row holds what
 QuickBooks knows about it. Three reasons the split matters: the entity must work for a company

@@ -36,6 +36,9 @@ import {
 } from "../../lib/qboIngest";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
 import { resolveProposalBlocks } from "../../lib/proposalTemplates";
+import { seedQuoteFromZtTicket, ztWelcomeMessage } from "../../lib/ztIngest";
+import { ztConnectionFor, ztConnected } from "../../lib/zt";
+import { syncQuoteToZt } from "../../lib/ztEstimate";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
 import { EstimateTurn } from "../../copilot/estimate/estimateService";
@@ -395,6 +398,20 @@ export class QuoteController {
     // force when the estimate was created, frozen against later changes to the company's default.
     // Null when nothing is configured — and null is not 0%, it means no tax is declared at all.
     const tax = await defaultSalesTax(user.companyId);
+    // A quote started from a ZenTrades job (Estimates-tab picker) inherits the ticket's
+    // customer (adopted by ZenTrades id) and its service address's tax zone as the snapshot —
+    // the zone-specific rate beats the company default. An unknown ticket id is refused: a
+    // quote silently created unlinked would post nowhere at completion.
+    const ztTicketId =
+      typeof req.body?.ztTicketId === "string" && req.body.ztTicketId.trim()
+        ? req.body.ztTicketId.trim()
+        : null;
+    const ztSeed = ztTicketId ? await seedQuoteFromZtTicket(user.companyId, ztTicketId) : null;
+    if (ztTicketId && !ztSeed)
+      return res.status(404).json({
+        success: false,
+        error: { status: 404, message: "That ZenTrades job is not synced for this company" },
+      });
     const quote = await prisma.quote.create({
       data: {
         conversationId: conversation.id,
@@ -402,11 +419,38 @@ export class QuoteController {
         companyId: user.companyId,
         templateId: activeTemplate?.id ?? null,
         markupPercent: config?.default_markup_percent ?? 0,
-        salesTaxId: tax?.id ?? null,
-        taxRatePercent: tax?.ratePercent ?? null,
+        salesTaxId: ztSeed?.salesTaxId ?? tax?.id ?? null,
+        taxRatePercent: ztSeed?.taxRatePercent ?? tax?.ratePercent ?? null,
+        ...(ztSeed
+          ? {
+              ztTicketId,
+              customerId: ztSeed.customerId,
+              customerName: ztSeed.customerName,
+              customerAddress: ztSeed.customerAddress,
+              customerPhone: ztSeed.customerPhone,
+            }
+          : {}),
       },
       include: { lineItems: true },
     });
+    // A ZT-seeded chat opens already talking: the job + open deficiencies as the first AI
+    // message, so the technician reacts instead of dictating. Best-effort — a failed welcome
+    // must not fail the creation.
+    if (ztSeed && ztTicketId) {
+      const welcome = await ztWelcomeMessage(user.companyId, ztTicketId).catch(() => null);
+      if (welcome) {
+        await prisma.message
+          .create({
+            data: { conversationId: conversation.id, senderType: "AI", content: welcome },
+          })
+          .catch((err) =>
+            logger.warn("ZT welcome message failed", {
+              quoteId: quote.id,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          );
+      }
+    }
     res.status(201).json({ success: true, data: await quoteDtoWithProducts(quote) });
   }
 
@@ -1166,6 +1210,7 @@ export class QuoteController {
       include: { lineItems: true },
     });
     QuoteController.postToQboInBackground(updated);
+    QuoteController.postToZtInBackground(updated);
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });
   }
 
@@ -1237,6 +1282,98 @@ export class QuoteController {
           })
         );
     });
+  }
+
+  /**
+   * Fire-and-forget ZenTrades post/update after completion — the sibling of the QBO post at
+   * the same call site, same rules: completion never fails because of an integration, the
+   * outcome lands on the quote (zt_synced_at / zt_sync_error), POST /:quoteId/zt is the retry.
+   */
+  private static postToZtInBackground(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
+    void (async () => {
+      if (!quote.ztTicketId) return;
+      const conn = await ztConnectionFor(quote.companyId);
+      if (!ztConnected(conn)) return;
+      const dto = await quoteDtoWithProducts(quote);
+      // The proposal PDF travels with the estimate (ZenTrades confirmed attachments).
+      // Best-effort: a render failure posts the estimate without it rather than not at all.
+      let pdf: { fileName: string; base64: string } | null = null;
+      try {
+        const { input, proposalTemplate } = await buildProposalParts(quote);
+        const buffer = await renderProposalPdf(input, proposalTemplate);
+        pdf = { fileName: `proposal-${quote.id.slice(0, 8)}.pdf`, base64: buffer.toString("base64") };
+      } catch (e) {
+        logger.warn("ZT post: proposal PDF render failed; posting without attachment", {
+          quoteId: quote.id,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+      const result = await syncQuoteToZt(conn, quote, dto, pdf);
+      await prisma.quote.update({
+        where: { id: quote.id },
+        data: {
+          ztEstimateId: result.ztEstimateId,
+          ztBillingMetaDataId: result.ztBillingMetaDataId,
+          ztSyncedAt: new Date(),
+          ztSyncError: null,
+        },
+      });
+    })().catch(async (e) => {
+      const message = e instanceof Error ? e.message : String(e);
+      logger.error("ZenTrades estimate sync failed", { quoteId: quote.id, error: message });
+      await prisma.quote
+        .update({ where: { id: quote.id }, data: { ztSyncError: message.slice(0, 500) } })
+        .catch((err) =>
+          logger.error("Could not record the ZT sync failure on the quote", {
+            quoteId: quote.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        );
+    });
+  }
+
+  /**
+   * POST /api/v1/quotes/:quoteId/zt — retry a failed ZenTrades post, or push an older
+   * completed estimate. Completed quotes only, mirroring the QBO retry.
+   */
+  static async postQuoteToZt(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    if (quote.status !== "COMPLETED") return fail(res, 409, "Only a completed quote can be sent");
+    if (!quote.ztTicketId) return fail(res, 409, "This quote is not linked to a ZenTrades job");
+    const conn = await ztConnectionFor(user.companyId);
+    if (!ztConnected(conn)) return fail(res, 409, "ZenTrades is not connected");
+    try {
+      const dto = await quoteDtoWithProducts(quote);
+      let pdf: { fileName: string; base64: string } | null = null;
+      try {
+        const { input, proposalTemplate } = await buildProposalParts(quote);
+        const buffer = await renderProposalPdf(input, proposalTemplate);
+        pdf = { fileName: `proposal-${quote.id.slice(0, 8)}.pdf`, base64: buffer.toString("base64") };
+      } catch {
+        /* post without the attachment */
+      }
+      const result = await syncQuoteToZt(conn, quote, dto, pdf);
+      const updated = await prisma.quote.update({
+        where: { id: quote.id },
+        data: {
+          ztEstimateId: result.ztEstimateId,
+          ztBillingMetaDataId: result.ztBillingMetaDataId,
+          ztSyncedAt: new Date(),
+          ztSyncError: null,
+        },
+        include: { lineItems: true },
+      });
+      res.json({ success: true, data: await quoteDtoWithProducts(updated) });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      await prisma.quote
+        .update({ where: { id: quote.id }, data: { ztSyncError: message.slice(0, 500) } })
+        .catch(() => undefined);
+      return fail(res, 502, message);
+    }
   }
 
   /**

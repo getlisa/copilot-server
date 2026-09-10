@@ -175,6 +175,11 @@ export interface QuoteDto {
   qboEstimateId: string | null;
   qboSyncedAt: string | null;
   qboSyncError: string | null;
+  /** ZenTrades linkage + sync state — same semantics as the qbo trio (ZenTrades plan 3.x). */
+  ztTicketId: string | null;
+  ztEstimateId: string | null;
+  ztSyncedAt: string | null;
+  ztSyncError: string | null;
   blockingFlagCount: number;
 }
 
@@ -374,6 +379,10 @@ export type QuoteInput = {
   qboEstimateId: string | null;
   qboSyncedAt: Date | null;
   qboSyncError: string | null;
+  ztTicketId?: string | null;
+  ztEstimateId?: string | null;
+  ztSyncedAt?: Date | null;
+  ztSyncError?: string | null;
   lineItems: LineItemInput[];
 };
 
@@ -486,6 +495,10 @@ export function toQuoteDto(
     qboEstimateId: quote.qboEstimateId ?? null,
     qboSyncedAt: quote.qboSyncedAt?.toISOString() ?? null,
     qboSyncError: quote.qboSyncError ?? null,
+    ztTicketId: quote.ztTicketId ?? null,
+    ztEstimateId: quote.ztEstimateId ?? null,
+    ztSyncedAt: quote.ztSyncedAt?.toISOString() ?? null,
+    ztSyncError: quote.ztSyncError ?? null,
     blockingFlagCount: dtos.filter((d) =>
       d.flags.some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
     ).length,
