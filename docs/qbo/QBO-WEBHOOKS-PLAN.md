@@ -662,3 +662,51 @@ RDS master credentials. **The SQL runs BEFORE the image deploys.** Prisma SELECT
 column its client knows about, so deploying first fails every read of `quotes` — the estimate
 list, opening an estimate, and the drain — with "column does not exist". This does not degrade the
 feature, it takes the Estimator down. Do not merge to `main` until the SQL has run.
+
+### Review round (PR #23) — what the first pass got wrong
+
+Recorded because several of these were invisible in a green test suite.
+
+**The drift writes were reordering the estimate list.** `Quote.updatedAt` is `@updatedAt`, so any
+`prisma.quote.update` stamps it — which is exactly the mechanism `touchQuote` uses to move an
+edited estimate to the top of a list ordered `updatedAt desc` as a work queue (CMAP-94). Baseline
+adoption is the mass case: on the first compare-able event after this ships, every already-posted
+quote has a NULL token, so a Prisma update would have marched the entire completed list to the top
+in webhook-arrival order. All drift writes are now raw SQL (`setDriftColumns`, and the delete
+path), which does not know about `@updatedAt` at all.
+
+**The US8 retry endpoint never stored the token.** Only the completion hook did, so a retry left
+the baseline at whatever the failed attempt held — and the webhook echoing that retry then read as
+the client's edit. Both paths now go through one `recordQboPostResult`, which also writes the token
+only when the response carried one: overwriting a good baseline with null would make the next
+webhook adopt whatever QuickBooks reports and silently absorb a real edit.
+
+**A read-then-write race.** Between loading the quote and writing, there is an Intuit round trip of
+up to three retries against a 30s timeout, and a completion can land inside it. Both writes are now
+compare-and-set on the token the decision was based on; zero rows means we lost the race and the
+winner's value stands.
+
+**A 404 was being treated as a confirmed delete.** `isNotFound` also matches fault 610, and that
+branch now runs on create/update/void/merge and on unseen operations — where a 404 is equally
+QBO's read-after-write lag, or a stored id belonging to a different QuickBooks file (disconnect
+deliberately keeps `qboEstimateId`, and the id is not realm-scoped). Clearing linkage on that guess
+would strand a live estimate and have the next completion post a second one. Only an explicit
+`delete` clears linkage now; the rest is logged and skipped.
+
+**Estimates ignored the drain's own debounce contract.** Stage rows coalesce per (company, stage);
+estimate rows were handled one at a time, so ten edits to one estimate in one window cost ten
+identical Intuit reads against a rate limit shared by every CLARA client. They now coalesce per
+entity id on `ESTIMATE_ACTION_RANK` (delete > compare > ignore), and the connection is resolved
+once per company rather than once per event.
+
+**The lookup was not indexed.** The docstring claimed "one indexed query"; `quotes` had no index on
+`qbo_estimate_id`, so the miss path — the common one — was a full scan. phase9.sql now creates
+`quotes_company_id_qbo_estimate_id_idx` and the schema declares it.
+
+**phase9's verification counted column names only**, so `ADD COLUMN IF NOT EXISTS` against a
+pre-existing column of the wrong type would have printed APPLIED. It asserts `data_type` now, and
+the index.
+
+Smaller: `syncTokenOf` is exported and used by both sides rather than duplicated, and treats an
+empty string as absent; `estimateDriftVerdict` guards with `== null` so an undefined token cannot
+reach the comparison and read as drift against `"undefined"`.

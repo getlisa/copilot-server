@@ -337,8 +337,11 @@ export function estimateDriftVerdict(
   remoteToken: string | null,
   alreadyFlagged: boolean
 ): EstimateDriftVerdict {
-  if (remoteToken === null) return "skip";
-  if (storedToken === null) return "baseline";
+  // `== null` catches undefined too. This is an exported pure function whose whole contract is to
+  // be defensive about a field QuickBooks may simply omit; `=== null` would let `undefined` reach
+  // the comparison and read as drift against the string "undefined".
+  if (remoteToken == null) return "skip";
+  if (storedToken == null) return "baseline";
   if (String(remoteToken) === String(storedToken)) return "unchanged";
   return alreadyFlagged ? "already-flagged" : "drift";
 }
@@ -361,6 +364,13 @@ export type EstimateEventAction = "delete" | "ignore" | "compare";
  * action, which is the thing that teaches people to ignore the true one. There is nothing to warn
  * about either way, because a sparse re-completion does not overwrite `EmailStatus`.
  *
+ * UNVERIFIED, AND SAY SO: this assumes a send emits `estimate.emailed` and NOT an accompanying
+ * `estimate.update`. Nobody has watched a real delivery yet — the plan's step 4 is still open and
+ * §3.5 lists the estimate row as unobserved. If a send also delivers an update, that event lands
+ * on `compare` and the false alarm returns through the other door. The discriminator is one query,
+ * in HANDOVER-2026-09-11.md:
+ * `select operation, count(*) from qbo_webhook_events where entity = 'estimate' group by 1;`
+ *
  * Ignoring it also leaves the stored token deliberately one behind. That is not a bug: a genuine
  * edit afterwards still differs from what we stored, so it is still caught, and skipping the
  * comparison costs no Intuit read at all.
@@ -370,3 +380,17 @@ export function estimateEventAction(operation: string): EstimateEventAction {
   if (/^emailed/i.test(operation)) return "ignore";
   return "compare";
 }
+
+
+/**
+ * Which action wins when several events for ONE estimate land in the same drain pass.
+ *
+ * A delete is terminal — comparing tokens against an estimate that is gone is a read that can only
+ * 404. Otherwise a real compare beats an `emailed` we would have ignored, because the pass must
+ * not let an ignorable event mask a genuine edit delivered alongside it.
+ */
+export const ESTIMATE_ACTION_RANK: Record<EstimateEventAction, number> = {
+  delete: 3,
+  compare: 2,
+  ignore: 1,
+};

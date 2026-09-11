@@ -55,7 +55,18 @@ ALTER TABLE "public"."quotes"
 ALTER TABLE "public"."quotes"
     ADD COLUMN IF NOT EXISTS "qbo_remote_changed_at" TIMESTAMP(3);
 
--- ---- 2. grants --------------------------------------------------------------------------------
+-- ---- 2. the index the drain resolves estimate events through ---------------------------------
+-- Every compare-able estimate event looks up (company_id, qbo_estimate_id), and the MISS is the
+-- common case: most estimates in a client's QuickBooks were never posted by CLARA. Without this
+-- that miss is a sequential scan of `quotes`, once per event per connected company. CONCURRENTLY
+-- is deliberately NOT used — it cannot run inside the transaction the runner wraps each statement
+-- in, and `quotes` is small enough that a brief ACCESS EXCLUSIVE lock costs less than the
+-- complexity of running this one statement out of band.
+
+CREATE INDEX IF NOT EXISTS "quotes_company_id_qbo_estimate_id_idx"
+    ON "public"."quotes" ("company_id", "qbo_estimate_id");
+
+-- ---- 3. grants --------------------------------------------------------------------------------
 -- The service reads and writes as `app_user`. Column-level privileges are NOT inherited by columns
 -- added after a table-level GRANT in every path (an ALTER ... ADD COLUMN inherits the table grant,
 -- but a re-run against a database where someone once granted per-column would not), so the
@@ -63,24 +74,41 @@ ALTER TABLE "public"."quotes"
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."quotes" TO app_user;
 
--- ---- 3. loud verification ---------------------------------------------------------------------
+-- ---- 4. loud verification ---------------------------------------------------------------------
 -- Merged is not applied and applied is not verified. This fails the run if either column is
 -- missing, rather than letting a half-applied migration read as success.
 
 DO $$
 DECLARE
     n integer;
+    idx integer;
 BEGIN
+    -- TYPE IS ASSERTED, NOT JUST PRESENCE. `ADD COLUMN IF NOT EXISTS` silently no-ops against a
+    -- column that already exists with the WRONG type — exactly the state this project's lack of a
+    -- migration ledger makes reachable (a hand-applied experiment). Counting names alone would
+    -- print APPLIED and let the image deploy against a column Prisma reads as the wrong type,
+    -- which fails at runtime on the very reads the order rule above exists to protect.
     SELECT count(*) INTO n
     FROM information_schema.columns
     WHERE table_schema = 'public'
       AND table_name = 'quotes'
-      AND column_name IN ('qbo_sync_token', 'qbo_remote_changed_at');
+      AND ((column_name = 'qbo_sync_token' AND data_type = 'text')
+        OR (column_name = 'qbo_remote_changed_at' AND data_type = 'timestamp without time zone'));
 
     IF n <> 2 THEN
-        RAISE EXCEPTION 'PHASE9 FAILED: expected 2 new columns on public.quotes, found %', n;
+        RAISE EXCEPTION 'PHASE9 FAILED: expected 2 new columns of the right type on public.quotes, found %', n;
     END IF;
 
-    RAISE NOTICE 'PHASE9_APPLIED: qbo_sync_token + qbo_remote_changed_at present on public.quotes';
+    SELECT count(*) INTO idx
+    FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND tablename = 'quotes'
+      AND indexname = 'quotes_company_id_qbo_estimate_id_idx';
+
+    IF idx <> 1 THEN
+        RAISE EXCEPTION 'PHASE9 FAILED: quotes_company_id_qbo_estimate_id_idx is missing';
+    END IF;
+
+    RAISE NOTICE 'PHASE9_APPLIED: qbo_sync_token + qbo_remote_changed_at + lookup index present';
 END
 $$;

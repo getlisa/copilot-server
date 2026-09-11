@@ -172,6 +172,34 @@ async function loadOwnedQuote(quoteId: string, userId: bigint, companyId: number
  * An empty `data` is deliberate: `@updatedAt` supplies the value, so there is nothing to pass and
  * nothing that can disagree with how Prisma stamps every other update.
  */
+/**
+ * Record the outcome of a successful estimate post, from EITHER write path.
+ *
+ * Both the completion hook and the US8 retry endpoint post the same estimate and must leave the
+ * same state behind. They did not: the retry wrote only `qboSyncedAt`/`qboSyncError`, so a retry
+ * left `qboSyncToken` at whatever the failed attempt had — and the webhook echoing that very post
+ * then compared a stale token and reported the client had edited the estimate. One helper so the
+ * two cannot drift apart again.
+ *
+ * `qboSyncToken` is written ONLY when the response carried one. Overwriting a good baseline with
+ * null would make the next webhook take the "no baseline" branch and silently adopt whatever
+ * QuickBooks reports — absorbing a real edit instead of flagging it.
+ */
+async function recordQboPostResult(quoteId: string, syncToken: string | null) {
+  await prisma.quote.update({
+    where: { id: quoteId },
+    data: {
+      qboSyncedAt: new Date(),
+      qboSyncError: null,
+      ...(syncToken === null ? {} : { qboSyncToken: syncToken }),
+      // Our write is authoritative again, so any drift recorded before it is spent: the post
+      // overwrote whatever was in QuickBooks, and leaving the flag set would have the screen warn
+      // about an edit that no longer exists anywhere.
+      qboRemoteChangedAt: null,
+    },
+  });
+}
+
 async function touchQuote(quoteId: string) {
   await prisma.quote.update({ where: { id: quoteId }, data: {} });
 }
@@ -1392,20 +1420,7 @@ export class QuoteController {
         },
         { ensureItem: ensureQboItem, ensureCustomer: ensureQboCustomer }
       );
-      await prisma.quote.update({
-        where: { id: quote.id },
-        data: {
-          qboSyncedAt: new Date(),
-          qboSyncError: null,
-          // The token QuickBooks assigned to what we just wrote — the baseline a later
-          // `estimate.update` webhook is compared against.
-          qboSyncToken: syncToken,
-          // Our write is authoritative again, so any drift recorded before it is spent. The
-          // update-in-place path overwrote whatever was in QuickBooks; leaving the flag set
-          // would have the screen warn about an edit that no longer exists anywhere.
-          qboRemoteChangedAt: null,
-        },
-      });
+      await recordQboPostResult(quote.id, syncToken);
     })().catch(async (e) => {
       const message = e instanceof Error ? e.message : String(e);
       logger.error("QBO estimate sync failed", { quoteId: quote.id, error: message });
@@ -1794,11 +1809,10 @@ export class QuoteController {
       { ensureItem: ensureQboItem, ensureCustomer: ensureQboCustomer }
     );
     // This is the retry path, so a success here has to clear the recorded failure — otherwise
-    // the estimate is in QuickBooks and the screen still says it is not (T-17).
-    await prisma.quote.update({
-      where: { id: quote.id },
-      data: { qboSyncedAt: new Date(), qboSyncError: null },
-    });
+    // the estimate is in QuickBooks and the screen still says it is not (T-17). It stores the
+    // sync-token baseline for the same reason completion does: this post is just as much "our
+    // write", and a webhook echoing it must not read as the client's edit.
+    await recordQboPostResult(quote.id, result.syncToken);
     res.json({ success: true, data: result });
   }
 }

@@ -1,7 +1,8 @@
 import { randomUUID } from "crypto";
 import prisma from "./prisma";
 import logger from "./logger";
-import { qboConnected, qboConnectionFor, qboFetch, isNotFound } from "./qbo";
+import { qboConnected, qboConnectionFor, qboFetch, isNotFound, syncTokenOf } from "./qbo";
+import type { QboConnection } from "@prisma/client";
 import { runQboSync, QboSyncBusyError } from "./qboIngest";
 import {
   MAX_ATTEMPTS,
@@ -11,6 +12,8 @@ import {
   unparseableEventId,
   estimateDriftVerdict,
   estimateEventAction,
+  ESTIMATE_ACTION_RANK,
+  type EstimateEventAction,
   type DrainOutcome,
   type OutcomeStatus,
   type ParsedQboEvent,
@@ -156,18 +159,27 @@ export async function companiesForRealm(realmId: string, keyset: string | null):
  * holds it.
  *
  * Separate from the edit path because it needs no API read — the event itself is the whole fact.
+ *
+ * Raw SQL, like every drift write here, so `Quote.updatedAt` is NOT bumped. See `setDriftColumns`.
  */
 async function handleEstimateDeleted(companyId: number, entityId: string): Promise<"done"> {
-  const { count } = await prisma.quote.updateMany({
-    where: { companyId, qboEstimateId: entityId },
-    // `qboSyncedAt` goes with it. Leaving it set would have the card say "synced at <time>" about
-    // an estimate that no longer exists — a different lie from the one we are fixing.
-    //
-    // The drift pair goes too: a token and a "changed in QuickBooks" mark both describe an
-    // estimate that is gone, and leaving them would have the next post inherit a baseline
-    // belonging to a deleted file.
-    data: { qboEstimateId: null, qboSyncedAt: null, qboSyncToken: null, qboRemoteChangedAt: null },
-  });
+  // `qbo_synced_at` goes with the id. Leaving it set would have the card say "synced at <time>"
+  // about an estimate that no longer exists — a different lie from the one we are fixing.
+  //
+  // The drift pair goes too: a token and a "changed in QuickBooks" mark both describe an estimate
+  // that is gone, and leaving them would have the next post inherit a baseline belonging to a
+  // deleted file.
+  //
+  // updateMany semantics (every matching row), not findFirst: if two quotes ever share an
+  // estimate id, all of them are pointing at the deleted file.
+  const count = await prisma.$executeRaw`
+    UPDATE "public"."quotes"
+       SET "qbo_estimate_id" = NULL,
+           "qbo_synced_at" = NULL,
+           "qbo_sync_token" = NULL,
+           "qbo_remote_changed_at" = NULL
+     WHERE "company_id" = ${companyId}
+       AND "qbo_estimate_id" = ${entityId}`;
   if (count > 0)
     logger.info("QBO estimate deleted in QuickBooks; cleared the stored id", {
       companyId,
@@ -175,6 +187,47 @@ async function handleEstimateDeleted(companyId: number, entityId: string): Promi
       quotes: count,
     });
   return "done";
+}
+
+/**
+ * Write the drift columns WITHOUT touching `updatedAt`, and only if the row still holds the token
+ * we based the decision on.
+ *
+ * TWO REASONS THIS IS RAW SQL.
+ *
+ * `Quote.updatedAt` is `@updatedAt`, so any `prisma.quote.update` stamps it — that is exactly the
+ * mechanism `touchQuote` uses to move an edited estimate to the top of the list, and the list is
+ * ordered `updatedAt desc` as a work queue. A bookkeeping write from a webhook nobody triggered
+ * must not reorder somebody's screen. Baseline adoption is the mass case: on the first
+ * compare-able event after this ships every already-posted quote has a NULL token, so a Prisma
+ * update would march the entire completed list to the top in webhook-arrival order.
+ *
+ * And the WHERE clause is a compare-and-set. Between reading the quote and this write there is an
+ * Intuit round trip — up to three retries against a 30s timeout — and a completion can land inside
+ * it. Without the guard a stale snapshot overwrites the fresh token, and the next event reports
+ * drift on a quote nobody edited. Zero rows means we lost the race; the winner's value is the
+ * newer truth, so it stands.
+ */
+async function setDriftColumns(
+  quoteId: string,
+  expectedToken: string | null,
+  set: { syncToken?: string | null; remoteChangedAt?: Date | null }
+): Promise<boolean> {
+  // Two spelled-out statements rather than a composed fragment: `IS NULL` and `= $1` are
+  // different SQL, and Prisma's tagged template does not compose into a WHERE fragment.
+  const count =
+    expectedToken === null
+      ? await prisma.$executeRaw`
+          UPDATE "public"."quotes"
+             SET "qbo_sync_token" = COALESCE(${set.syncToken ?? null}, "qbo_sync_token"),
+                 "qbo_remote_changed_at" = ${set.remoteChangedAt ?? null}
+           WHERE "id" = ${quoteId} AND "qbo_sync_token" IS NULL`
+      : await prisma.$executeRaw`
+          UPDATE "public"."quotes"
+             SET "qbo_sync_token" = COALESCE(${set.syncToken ?? null}, "qbo_sync_token"),
+                 "qbo_remote_changed_at" = ${set.remoteChangedAt ?? null}
+           WHERE "id" = ${quoteId} AND "qbo_sync_token" = ${expectedToken}`;
+  return count > 0;
 }
 
 /**
@@ -190,34 +243,41 @@ async function handleEstimateDeleted(companyId: number, entityId: string): Promi
  *
  * THE QUOTE IS LOOKED UP BEFORE THE API READ, deliberately. Most estimates in a client's books
  * were never posted by CLARA, and a read we can skip is a read that cannot burn rate limit or
- * fail.
+ * fail. That lookup is indexed on (company_id, qbo_estimate_id) — see phase9.sql.
  */
 async function handleEstimateChanged(
   companyId: number,
+  conn: QboConnection,
   entityId: string
 ): Promise<"done" | "skipped"> {
   const quote = await prisma.quote.findFirst({
     where: { companyId, qboEstimateId: entityId },
+    // Deterministic, so that if two quotes ever share an estimate id the same one is flagged
+    // every pass rather than whichever the planner happened to return.
+    orderBy: { id: "asc" },
     select: { id: true, qboSyncToken: true, qboRemoteChangedAt: true },
   });
   if (!quote) return "skipped";
 
-  const conn = await qboConnectionFor(companyId);
-  // Disconnected between the delivery and this pass. Skipped rather than failed: retrying cannot
-  // help, and piling these into `failed` poisons the count that means "this tenant needs
-  // reconnecting".
-  if (!qboConnected(conn)) return "skipped";
-
   let remoteToken: string | null;
   try {
     const res = await qboFetch(conn, `/estimate/${entityId}`);
-    remoteToken = res?.Estimate?.SyncToken == null ? null : String(res.Estimate.SyncToken);
+    remoteToken = syncTokenOf(res);
   } catch (e) {
-    // Deleted between the webhook and this read — a delete event for it is probably already in
-    // the ledger, but acting now is both correct and idempotent. Anything else (auth, transient,
-    // rate limit) propagates and the row retries with backoff.
+    // NOT treated as a delete. `isNotFound` also matches fault 610, and this branch now runs on
+    // create/update/void/merge and on operations nobody has seen — so a 404 here can equally be
+    // QBO's read-after-write lag on a fresh estimate, or a stored id belonging to a DIFFERENT
+    // QuickBooks file (disconnect deliberately keeps `qboEstimateId`, and the id is not
+    // realm-scoped). Clearing the linkage on that guess would strand a live estimate and have the
+    // next completion post a second one. Only an explicit `delete` operation clears linkage; this
+    // is recorded and left alone.
     if (!isNotFound(e)) throw e;
-    return handleEstimateDeleted(companyId, entityId);
+    logger.warn("QBO estimate not found on drift read; linkage left intact", {
+      companyId,
+      qboEstimateId: entityId,
+      quoteId: quote.id,
+    });
+    return "skipped";
   }
 
   const verdict = estimateDriftVerdict(
@@ -234,55 +294,38 @@ async function handleEstimateChanged(
     // no token. Adopt what QuickBooks reports rather than calling it drift — an unknown is not
     // evidence of an edit, and a false "changed in QuickBooks" warning teaches people to ignore
     // the real one. The cost is honest: an edit made before the baseline existed is invisible.
-    case "baseline":
-      await prisma.quote.update({ where: { id: quote.id }, data: { qboSyncToken: remoteToken } });
-      logger.info("QBO estimate sync token baseline adopted from QuickBooks", {
-        companyId,
-        quoteId: quote.id,
-        qboEstimateId: entityId,
-        syncToken: remoteToken,
-      });
+    case "baseline": {
+      const won = await setDriftColumns(quote.id, null, { syncToken: remoteToken });
+      if (won)
+        logger.info("QBO estimate sync token baseline adopted from QuickBooks", {
+          companyId,
+          quoteId: quote.id,
+          qboEstimateId: entityId,
+          syncToken: remoteToken,
+        });
       return "done";
+    }
 
     // The echo of our own write, or a drift already recorded. Nothing to change either way —
-    // `qboSyncToken` deliberately stays at our last write, which is what the column means.
+    // `qbo_sync_token` deliberately stays at our last write, which is what the column means.
     case "unchanged":
     case "already-flagged":
       return "done";
 
-    case "drift":
-      await prisma.quote.update({
-        where: { id: quote.id },
-        data: { qboRemoteChangedAt: new Date() },
+    case "drift": {
+      const won = await setDriftColumns(quote.id, quote.qboSyncToken, {
+        remoteChangedAt: new Date(),
       });
-      logger.warn("QBO estimate edited inside QuickBooks", {
-        companyId,
-        quoteId: quote.id,
-        qboEstimateId: entityId,
-        ourSyncToken: quote.qboSyncToken,
-        remoteSyncToken: remoteToken,
-      });
+      if (won)
+        logger.warn("QBO estimate edited inside QuickBooks", {
+          companyId,
+          quoteId: quote.id,
+          qboEstimateId: entityId,
+          ourSyncToken: quote.qboSyncToken,
+          remoteSyncToken: remoteToken,
+        });
       return "done";
-  }
-}
-
-/** Route one estimate event. `operation` is Intuit's own vocabulary, learned from the ledger. */
-async function handleEstimateEvent(
-  companyId: number,
-  operation: string,
-  entityId: string | null
-): Promise<"done" | "skipped"> {
-  if (!entityId) return "skipped";
-  switch (estimateEventAction(operation)) {
-    case "delete":
-      return handleEstimateDeleted(companyId, entityId);
-    // `emailed` bumps SyncToken without anyone editing anything — see estimateEventAction.
-    case "ignore":
-      return "skipped";
-    // Create, Update, Merge, Void, and anything Intuit sends that we have not seen: all of them
-    // mean the estimate may no longer match what we wrote, and the token decides.
-    case "compare":
-      return handleEstimateChanged(companyId, entityId);
+    }
   }
 }
 
@@ -488,12 +531,49 @@ export async function drainQboWebhookEvents(): Promise<{
       }
     }
 
-    for (const row of estimateRows) {
-      try {
-        const outcome = await handleEstimateEvent(companyId, row.operation, row.entityId);
-        record(row.id, settled(outcome, [companyId]));
-      } catch (e) {
-        record(row.id, failure(row, companyId, e instanceof Error ? e.message : String(e)));
+    // ESTIMATES ARE COALESCED PER ENTITY, like stages are per (company, stage) — the drain
+    // interval is the debounce, and that contract applied to estimates too or ten edits to one
+    // estimate inside one window cost ten identical Intuit reads against a rate limit shared by
+    // every CLARA client. Rows for the same estimate collapse onto the highest-priority action
+    // (delete beats compare beats ignore), and every row that fed the group takes its outcome.
+    if (estimateRows.length > 0) {
+      const groups = new Map<string, { action: EstimateEventAction; rows: typeof estimateRows }>();
+      const skippedRows: typeof estimateRows = [];
+      for (const row of estimateRows) {
+        if (!row.entityId) {
+          skippedRows.push(row);
+          continue;
+        }
+        const action = estimateEventAction(row.operation);
+        const existing = groups.get(row.entityId);
+        if (!existing) groups.set(row.entityId, { action, rows: [row] });
+        else {
+          existing.rows.push(row);
+          if (ESTIMATE_ACTION_RANK[action] > ESTIMATE_ACTION_RANK[existing.action])
+            existing.action = action;
+        }
+      }
+      for (const row of skippedRows) record(row.id, settled("skipped", [companyId]));
+
+      // Resolved ONCE for the company, not once per event: the connection cannot change inside a
+      // pass, and the old shape re-read it for every estimate row.
+      const conn = groups.size > 0 ? await qboConnectionFor(companyId) : null;
+      for (const [entityId, group] of groups) {
+        try {
+          let outcome: "done" | "skipped";
+          if (group.action === "delete") outcome = await handleEstimateDeleted(companyId, entityId);
+          // `emailed` bumps SyncToken without anyone editing anything — see estimateEventAction.
+          else if (group.action === "ignore") outcome = "skipped";
+          // Disconnected between the delivery and this pass. Skipped rather than failed: retrying
+          // cannot help, and piling these into `failed` poisons the count that means "this tenant
+          // needs reconnecting".
+          else if (!qboConnected(conn)) outcome = "skipped";
+          else outcome = await handleEstimateChanged(companyId, conn, entityId);
+          for (const row of group.rows) record(row.id, settled(outcome, [companyId]));
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          for (const row of group.rows) record(row.id, failure(row, companyId, message));
+        }
       }
     }
   }

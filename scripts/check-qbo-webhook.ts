@@ -42,6 +42,7 @@ async function main() {
     OUTCOME_RANK,
     estimateDriftVerdict,
     estimateEventAction,
+    ESTIMATE_ACTION_RANK,
   } = await import("../src/lib/qboWebhook");
 
   // ---- the two-keyset token set ----
@@ -352,6 +353,30 @@ async function main() {
     estimateEventAction("SomethingIntuitAddsLater"),
     "compare",
     "an unknown operation on a known entity must still be compared, not ignored"
+  );
+
+  // An undefined token must not reach the string comparison — `String(undefined)` vs "3" is a
+  // false drift produced by a missing field rather than a real edit.
+  assert.strictEqual(
+    estimateDriftVerdict("3", undefined as unknown as string, false),
+    "skip",
+    "an absent remote token is nothing to compare, not a drift"
+  );
+  assert.strictEqual(
+    estimateDriftVerdict(undefined as unknown as string, "3", false),
+    "baseline",
+    "an absent stored token is UNKNOWN, not a drift"
+  );
+
+  // Coalescing several events for one estimate in a pass: a delete is terminal, and a real
+  // compare must never be masked by an `emailed` delivered alongside it.
+  assert.ok(
+    ESTIMATE_ACTION_RANK.delete > ESTIMATE_ACTION_RANK.compare,
+    "a delete outranks a compare — the estimate is gone, the read could only 404"
+  );
+  assert.ok(
+    ESTIMATE_ACTION_RANK.compare > ESTIMATE_ACTION_RANK.ignore,
+    "a compare outranks an ignore — an email must not mask a genuine edit in the same window"
   );
 
   console.log("check-qbo-webhook: OK");

@@ -1066,6 +1066,10 @@ model Quote {
 
   @@index([userId, status])
   @@index([salesTaxId])
+  /// The webhook drain resolves an estimate event to its quote by (company, QBO estimate id) on
+  /// every compare-able event, and the MISS is the common case — most estimates in a client's
+  /// books were never posted by CLARA. Without this that miss is a full scan of `quotes`.
+  @@index([companyId, qboEstimateId], map: "quotes_company_id_qbo_estimate_id_idx")
   @@map("quotes")
   @@schema("public")
 }

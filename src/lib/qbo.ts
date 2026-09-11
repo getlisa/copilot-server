@@ -728,9 +728,13 @@ export async function syncQuoteToQbo(
  * and must not read as drift. Defensive on the whole path because a missing token is not worth
  * failing a post that already landed in the customer's books.
  */
-function syncTokenOf(posted: any): string | null {
+export function syncTokenOf(posted: any): string | null {
   const token = posted?.Estimate?.SyncToken;
-  return token == null ? null : String(token);
+  if (token == null) return null;
+  const asString = String(token);
+  // An empty string is not a token. Storing it would make the next event compare "" against a
+  // real value and report drift on a quote nobody touched.
+  return asString === "" ? null : asString;
 }
 
 /**
