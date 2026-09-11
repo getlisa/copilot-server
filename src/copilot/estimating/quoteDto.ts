@@ -175,6 +175,13 @@ export interface QuoteDto {
   qboEstimateId: string | null;
   qboSyncedAt: string | null;
   qboSyncError: string | null;
+  /**
+   * When a webhook showed the estimate had been edited inside QuickBooks since our last write,
+   * or null when it has not been. Cleared by our own next successful post.
+   *
+   * The screen's warning that re-completing will overwrite the client's own edit hangs off this.
+   */
+  qboRemoteChangedAt: string | null;
   /** ZenTrades linkage + sync state — same semantics as the qbo trio (ZenTrades plan 3.x). */
   ztTicketId: string | null;
   ztEstimateId: string | null;
@@ -379,6 +386,7 @@ export type QuoteInput = {
   qboEstimateId: string | null;
   qboSyncedAt: Date | null;
   qboSyncError: string | null;
+  qboRemoteChangedAt?: Date | null;
   ztTicketId?: string | null;
   ztEstimateId?: string | null;
   ztSyncedAt?: Date | null;
@@ -495,6 +503,7 @@ export function toQuoteDto(
     qboEstimateId: quote.qboEstimateId ?? null,
     qboSyncedAt: quote.qboSyncedAt?.toISOString() ?? null,
     qboSyncError: quote.qboSyncError ?? null,
+    qboRemoteChangedAt: quote.qboRemoteChangedAt?.toISOString() ?? null,
     ztTicketId: quote.ztTicketId ?? null,
     ztEstimateId: quote.ztEstimateId ?? null,
     ztSyncedAt: quote.ztSyncedAt?.toISOString() ?? null,

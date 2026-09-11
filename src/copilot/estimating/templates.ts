@@ -178,6 +178,7 @@ export function validateDocxTemplate(templateBuffer: Buffer): string | null {
     qboEstimateId: null,
     qboSyncedAt: null,
     qboSyncError: null,
+    qboRemoteChangedAt: null,
     ztTicketId: null,
     ztEstimateId: null,
     ztSyncedAt: null,

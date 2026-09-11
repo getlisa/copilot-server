@@ -40,6 +40,9 @@ async function main() {
     unparseableEventId,
     MAX_ATTEMPTS,
     OUTCOME_RANK,
+    estimateDriftVerdict,
+    estimateEventAction,
+    ESTIMATE_ACTION_RANK,
   } = await import("../src/lib/qboWebhook");
 
   // ---- the two-keyset token set ----
@@ -292,6 +295,88 @@ async function main() {
     commentedOut.indexOf('app.use("/api/v1/webhooks/qbo"'),
     -1,
     "a commented-out mount must not satisfy this check"
+  );
+
+  // ---- estimate drift: telling the client's edit from the echo of our own write ----
+  // The whole point of storing a SyncToken. Getting any of these backwards is either a warning
+  // that never fires (re-completion silently overwrites the client's edit) or one that always
+  // does (people learn to ignore it).
+  assert.strictEqual(
+    estimateDriftVerdict("3", "3", false),
+    "unchanged",
+    "matching tokens are the echo of our own post, not a drift"
+  );
+  assert.strictEqual(
+    estimateDriftVerdict("3", "4", false),
+    "drift",
+    "a token past ours means somebody edited the estimate inside QuickBooks"
+  );
+  assert.strictEqual(
+    estimateDriftVerdict("3", "4", true),
+    "already-flagged",
+    "the stamp records when drift was FIRST seen; a second edit must not move it"
+  );
+  assert.strictEqual(
+    estimateDriftVerdict(null, "7", false),
+    "baseline",
+    "no stored token is UNKNOWN, not drift — adopt what QuickBooks reports"
+  );
+  assert.strictEqual(
+    estimateDriftVerdict("3", null, false),
+    "skip",
+    "no remote token means nothing to compare"
+  );
+  // Intuit documents SyncToken as a numeric string and has been seen sending a JSON number.
+  // Comparing those by identity would report drift on every single event.
+  assert.strictEqual(
+    estimateDriftVerdict("3", 3 as unknown as string, false),
+    "unchanged",
+    "a numeric 3 and a string \"3\" are the same token"
+  );
+  // A token that went BACKWARDS is still a difference, and still not ours.
+  assert.strictEqual(
+    estimateDriftVerdict("9", "2", false),
+    "drift",
+    "drift is inequality, not ordering — a lower token is still not the one we wrote"
+  );
+
+  // ---- estimate event routing: `emailed` is not an edit ----
+  // Every operation is subscribed, so sending an estimate from inside QuickBooks delivers
+  // estimate.emailed — and it writes EmailStatus, which bumps SyncToken exactly like a real edit.
+  // Comparing it would stamp "changed in QuickBooks" on every email the client sends.
+  assert.strictEqual(estimateEventAction("Delete"), "delete", "a delete clears the stored id");
+  assert.strictEqual(estimateEventAction("Emailed"), "ignore", "emailing is not an edit");
+  assert.strictEqual(estimateEventAction("emailed"), "ignore", "operation case must not matter");
+  assert.strictEqual(estimateEventAction("Update"), "compare", "an update is compared");
+  // The §3.5 rule: an operation nobody has seen must still be re-read, never silently dropped.
+  assert.strictEqual(
+    estimateEventAction("SomethingIntuitAddsLater"),
+    "compare",
+    "an unknown operation on a known entity must still be compared, not ignored"
+  );
+
+  // An undefined token must not reach the string comparison — `String(undefined)` vs "3" is a
+  // false drift produced by a missing field rather than a real edit.
+  assert.strictEqual(
+    estimateDriftVerdict("3", undefined as unknown as string, false),
+    "skip",
+    "an absent remote token is nothing to compare, not a drift"
+  );
+  assert.strictEqual(
+    estimateDriftVerdict(undefined as unknown as string, "3", false),
+    "baseline",
+    "an absent stored token is UNKNOWN, not a drift"
+  );
+
+  // Coalescing several events for one estimate in a pass: a delete is terminal, and a real
+  // compare must never be masked by an `emailed` delivered alongside it.
+  assert.ok(
+    ESTIMATE_ACTION_RANK.delete > ESTIMATE_ACTION_RANK.compare,
+    "a delete outranks a compare — the estimate is gone, the read could only 404"
+  );
+  assert.ok(
+    ESTIMATE_ACTION_RANK.compare > ESTIMATE_ACTION_RANK.ignore,
+    "a compare outranks an ignore — an email must not mask a genuine edit in the same window"
   );
 
   console.log("check-qbo-webhook: OK");

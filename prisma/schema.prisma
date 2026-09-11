@@ -1004,6 +1004,23 @@ model Quote {
   /// say so and offer the retry. Cleared on the next success.
   qboSyncedAt       DateTime?       @map("qbo_synced_at")
   qboSyncError      String?         @map("qbo_sync_error")
+  /// QuickBooks' `SyncToken` for `qboEstimateId` as of OUR last write to it.
+  ///
+  /// QBO bumps the token on every change to the estimate, whoever made it. Storing what the
+  /// token was when we last wrote is what lets a webhook tell the two apart: a token that has
+  /// moved past this one means somebody edited the estimate inside QuickBooks. Without it every
+  /// `estimate.update` is indistinguishable from the echo of our own post.
+  ///
+  /// Null on quotes that posted before this column existed. That reads as "unknown", not "not
+  /// drifted" — the first webhook after a re-completion establishes the baseline.
+  qboSyncToken      String?         @map("qbo_sync_token")
+  /// When a webhook first showed the estimate had moved past `qboSyncToken`.
+  ///
+  /// Set by the drain, cleared by our own next successful write (that write is authoritative
+  /// again, and re-completion deliberately overwrites). It exists so re-completion can WARN
+  /// instead of silently discarding an edit the client made in their own books — the update-in-
+  /// place path (US6) overwrites unconditionally today.
+  qboRemoteChangedAt DateTime?      @map("qbo_remote_changed_at")
   /// The customer this estimate bills to, chosen or created on the estimate screen. Null on
   /// quotes that predate the picker — those still print the free-text customerName below, and
   /// the QuickBooks post falls back to matching on that name.
@@ -1049,6 +1066,10 @@ model Quote {
 
   @@index([userId, status])
   @@index([salesTaxId])
+  /// The webhook drain resolves an estimate event to its quote by (company, QBO estimate id) on
+  /// every compare-able event, and the MISS is the common case — most estimates in a client's
+  /// books were never posted by CLARA. Without this that miss is a full scan of `quotes`.
+  @@index([companyId, qboEstimateId], map: "quotes_company_id_qbo_estimate_id_idx")
   @@map("quotes")
   @@schema("public")
 }

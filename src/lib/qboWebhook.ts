@@ -302,3 +302,95 @@ export function unparseableEventId(rawBody: Buffer | string): string {
   const body = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody, "utf8");
   return `unparseable:${crypto.createHash("sha256").update(body).digest("hex")}`;
 }
+
+/**
+ * What an `estimate` event means once the tokens are in hand.
+ *
+ * - `skip` — QuickBooks reported no token, so there is nothing to compare and nothing to claim.
+ * - `baseline` — we hold no token for this estimate (it posted before the column existed, or that
+ *   write's response carried none). Adopt what QuickBooks reports.
+ * - `unchanged` — the tokens match: this event is the echo of our own write.
+ * - `already-flagged` — drifted, and we already recorded when. The stamp is when the drift was
+ *   FIRST seen, so a second edit must not move it.
+ * - `drift` — somebody edited the estimate inside QuickBooks since our last write.
+ */
+export type EstimateDriftVerdict =
+  | "skip"
+  | "baseline"
+  | "unchanged"
+  | "already-flagged"
+  | "drift";
+
+/**
+ * Compare the token we stored at our last write against the one QuickBooks reports now.
+ *
+ * Pure, and separated from the I/O around it for the reason the rest of this file exists: the
+ * arithmetic that decides an event's fate is the part worth pinning in a test, and it cannot be
+ * pinned while it is wrapped in a database read and an Intuit call.
+ *
+ * BOTH TOKENS ARE COMPARED AS STRINGS. QuickBooks documents `SyncToken` as a numeric string and
+ * has been observed to send it as a JSON number; `"3"` and `3` are the same token, and reading
+ * them as different is a false "changed in QuickBooks" on every single event.
+ */
+export function estimateDriftVerdict(
+  storedToken: string | null,
+  remoteToken: string | null,
+  alreadyFlagged: boolean
+): EstimateDriftVerdict {
+  // `== null` catches undefined too. This is an exported pure function whose whole contract is to
+  // be defensive about a field QuickBooks may simply omit; `=== null` would let `undefined` reach
+  // the comparison and read as drift against the string "undefined".
+  if (remoteToken == null) return "skip";
+  if (storedToken == null) return "baseline";
+  if (String(remoteToken) === String(storedToken)) return "unchanged";
+  return alreadyFlagged ? "already-flagged" : "drift";
+}
+
+/** What to do with an `estimate` event, decided from its operation alone. */
+export type EstimateEventAction = "delete" | "ignore" | "compare";
+
+/**
+ * Route one estimate operation.
+ *
+ * NOT AN ENUM OF EVERY OPERATION, deliberately — §3.5's rule stands: an unknown operation on a
+ * known entity must still be re-read, because nobody can enumerate Intuit's vocabulary and
+ * re-reading current state is always safe. So the default is `compare`, and only two operations
+ * are named.
+ *
+ * `emailed` is the one that had to be named. Every operation is subscribed, so sending an
+ * estimate from inside QuickBooks delivers `estimate.emailed` — and it writes `EmailStatus` on
+ * the Estimate, which bumps `SyncToken` exactly like a real edit. Compared blindly it reads as
+ * "somebody edited the estimate inside QuickBooks" when nobody did: a false alarm on a routine
+ * action, which is the thing that teaches people to ignore the true one. There is nothing to warn
+ * about either way, because a sparse re-completion does not overwrite `EmailStatus`.
+ *
+ * UNVERIFIED, AND SAY SO: this assumes a send emits `estimate.emailed` and NOT an accompanying
+ * `estimate.update`. Nobody has watched a real delivery yet — the plan's step 4 is still open and
+ * §3.5 lists the estimate row as unobserved. If a send also delivers an update, that event lands
+ * on `compare` and the false alarm returns through the other door. The discriminator is one query,
+ * in HANDOVER-2026-09-11.md:
+ * `select operation, count(*) from qbo_webhook_events where entity = 'estimate' group by 1;`
+ *
+ * Ignoring it also leaves the stored token deliberately one behind. That is not a bug: a genuine
+ * edit afterwards still differs from what we stored, so it is still caught, and skipping the
+ * comparison costs no Intuit read at all.
+ */
+export function estimateEventAction(operation: string): EstimateEventAction {
+  if (/^delete/i.test(operation)) return "delete";
+  if (/^emailed/i.test(operation)) return "ignore";
+  return "compare";
+}
+
+
+/**
+ * Which action wins when several events for ONE estimate land in the same drain pass.
+ *
+ * A delete is terminal — comparing tokens against an estimate that is gone is a read that can only
+ * 404. Otherwise a real compare beats an `emailed` we would have ignored, because the pass must
+ * not let an ignorable event mask a genuine edit delivered alongside it.
+ */
+export const ESTIMATE_ACTION_RANK: Record<EstimateEventAction, number> = {
+  delete: 3,
+  compare: 2,
+  ignore: 1,
+};
