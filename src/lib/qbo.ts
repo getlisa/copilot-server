@@ -261,7 +261,7 @@ export class QboIncompleteReadError extends Error {
 }
 
 /** QBO reports a missing/deleted object as fault code 610 inside a 400 response. */
-const isNotFound = (e: unknown) =>
+export const isNotFound = (e: unknown) =>
   e instanceof QboApiError && (e.status === 404 || /"code"\s*:\s*"610"|Object Not Found/i.test(e.body));
 
 /**
@@ -598,6 +598,12 @@ export const optionGroupsOf = (dto: { optionTotals: QuoteOptionTotal[] }) =>
  * Post the quote as a QBO Estimate — or, when it already has one, UPDATE that estimate in
  * place with the current content (US6). If the estimate was deleted inside QBO, a fresh one
  * is created and re-linked. Returns the estimate id either way.
+ *
+ * Also returns the `SyncToken` QuickBooks assigned to the estimate it just wrote. The caller
+ * stores it so a later `estimate.update` webhook can tell an edit made inside QuickBooks from
+ * the echo of this write. `null` means the response carried no token — the post still
+ * succeeded, so this must not fail the sync; it degrades to "unknown", which the drain treats
+ * as a baseline to establish rather than as drift.
  */
 export async function syncQuoteToQbo(
   conn: QboConnection,
@@ -617,7 +623,7 @@ export async function syncQuoteToQbo(
   },
   customer: { name: string; email?: string | null; phone?: string | null; address?: string | null },
   deps: { ensureItem: EnsureItem; ensureCustomer: EnsureCustomer }
-): Promise<{ estimateId: string; updated: boolean }> {
+): Promise<{ estimateId: string; updated: boolean; syncToken: string | null }> {
   if (dto.lineItems.length === 0) throw new Error("Quote has no line items to post");
   if (optionGroupsOf(dto).length > 0 && !quote.chosenOptionGroup)
     throw new Error("Quote has unresolved option groups — the customer's choice must be confirmed first");
@@ -669,7 +675,11 @@ export async function syncQuoteToQbo(
         }),
       });
       logger.info("QBO estimate updated", { quoteId: quote.id, estimateId: posted.Estimate.Id });
-      return { estimateId: String(posted.Estimate.Id), updated: true };
+      return {
+        estimateId: String(posted.Estimate.Id),
+        updated: true,
+        syncToken: syncTokenOf(posted),
+      };
     } catch (e) {
       if (!isNotFound(e)) throw e;
       logger.warn("QBO estimate missing on update — creating fresh", {
@@ -695,7 +705,11 @@ export async function syncQuoteToQbo(
       method: "POST",
       body: JSON.stringify({ ...payload, Id: adopted.id, SyncToken: adopted.syncToken, sparse: true }),
     });
-    return { estimateId: String(posted.Estimate.Id), updated: true };
+    return {
+      estimateId: String(posted.Estimate.Id),
+      updated: true,
+      syncToken: syncTokenOf(posted),
+    };
   }
 
   const posted = await qboFetch(conn, "/estimate", { method: "POST", body: JSON.stringify(payload) });
@@ -703,7 +717,20 @@ export async function syncQuoteToQbo(
   await prisma.quote.update({ where: { id: quote.id }, data: { qboEstimateId: estimateId } });
   logger.info("QBO estimate posted", { quoteId: quote.id, estimateId });
   logTotalDelta(quote.id, estimateId, dto, posted);
-  return { estimateId, updated: false };
+  return { estimateId, updated: false, syncToken: syncTokenOf(posted) };
+}
+
+/**
+ * The `SyncToken` off an estimate write response, as a string, or null when it is absent.
+ *
+ * QuickBooks types this as a numeric string ("0", "1", …) and has been observed to send it as
+ * a JSON number, so it is stringified rather than compared as-is: "3" and 3 are the same token
+ * and must not read as drift. Defensive on the whole path because a missing token is not worth
+ * failing a post that already landed in the customer's books.
+ */
+function syncTokenOf(posted: any): string | null {
+  const token = posted?.Estimate?.SyncToken;
+  return token == null ? null : String(token);
 }
 
 /**

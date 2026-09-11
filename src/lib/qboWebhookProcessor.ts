@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import prisma from "./prisma";
 import logger from "./logger";
-import { qboConnected } from "./qbo";
+import { qboConnected, qboConnectionFor, qboFetch, isNotFound } from "./qbo";
 import { runQboSync, QboSyncBusyError } from "./qboIngest";
 import {
   MAX_ATTEMPTS,
@@ -9,6 +9,8 @@ import {
   mergeOutcome,
   stagesForEntities,
   unparseableEventId,
+  estimateDriftVerdict,
+  estimateEventAction,
   type DrainOutcome,
   type OutcomeStatus,
   type ParsedQboEvent,
@@ -149,25 +151,22 @@ export async function companiesForRealm(realmId: string, keyset: string | null):
     .map((r) => r.companyId);
 }
 
-/** An estimate deleted in QuickBooks. Uses only columns that already exist. */
-async function handleEstimateEvent(
-  companyId: number,
-  operation: string,
-  entityId: string | null
-): Promise<"done" | "skipped"> {
-  // Detecting an EDIT made inside QuickBooks needs a stored SyncToken, and that column does not
-  // exist yet (it needs a later DDL on `quotes`, which like everything here takes the RDS master
-  // credentials). Until then a
-  // non-delete estimate event is recorded and skipped — and its `operation` in the ledger is the
-  // point: it is how we learn Intuit's actual vocabulary for this entity.
-  if (!/^delete/.test(operation)) return "skipped";
-  if (!entityId) return "skipped";
-
+/**
+ * An estimate deleted in QuickBooks: forget the id, so nothing points into a file that no longer
+ * holds it.
+ *
+ * Separate from the edit path because it needs no API read — the event itself is the whole fact.
+ */
+async function handleEstimateDeleted(companyId: number, entityId: string): Promise<"done"> {
   const { count } = await prisma.quote.updateMany({
     where: { companyId, qboEstimateId: entityId },
     // `qboSyncedAt` goes with it. Leaving it set would have the card say "synced at <time>" about
     // an estimate that no longer exists — a different lie from the one we are fixing.
-    data: { qboEstimateId: null, qboSyncedAt: null },
+    //
+    // The drift pair goes too: a token and a "changed in QuickBooks" mark both describe an
+    // estimate that is gone, and leaving them would have the next post inherit a baseline
+    // belonging to a deleted file.
+    data: { qboEstimateId: null, qboSyncedAt: null, qboSyncToken: null, qboRemoteChangedAt: null },
   });
   if (count > 0)
     logger.info("QBO estimate deleted in QuickBooks; cleared the stored id", {
@@ -176,6 +175,115 @@ async function handleEstimateEvent(
       quotes: count,
     });
   return "done";
+}
+
+/**
+ * An estimate changed in QuickBooks — ours, or the client's own edit?
+ *
+ * QBO bumps `SyncToken` on every change to an estimate, whoever made it, and the CloudEvent says
+ * only that something happened. So the token QuickBooks reports now is compared against the one
+ * we stored when we last wrote: equal means this event is the echo of our own post, and anything
+ * further means a human edited the estimate inside QuickBooks.
+ *
+ * That matters because the update-in-place path (US6) overwrites unconditionally. Recording the
+ * drift is what lets re-completion warn instead of silently discarding the client's edit.
+ *
+ * THE QUOTE IS LOOKED UP BEFORE THE API READ, deliberately. Most estimates in a client's books
+ * were never posted by CLARA, and a read we can skip is a read that cannot burn rate limit or
+ * fail.
+ */
+async function handleEstimateChanged(
+  companyId: number,
+  entityId: string
+): Promise<"done" | "skipped"> {
+  const quote = await prisma.quote.findFirst({
+    where: { companyId, qboEstimateId: entityId },
+    select: { id: true, qboSyncToken: true, qboRemoteChangedAt: true },
+  });
+  if (!quote) return "skipped";
+
+  const conn = await qboConnectionFor(companyId);
+  // Disconnected between the delivery and this pass. Skipped rather than failed: retrying cannot
+  // help, and piling these into `failed` poisons the count that means "this tenant needs
+  // reconnecting".
+  if (!qboConnected(conn)) return "skipped";
+
+  let remoteToken: string | null;
+  try {
+    const res = await qboFetch(conn, `/estimate/${entityId}`);
+    remoteToken = res?.Estimate?.SyncToken == null ? null : String(res.Estimate.SyncToken);
+  } catch (e) {
+    // Deleted between the webhook and this read — a delete event for it is probably already in
+    // the ledger, but acting now is both correct and idempotent. Anything else (auth, transient,
+    // rate limit) propagates and the row retries with backoff.
+    if (!isNotFound(e)) throw e;
+    return handleEstimateDeleted(companyId, entityId);
+  }
+
+  const verdict = estimateDriftVerdict(
+    quote.qboSyncToken,
+    remoteToken,
+    quote.qboRemoteChangedAt !== null
+  );
+
+  switch (verdict) {
+    case "skip":
+      return "skipped";
+
+    // No baseline: the quote posted before this column existed, or that write's response carried
+    // no token. Adopt what QuickBooks reports rather than calling it drift — an unknown is not
+    // evidence of an edit, and a false "changed in QuickBooks" warning teaches people to ignore
+    // the real one. The cost is honest: an edit made before the baseline existed is invisible.
+    case "baseline":
+      await prisma.quote.update({ where: { id: quote.id }, data: { qboSyncToken: remoteToken } });
+      logger.info("QBO estimate sync token baseline adopted from QuickBooks", {
+        companyId,
+        quoteId: quote.id,
+        qboEstimateId: entityId,
+        syncToken: remoteToken,
+      });
+      return "done";
+
+    // The echo of our own write, or a drift already recorded. Nothing to change either way —
+    // `qboSyncToken` deliberately stays at our last write, which is what the column means.
+    case "unchanged":
+    case "already-flagged":
+      return "done";
+
+    case "drift":
+      await prisma.quote.update({
+        where: { id: quote.id },
+        data: { qboRemoteChangedAt: new Date() },
+      });
+      logger.warn("QBO estimate edited inside QuickBooks", {
+        companyId,
+        quoteId: quote.id,
+        qboEstimateId: entityId,
+        ourSyncToken: quote.qboSyncToken,
+        remoteSyncToken: remoteToken,
+      });
+      return "done";
+  }
+}
+
+/** Route one estimate event. `operation` is Intuit's own vocabulary, learned from the ledger. */
+async function handleEstimateEvent(
+  companyId: number,
+  operation: string,
+  entityId: string | null
+): Promise<"done" | "skipped"> {
+  if (!entityId) return "skipped";
+  switch (estimateEventAction(operation)) {
+    case "delete":
+      return handleEstimateDeleted(companyId, entityId);
+    // `emailed` bumps SyncToken without anyone editing anything — see estimateEventAction.
+    case "ignore":
+      return "skipped";
+    // Create, Update, Merge, Void, and anything Intuit sends that we have not seen: all of them
+    // mean the estimate may no longer match what we wrote, and the token decides.
+    case "compare":
+      return handleEstimateChanged(companyId, entityId);
+  }
 }
 
 type ClaimedRow = Awaited<ReturnType<typeof prisma.qboWebhookEvent.findMany>>[number];

@@ -585,7 +585,7 @@ thing a sequence number exists to say. `phase4.sql` -> `phase6.sql`, `apply-phas
 | 3 | Confirm one real delivery verifies (a mis-pasted token 401s everything) | both | 1, 2 |
 | 4 | Watch a day of real sandbox deliveries; record the operation vocabulary — especially `estimate.*` and `estimate.emailed` — back into §3.5 | me | 3 |
 | 5 | ~~Model, diff, DDL, processing~~ | **done — folded into step 2** | — |
-| 6 | Phase 3's remaining half: a `SyncToken` column on `quotes` (**master creds — Bharath**), then drift detection. `estimate.deleted` already ships in step 2. | both | 4 |
+| 6 | Phase 3's remaining half: a `SyncToken` column on `quotes`, then drift detection. **CODE DONE 2026-09-11** (branch `feat/qbo-estimate-drift`, `npm test` green) — see §5.7. **SQL NOT APPLIED:** `bash docs/sql/apply-phase9.sh` needs the RDS master credentials and must run BEFORE that image deploys. | Bharath (SQL) | 4 |
 | 7 | Phase 4 frontend, one batch — **not started**, `technician-copilot` has UI work in flight elsewhere | — | 6 |
 | 8 | At the production flip: nothing to re-register — the URL is already on both keysets and both tokens are already loaded. Companies still reconnect (the `environment` stamp), and production events start resolving to real connections. | — | — |
 
@@ -602,3 +602,63 @@ The tree churned while the plan was being written — `QBO-INTEGRATION.md`'s unc
 reverted, `quote.controller.ts` appeared modified and then reverted, and the untracked
 `QBO-ARCHITECTURE.md` was deleted. The only stash (`stash@{0}`) is unrelated August estimate work.
 Assume someone else is in this repo and re-check `git status` before committing.
+
+---
+
+## 5.7 Drift detection — built 2026-09-11 (branch `feat/qbo-estimate-drift`)
+
+Phase 3's other half, the one §4 flagged as blocked on DDL. `estimate.deleted` shipped in step 2;
+every other estimate event was recorded and `skipped`, because nothing could tell the client's own
+edit from the echo of our post.
+
+**What decides it.** QBO bumps an estimate's `SyncToken` on every change, whoever made it, and the
+CloudEvent's `data` is empty. So the token QuickBooks reports now is compared against the one we
+stored when we last wrote — `quotes.qbo_sync_token`, set from the estimate POST response in all
+three write branches (update-in-place, adopt-orphan, fresh create). A difference is somebody
+else's edit, and `quotes.qbo_remote_changed_at` records when it was first seen.
+
+**The comparison is pure and unit-tested.** `estimateDriftVerdict()` lives in `qboWebhook.ts` with
+the rest of the arithmetic, for the reason that file exists: wrapped in a database read and an
+Intuit call it could not be pinned. Seven cases in `check-qbo-webhook.ts`, including the two that
+would be invisible in production — a JSON-number `3` against a stored `"3"` (identity comparison
+there reports drift on *every* event), and a token that moved backwards (drift is inequality, not
+ordering).
+
+**Three decisions worth knowing:**
+
+THE QUOTE IS LOOKED UP BEFORE THE API READ. Most estimates in a client's books were never posted
+by CLARA. Matching `qbo_estimate_id` first means the common case costs one indexed query and no
+Intuit call at all.
+
+NO BASELINE IS "UNKNOWN", NOT "UNCHANGED". A quote that posted before the column existed has no
+token, and the drain adopts whatever QuickBooks reports rather than calling the unknown a drift. A
+false "changed in QuickBooks" teaches people to ignore the real one. The cost is honest and stated
+in the SQL: an edit made before the baseline existed stays invisible.
+
+THE STAMP IS WHEN DRIFT WAS FIRST SEEN. A second edit does not move it, and `qbo_sync_token`
+deliberately stays at *our* last write — that is what the column means. Our own next successful
+post clears the mark, because that write is authoritative again.
+
+`estimate.emailed` IS NOT AN EDIT, and it is the one operation that had to be named. Every
+operation is subscribed, so sending an estimate from inside QuickBooks delivers it — and it writes
+`EmailStatus`, which bumps `SyncToken` exactly like a real edit. Compared blindly it would stamp
+"changed in QuickBooks" on every email the client sends, which is precisely the false alarm the
+baseline rule above exists to avoid; and there is nothing to warn about anyway, because a sparse
+re-completion does not overwrite `EmailStatus`. Ignoring it leaves the stored token one behind on
+purpose: a genuine edit afterwards still differs, so it is still caught, and the skip costs no
+Intuit read at all. §3.5's rule is intact — the DEFAULT is still "compare", so an operation nobody
+has seen yet is re-read rather than silently dropped. `estimateEventAction()` is pure and pinned.
+
+Deleting in QuickBooks now clears the drift pair along with the id and `qbo_synced_at`: a baseline
+belonging to a file that no longer exists must not be inherited by the next post.
+
+**Not built, on purpose:** re-completion still overwrites unconditionally (US6). The flag is
+recorded and exposed on the DTO as `qboRemoteChangedAt`; making completion *warn* on it is a
+behaviour change to the completion path and belongs with the Phase 4 frontend batch (step 7),
+where the warning has somewhere to appear.
+
+**BLOCKED ON:** `bash docs/sql/apply-phase9.sh` — `quotes` is `postgres`-owned, so this needs the
+RDS master credentials. **The SQL runs BEFORE the image deploys.** Prisma SELECTs every scalar
+column its client knows about, so deploying first fails every read of `quotes` — the estimate
+list, opening an estimate, and the drain — with "column does not exist". This does not degrade the
+feature, it takes the Estimator down. Do not merge to `main` until the SQL has run.

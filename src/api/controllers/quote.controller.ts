@@ -1381,7 +1381,7 @@ export class QuoteController {
         userId: quote.userId,
         companyId: quote.companyId,
       });
-      await syncQuoteToQbo(
+      const { syncToken } = await syncQuoteToQbo(
         conn,
         quote,
         dto,
@@ -1394,7 +1394,17 @@ export class QuoteController {
       );
       await prisma.quote.update({
         where: { id: quote.id },
-        data: { qboSyncedAt: new Date(), qboSyncError: null },
+        data: {
+          qboSyncedAt: new Date(),
+          qboSyncError: null,
+          // The token QuickBooks assigned to what we just wrote — the baseline a later
+          // `estimate.update` webhook is compared against.
+          qboSyncToken: syncToken,
+          // Our write is authoritative again, so any drift recorded before it is spent. The
+          // update-in-place path overwrote whatever was in QuickBooks; leaving the flag set
+          // would have the screen warn about an edit that no longer exists anywhere.
+          qboRemoteChangedAt: null,
+        },
       });
     })().catch(async (e) => {
       const message = e instanceof Error ? e.message : String(e);

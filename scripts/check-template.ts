@@ -95,6 +95,7 @@ async function main() {
     qboEstimateId: null,
     qboSyncedAt: null,
     qboSyncError: null,
+    qboRemoteChangedAt: null,
     ztTicketId: null,
     ztEstimateId: null,
     ztSyncedAt: null,
