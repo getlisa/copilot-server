@@ -66,6 +66,7 @@ async function main() {
     customerName: null,
     customerAddress: null,
     customerPhone: null,
+    customerEmail: null,
     chosenOptionGroup: null,
     lineItems: [
       {

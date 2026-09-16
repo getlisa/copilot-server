@@ -1,4 +1,5 @@
 import { Response } from "express";
+import { Prisma } from "@prisma/client";
 import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { RequestWithUser } from "../middlewares/auth";
@@ -144,6 +145,22 @@ function alignAnswers(
 }
 
 /**
+ * What every read that ends in a DTO has to ask Prisma for.
+ *
+ * Shared rather than repeated at each call site because the six of them are a set: a read that
+ * forgets the customer does not fail, it quietly returns a DTO with `customerEmail: null`, and
+ * the screen shows a customer whose email is on file as having none.
+ *
+ * `customer` is selected down to the email alone. The rest of the linked customer is already on
+ * the quote — name, address and phone were copied there when the link was made (see the PATCH
+ * handler below) — and the email is the one field that is not, because no document prints it.
+ */
+const quoteDtoInclude = {
+  lineItems: true,
+  customer: { select: { email: true } },
+} satisfies Prisma.QuoteInclude;
+
+/**
  * Load the quote with items, enforcing ownership — by user AND by company (T-54).
  *
  * The company clause is not redundant. Every downstream effect resolves its tenant from
@@ -156,7 +173,7 @@ function alignAnswers(
 async function loadOwnedQuote(quoteId: string, userId: bigint, companyId: number) {
   return prisma.quote.findFirst({
     where: { id: quoteId, userId, companyId },
-    include: { lineItems: true },
+    include: quoteDtoInclude,
   });
 }
 
@@ -469,7 +486,7 @@ export class QuoteController {
             }
           : {}),
       },
-      include: { lineItems: true },
+      include: quoteDtoInclude,
     });
     // A ZT-seeded chat opens already talking: the job + open deficiencies as the first AI
     // message, so the technician reacts instead of dictating. Best-effort — a failed welcome
@@ -512,7 +529,7 @@ export class QuoteController {
     const status = req.query.status === "COMPLETED" ? "COMPLETED" : "DRAFT";
     const quotes = await prisma.quote.findMany({
       where: { userId: user.userId, status },
-      include: { lineItems: true },
+      include: quoteDtoInclude,
       // Most recently worked on first, not most recently created: the list is a work queue, and
       // the estimate someone was just editing is the one they are coming back to. Line-item
       // writes call touchQuote so an edit actually moves the row.
@@ -1347,7 +1364,7 @@ export class QuoteController {
         if (flipped.count === 0) throw new LateBlockingFlags(-1);
         const fresh = await tx.quote.findFirst({
           where: { id: quote.id, userId: user.userId, companyId: user.companyId },
-          include: { lineItems: true },
+          include: quoteDtoInclude,
         });
         const blocking = fresh!.lineItems.filter((li) =>
           flagsFor(li).some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
@@ -1384,7 +1401,7 @@ export class QuoteController {
     const updated = await prisma.quote.update({
       where: { id: quote.id },
       data: { status: "DRAFT", completedAt: null, chosenOptionGroup: null },
-      include: { lineItems: true },
+      include: quoteDtoInclude,
     });
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });
   }
@@ -1518,7 +1535,7 @@ export class QuoteController {
           ztSyncedAt: new Date(),
           ztSyncError: null,
         },
-        include: { lineItems: true },
+        include: quoteDtoInclude,
       });
       res.json({ success: true, data: await quoteDtoWithProducts(updated) });
     } catch (e) {
@@ -1727,7 +1744,19 @@ export class QuoteController {
     });
     res.json({
       success: true,
-      data: { to: String(req.user?.email ?? ""), ...draft },
+      data: {
+        /**
+         * The linked customer's EMAIL, when there is one — this is a proposal being sent TO a
+         * customer, and it defaulted to the sender's own address, so every send started by
+         * deleting your own and typing one you had already chosen a customer for.
+         *
+         * The sender's address stays as the fallback rather than an empty field: it is the
+         * existing behaviour for a quote with no customer linked, and `emailProposal` validates
+         * the address on the way out regardless of what this suggested.
+         */
+        to: quote.customer?.email?.trim() || String(req.user?.email ?? ""),
+        ...draft,
+      },
     });
   }
 

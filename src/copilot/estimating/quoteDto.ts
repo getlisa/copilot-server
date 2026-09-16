@@ -136,6 +136,18 @@ export interface QuoteDto {
   customerAddress: string | null;
   customerPhone: string | null;
   /**
+   * The linked customer's email, read THROUGH the link rather than copied onto the quote the way
+   * the three fields above are.
+   *
+   * Those three are the Bill To block that `proposalPdf`, `proposalDocx`, `proposalTemplateRender`
+   * and `quoteDocx` print, so they are frozen onto the quote as they were sent. Not one of those
+   * renderers prints the email: it is the address the proposal is SENT to, and for a routing
+   * address the customer's current value beats a snapshot taken when the estimate was drafted.
+   *
+   * Null when no customer is linked, or when the linked one has no email on file.
+   */
+  customerEmail: string | null;
+  /**
    * Base-scope lines only, at their marked-up prices. Option-group lines are alternatives the
    * customer picks between, so they are NEVER part of this sum — see optionTotals.
    */
@@ -380,6 +392,8 @@ export type QuoteInput = {
   customerName: string | null;
   customerAddress: string | null;
   customerPhone: string | null;
+  /** Optional: a fixture or a query that did not include the relation emits a null email. */
+  customer?: { email: string | null } | null;
   salesTaxId: number | null;
   taxRatePercent: unknown;
   chosenOptionGroup: string | null;
@@ -492,6 +506,7 @@ export function toQuoteDto(
     customerName: quote.customerName ?? null,
     customerAddress: quote.customerAddress ?? null,
     customerPhone: quote.customerPhone ?? null,
+    customerEmail: quote.customer?.email ?? null,
     total: baseTotal,
     taxRatePercent,
     salesTaxId: quote.salesTaxId ?? null,
