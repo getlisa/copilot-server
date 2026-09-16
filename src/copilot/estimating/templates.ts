@@ -164,6 +164,7 @@ export function validateDocxTemplate(templateBuffer: Buffer): string | null {
     customerName: null,
     customerAddress: null,
     customerPhone: null,
+    customerEmail: null,
     total: 0,
     // A non-null rate on purpose: a template that references a tax tag must be exercised by the
     // compile check, and a null rate would render every tax tag empty and validate a template

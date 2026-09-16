@@ -16,6 +16,8 @@ const quote = (customer: {
   customerName?: string | null;
   customerAddress?: string | null;
   customerPhone?: string | null;
+  /** The LINKED customer, not a quote column — the email is read through the relation. */
+  customer?: { email: string | null } | null;
 }) =>
   ({
     id: "q1",
@@ -26,6 +28,7 @@ const quote = (customer: {
     customerName: customer.customerName ?? null,
     customerAddress: customer.customerAddress ?? null,
     customerPhone: customer.customerPhone ?? null,
+    customer: customer.customer ?? null,
     salesTaxId: null,
     taxRatePercent: null,
     chosenOptionGroup: null,
@@ -93,6 +96,27 @@ async function main() {
   const partial = toQuoteDto(quote({ customerPhone: "555-0142" }));
   eq(partial.customerName, null, "partial: name stays null");
   eq(partial.customerPhone, "555-0142", "partial: phone set alone");
+
+  /**
+   * customerEmail (CMAP-96) is the one customer field that is NOT a quote column: it is read
+   * through the linked customer, so these assert the relation and not a passthrough.
+   *
+   * What broke: the estimate screen seeds the "New customer" form from the quote, and with no
+   * email on the DTO it seeded name and address and left the email box blank — for a customer
+   * whose email the picker had just listed one screen earlier.
+   */
+  const linked = toQuoteDto(quote({ customer: { email: "kshitija.dhamne@zentrades.pro" } }));
+  eq(linked.customerEmail, "kshitija.dhamne@zentrades.pro", "customerEmail reads through the link");
+  eq(empty.customerEmail, null, "no linked customer -> customerEmail is null");
+  eq(
+    toQuoteDto(quote({ customer: { email: null } })).customerEmail,
+    null,
+    "linked customer with no email on file -> null, not undefined"
+  );
+  // The email is read live, so it must never be mistaken for one of the copied Bill To fields:
+  // a linked customer does not put a name or an address on a quote that has none.
+  eq(linked.customerName, null, "reading the email through the link sets no other field");
+  eq(linked.customerAddress, null, "reading the email through the link sets no address");
 
   // No gating: customer fields never create a flag or change the blocking count (US3).
   eq(empty.blockingFlagCount, full.blockingFlagCount, "customer fields never block completion");
