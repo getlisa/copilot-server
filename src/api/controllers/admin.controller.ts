@@ -708,15 +708,23 @@ export class AdminController {
    *
    * Authoring loop: edit the .html in the repo, refresh this tab. `?file=` previews any
    * template in the folder, so a new company's document can be built before it is linked.
+   * `?templateId=` previews ONE row: a company keeps several templates and the console's
+   * Preview sits on a row, so without it a non-default row previewed the default's document
+   * — or 404'd when the default had no HTML at all.
    */
   static async previewHtmlProposalTemplate(req: Request, res: Response) {
     const companyId = companyIdOf(req, res);
     if (!companyId) return;
     const company = await prisma.companies.findUnique({ where: { id: companyId } });
     if (!company) return fail(res, 404, "Company not found");
+    const templateId = Number(req.query.templateId);
     // The company's own mapping — the same proposal_templates row a download resolves, so
-    // this preview shows the file the customer would actually receive.
-    const resolved = await resolveProposalTemplate(companyId, null);
+    // this preview shows the file the customer would actually receive. With no row named,
+    // resolveProposalTemplate falls back to the company default, as a download does.
+    const resolved = await resolveProposalTemplate(
+      companyId,
+      Number.isFinite(templateId) ? templateId : null
+    );
     const requested = typeof req.query.file === "string" ? req.query.file : null;
     // A row may point at a repo file or carry its own uploaded document; preview whichever the
     // company would actually print. ?file= overrides, for authoring a new one.
@@ -731,9 +739,8 @@ export class AdminController {
       return fail(
         res,
         404,
-        "This company has no HTML proposal template. Add one under " +
-          "src/copilot/estimating/html/templates and point a proposal template row's " +
-          "html_file at it, or pass ?file=name.html to preview one."
+        "This template has no HTML document to preview — it renders from blocks. " +
+          "Upload an .html document onto it, or pass ?file=name.html to preview a repo template."
       );
     const template = loadHtmlTemplate(file);
     if (!template) return fail(res, 404, `No such template: ${file}`);
@@ -764,10 +771,13 @@ export class AdminController {
     if (!raw || !raw.trim()) return fail(res, 400, "An .html document is required");
     if (!/<[a-z!][\s\S]*>/i.test(raw)) return fail(res, 400, "That file does not look like HTML");
 
-    const name =
+    // An explicit name wins; otherwise the filename names a NEW row. Attaching a document to
+    // an existing row must not rename it — "moss electric" stays "moss electric" when someone
+    // uploads ferris-eve.html onto it.
+    const givenName =
       (typeof req.body?.name === "string" && req.body.name.trim()) ||
       (file?.originalname ?? "").replace(/\.html?$/i, "").trim() ||
-      "HTML document";
+      null;
     const { html, removed } = sanitiseTemplateHtml(raw);
 
     // Render it once before storing: a template that cannot produce a document must not become
@@ -783,21 +793,32 @@ export class AdminController {
     }
 
     const templateId = Number(req.body?.templateId);
-    const template = Number.isFinite(templateId)
-      ? await prisma.proposalTemplate.update({
-          where: { id: templateId },
-          data: { html, name },
-        })
-      : await prisma.proposalTemplate.create({
-          data: {
-            companyId,
-            name: name.slice(0, 120),
-            blocks: [],
-            html,
-            // The company's first template becomes its default, matching the block flow.
-            isDefault: (await prisma.proposalTemplate.count({ where: { companyId } })) === 0,
-          },
-        });
+    let template;
+    if (Number.isFinite(templateId)) {
+      // Scoped to the company in the path: an id alone would let one company's console
+      // overwrite another company's document, and this is the everyday path now that the
+      // upload button sits on each row.
+      const owned = await prisma.proposalTemplate.findFirst({
+        where: { id: templateId, companyId },
+        select: { id: true },
+      });
+      if (!owned) return fail(res, 404, "No such proposal template for this company");
+      template = await prisma.proposalTemplate.update({
+        where: { id: owned.id },
+        data: { html, ...(givenName ? { name: givenName.slice(0, 120) } : {}) },
+      });
+    } else {
+      template = await prisma.proposalTemplate.create({
+        data: {
+          companyId,
+          name: (givenName ?? "HTML document").slice(0, 120),
+          blocks: [],
+          html,
+          // The company's first template becomes its default, matching the block flow.
+          isDefault: (await prisma.proposalTemplate.count({ where: { companyId } })) === 0,
+        },
+      });
+    }
     logger.info("HTML proposal template ingested", {
       companyId,
       templateId: template.id,
