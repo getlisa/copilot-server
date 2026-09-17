@@ -354,23 +354,30 @@ function modeFor(input: ProposalInput, stored: unknown): RenderMode {
  * tagged value through the same `stored` argument every render path already passes, so the
  * download, the email attachment and the CRM posts all switch together.
  */
-export interface HtmlTemplateRef {
-  kind: "html";
-  file: string;
-}
+export type HtmlTemplateRef =
+  | { kind: "html"; file: string }
+  | { kind: "storedHtml"; html: string };
 
-export const isHtmlTemplate = (stored: unknown): stored is HtmlTemplateRef =>
-  !!stored &&
-  typeof stored === "object" &&
-  (stored as HtmlTemplateRef).kind === "html" &&
-  typeof (stored as HtmlTemplateRef).file === "string";
+export const isHtmlTemplate = (stored: unknown): stored is HtmlTemplateRef => {
+  if (!stored || typeof stored !== "object") return false;
+  const ref = stored as HtmlTemplateRef;
+  return (
+    (ref.kind === "html" && typeof ref.file === "string") ||
+    (ref.kind === "storedHtml" && typeof ref.html === "string")
+  );
+};
 
 export async function renderProposalPdf(input: ProposalInput, stored: unknown): Promise<Buffer> {
   if (isHtmlTemplate(stored)) {
-    const template = loadHtmlTemplate(stored.file);
+    // A repo file is code we reviewed, so it renders "trusted" (any public resource); an
+    // uploaded document is held to the allowlist — see html/htmlSafety.ts.
+    const template = stored.kind === "html" ? loadHtmlTemplate(stored.file) : stored.html;
     // A missing file must not fail a technician's download: fall through to the block
     // renderer, which every company can always produce.
-    if (template) return htmlToPdf(renderHtmlTemplate(template, htmlTemplateData(input)));
+    if (template)
+      return htmlToPdf(renderHtmlTemplate(template, htmlTemplateData(input)), {
+        trusted: stored.kind === "html",
+      });
     return renderTemplatedProposalPdf(input, null);
   }
   const mode = modeFor(input, stored);

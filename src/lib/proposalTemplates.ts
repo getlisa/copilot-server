@@ -33,21 +33,28 @@ export function pickBlocks(sources: {
 export async function resolveProposalTemplate(
   companyId: number,
   proposalTemplateId: number | null | undefined
-): Promise<{ kind: "html"; file: string } | { kind: "blocks"; blocks: unknown }> {
+): Promise<
+  | { kind: "html"; file: string }
+  | { kind: "storedHtml"; html: string }
+  | { kind: "blocks"; blocks: unknown }
+> {
   const [chosen, companyDefault] = await Promise.all([
     proposalTemplateId != null
       ? prisma.proposalTemplate.findFirst({
           where: { id: proposalTemplateId, companyId },
-          select: { blocks: true, htmlFile: true },
+          select: { blocks: true, htmlFile: true, html: true },
         })
       : Promise.resolve(null),
     prisma.proposalTemplate.findFirst({
       where: { companyId, isDefault: true },
-      select: { blocks: true, htmlFile: true },
+      select: { blocks: true, htmlFile: true, html: true },
     }),
   ]);
   const row = chosen ?? companyDefault;
+  // Precedence: a reviewed repo file, then an uploaded document stored with the row, then
+  // blocks. A company that has both keeps the hand-polished one.
   if (row?.htmlFile) return { kind: "html", file: row.htmlFile };
+  if (row?.html) return { kind: "storedHtml", html: row.html };
   return { kind: "blocks", blocks: await resolveProposalBlocks(companyId, proposalTemplateId) };
 }
 

@@ -9,16 +9,13 @@ import {
   DEFAULT_PROPOSAL_BLOCKS,
   validateProposalBlocks,
 } from "../../copilot/estimating/proposalTemplate";
-import { resolveProposalBlocks } from "../../lib/proposalTemplates";
+import { resolveProposalBlocks, resolveProposalTemplate } from "../../lib/proposalTemplates";
 import { renderProposalPdf } from "../../copilot/estimating/proposalEstimate";
 import { importProposalDocument } from "../../copilot/estimating/proposalImportClassify";
 import { ProposalImportError } from "../../copilot/estimating/proposalImport";
 import { renderHtmlTemplate } from "../../copilot/estimating/html/htmlTemplate";
-import {
-  htmlTemplateData,
-  htmlTemplateFor,
-  loadHtmlTemplate,
-} from "../../copilot/estimating/html/htmlProposal";
+import { htmlTemplateData, loadHtmlTemplate } from "../../copilot/estimating/html/htmlProposal";
+import { sanitiseTemplateHtml } from "../../copilot/estimating/html/htmlSafety";
 import type { ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { validateDocxTemplate } from "../../copilot/estimating/templates";
 import {
@@ -717,15 +714,26 @@ export class AdminController {
     if (!companyId) return;
     const company = await prisma.companies.findUnique({ where: { id: companyId } });
     if (!company) return fail(res, 404, "Company not found");
+    // The company's own mapping — the same proposal_templates row a download resolves, so
+    // this preview shows the file the customer would actually receive.
+    const resolved = await resolveProposalTemplate(companyId, null);
     const requested = typeof req.query.file === "string" ? req.query.file : null;
-    const file = requested ?? htmlTemplateFor(companyId);
+    // A row may point at a repo file or carry its own uploaded document; preview whichever the
+    // company would actually print. ?file= overrides, for authoring a new one.
+    const stored = !requested && resolved.kind === "storedHtml" ? resolved.html : null;
+    const file = requested ?? (resolved.kind === "html" ? resolved.file : null);
+    if (stored)
+      return res
+        .status(200)
+        .setHeader("Content-Type", "text/html; charset=utf-8")
+        .send(renderHtmlTemplate(stored, htmlTemplateData(AdminController.previewInput(company))));
     if (!file)
       return fail(
         res,
         404,
         "This company has no HTML proposal template. Add one under " +
-          "src/copilot/estimating/html/templates and link it in TEMPLATES_BY_COMPANY, " +
-          "or pass ?file=name.html to preview one."
+          "src/copilot/estimating/html/templates and point a proposal template row's " +
+          "html_file at it, or pass ?file=name.html to preview one."
       );
     const template = loadHtmlTemplate(file);
     if (!template) return fail(res, 404, `No such template: ${file}`);
@@ -734,6 +742,69 @@ export class AdminController {
       .status(200)
       .setHeader("Content-Type", "text/html; charset=utf-8")
       .send(renderHtmlTemplate(template, htmlTemplateData(input)));
+  }
+
+  /**
+   * POST /admin/companies/:companyId/proposal-templates/html — ingest an .html document as a
+   * company's proposal template (multipart "file", or { name, html } in the body).
+   *
+   * The document is SANITISED before it is stored, and whatever was removed is reported back
+   * rather than silently applied — an admin must know their page was changed. The renderer
+   * adds the real protection: stored documents print with JavaScript disabled and their
+   * resource requests vetted (html/htmlSafety.ts).
+   */
+  static async ingestHtmlProposalTemplate(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const company = await prisma.companies.findUnique({ where: { id: companyId } });
+    if (!company) return fail(res, 404, "Company not found");
+
+    const file = (req as Request & { file?: Express.Multer.File }).file;
+    const raw = file ? file.buffer.toString("utf8") : (req.body?.html as string | undefined);
+    if (!raw || !raw.trim()) return fail(res, 400, "An .html document is required");
+    if (!/<[a-z!][\s\S]*>/i.test(raw)) return fail(res, 400, "That file does not look like HTML");
+
+    const name =
+      (typeof req.body?.name === "string" && req.body.name.trim()) ||
+      (file?.originalname ?? "").replace(/\.html?$/i, "").trim() ||
+      "HTML document";
+    const { html, removed } = sanitiseTemplateHtml(raw);
+
+    // Render it once before storing: a template that cannot produce a document must not become
+    // the one a technician reaches for at a customer's kitchen table.
+    try {
+      renderHtmlTemplate(html, htmlTemplateData(AdminController.previewInput(company)));
+    } catch (err) {
+      return fail(
+        res,
+        422,
+        `That document could not be filled in: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    const templateId = Number(req.body?.templateId);
+    const template = Number.isFinite(templateId)
+      ? await prisma.proposalTemplate.update({
+          where: { id: templateId },
+          data: { html, name },
+        })
+      : await prisma.proposalTemplate.create({
+          data: {
+            companyId,
+            name: name.slice(0, 120),
+            blocks: [],
+            html,
+            // The company's first template becomes its default, matching the block flow.
+            isDefault: (await prisma.proposalTemplate.count({ where: { companyId } })) === 0,
+          },
+        });
+    logger.info("HTML proposal template ingested", {
+      companyId,
+      templateId: template.id,
+      bytes: html.length,
+      removed,
+    });
+    res.json({ success: true, data: { template, removed } });
   }
 
   /**

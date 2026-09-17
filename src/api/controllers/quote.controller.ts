@@ -39,7 +39,7 @@ import {
   listSalesTax,
 } from "../../lib/qboIngest";
 import { getPresignedUrlForKey, uploadBufferToS3 } from "../../lib/s3";
-import { resolveProposalBlocks } from "../../lib/proposalTemplates";
+import { resolveProposalTemplate } from "../../lib/proposalTemplates";
 import { seedQuoteFromZtTicket, ztWelcomeMessage } from "../../lib/ztIngest";
 import { ztConnectionFor, ztConnected } from "../../lib/zt";
 import { syncQuoteToZt } from "../../lib/ztEstimate";
@@ -322,12 +322,12 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
   };
   // The proposal format this quote renders with — chosen template → company default →
   // legacy column → built-in (template-library) — and the company's terms.
-  const [company, resolvedBlocks] = await Promise.all([
+  const [company, resolvedTemplate] = await Promise.all([
     prisma.companies.findUnique({
       where: { id: quote.companyId },
       select: { footer_terms: true },
     }),
-    resolveProposalBlocks(quote.companyId, quote.proposalTemplateId),
+    resolveProposalTemplate(quote.companyId, quote.proposalTemplateId),
   ]);
   const input: ProposalInput = {
     header: mergedHeader,
@@ -375,7 +375,10 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     unpricedCount,
     photos,
   };
-  const proposalTemplate = resolvedBlocks;
+  // Either a tagged HTML document reference or the resolved blocks — every render path
+  // downstream (download, email attachment, CRM post) takes it as-is.
+  const proposalTemplate =
+    resolvedTemplate.kind === "blocks" ? resolvedTemplate.blocks : resolvedTemplate;
   return { header: mergedHeader, dto, projectTitle, input, unpricedCount, proposalTemplate };
 }
 

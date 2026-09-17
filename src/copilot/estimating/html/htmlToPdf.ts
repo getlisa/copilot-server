@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import puppeteer, { type Browser } from "puppeteer-core";
 import logger from "../../../lib/logger";
+import { isAllowedResource } from "./htmlSafety";
 
 /**
  * HTML → PDF, via a headless Chromium.
@@ -61,6 +62,11 @@ async function browser(): Promise<Browser> {
 export interface HtmlPdfOptions {
   /** Seconds to allow for loading images/fonts before printing anyway. Default 15. */
   timeoutMs?: number;
+  /**
+   * The document came from the repo (code-reviewed) rather than from an upload. Trusted pages
+   * may load any public https resource; stored ones are held to the allowlist.
+   */
+  trusted?: boolean;
 }
 
 /**
@@ -73,6 +79,21 @@ export interface HtmlPdfOptions {
 export async function htmlToPdf(html: string, opts: HtmlPdfOptions = {}): Promise<Buffer> {
   const page = await (await browser()).newPage();
   try {
+    // A proposal is a printed document: nothing in it needs to execute. Turning JavaScript off
+    // is what makes rendering an UPLOADED template safe — it neuters anything the sanitiser
+    // missed, without depending on having parsed the HTML correctly.
+    await page.setJavaScriptEnabled(false);
+    // And every request the page makes is vetted, so a template cannot reach the cloud
+    // metadata endpoint, the private network around the container, or local files.
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      if (isAllowedResource(req.url(), opts.trusted === true)) return void req.continue();
+      logger.warn("Blocked a resource request from a proposal template", {
+        url: req.url().slice(0, 200),
+        resourceType: req.resourceType(),
+      });
+      void req.abort();
+    });
     // "load" (setContent's strongest option) waits for images and stylesheets, so a remote
     // logo is on the page when it prints; the timeout keeps one unreachable image from
     // holding a technician's download open indefinitely.
