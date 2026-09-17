@@ -9,16 +9,12 @@ import {
   DEFAULT_PROPOSAL_BLOCKS,
   validateProposalBlocks,
 } from "../../copilot/estimating/proposalTemplate";
-import { resolveProposalBlocks } from "../../lib/proposalTemplates";
+import { resolveProposalBlocks, resolveProposalTemplate } from "../../lib/proposalTemplates";
 import { renderProposalPdf } from "../../copilot/estimating/proposalEstimate";
 import { importProposalDocument } from "../../copilot/estimating/proposalImportClassify";
 import { ProposalImportError } from "../../copilot/estimating/proposalImport";
 import { renderHtmlTemplate } from "../../copilot/estimating/html/htmlTemplate";
-import {
-  htmlTemplateData,
-  htmlTemplateFor,
-  loadHtmlTemplate,
-} from "../../copilot/estimating/html/htmlProposal";
+import { htmlTemplateData, loadHtmlTemplate } from "../../copilot/estimating/html/htmlProposal";
 import type { ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { validateDocxTemplate } from "../../copilot/estimating/templates";
 import {
@@ -717,15 +713,18 @@ export class AdminController {
     if (!companyId) return;
     const company = await prisma.companies.findUnique({ where: { id: companyId } });
     if (!company) return fail(res, 404, "Company not found");
+    // The company's own mapping — the same proposal_templates row a download resolves, so
+    // this preview shows the file the customer would actually receive.
+    const resolved = await resolveProposalTemplate(companyId, null);
     const requested = typeof req.query.file === "string" ? req.query.file : null;
-    const file = requested ?? htmlTemplateFor(companyId);
+    const file = requested ?? (resolved.kind === "html" ? resolved.file : null);
     if (!file)
       return fail(
         res,
         404,
         "This company has no HTML proposal template. Add one under " +
-          "src/copilot/estimating/html/templates and link it in TEMPLATES_BY_COMPANY, " +
-          "or pass ?file=name.html to preview one."
+          "src/copilot/estimating/html/templates and point a proposal template row's " +
+          "html_file at it, or pass ?file=name.html to preview one."
       );
     const template = loadHtmlTemplate(file);
     if (!template) return fail(res, 404, `No such template: ${file}`);

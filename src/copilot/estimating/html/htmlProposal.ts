@@ -8,25 +8,15 @@ import { renderHtmlTemplate, type HtmlTemplateData } from "./htmlTemplate";
 /**
  * HTML proposal documents: an .html file per company, filled from a quote.
  *
- * The templates live in the REPO (templates/*.html) rather than the database on purpose —
- * they are code-shaped artefacts we hand-tune against the customer's own document, so they
- * belong in review and version control with everything else. A company is linked to one by
- * `TEMPLATES_BY_COMPANY`; a company with no entry keeps the block-based renderer, so this
- * ships alongside the existing path instead of replacing it.
+ * The template FILES live in the repo (templates/*.html) because they are code-shaped
+ * artefacts we hand-tune against a customer's own document. The MAPPING does not: a company
+ * is linked to one by a `proposal_templates` row whose `html_file` names it — the same row
+ * the chat's template ask and job-type matching already choose between. One mapping, in one
+ * place, so the preview and the printed document can never disagree about which file a
+ * company uses. A company with no such row keeps the block renderer.
  */
 
 const TEMPLATE_DIR = path.join(__dirname, "templates");
-
-/**
- * companyId → template file. Add a line when a company's document has been authored.
- * (Dev company ids; production ids are added as each company is onboarded.)
- */
-export const TEMPLATES_BY_COMPANY: Record<number, string> = {
-  // 5: "moss-electric.html",
-};
-
-export const htmlTemplateFor = (companyId: number): string | null =>
-  TEMPLATES_BY_COMPANY[companyId] ?? null;
 
 export function loadHtmlTemplate(file: string): string | null {
   const full = path.join(TEMPLATE_DIR, path.basename(file));
@@ -94,11 +84,8 @@ export function htmlTemplateData(input: ProposalInput): HtmlTemplateData {
   };
 }
 
-/** Render a company's HTML proposal, or null when it has no HTML template. */
-export function renderHtmlProposal(companyId: number, input: ProposalInput): string | null {
-  const file = htmlTemplateFor(companyId);
-  if (!file) return null;
+/** Fill a named template with a quote's values. */
+export function renderHtmlProposal(file: string, input: ProposalInput): string | null {
   const template = loadHtmlTemplate(file);
-  if (!template) return null;
-  return renderHtmlTemplate(template, htmlTemplateData(input));
+  return template ? renderHtmlTemplate(template, htmlTemplateData(input)) : null;
 }
