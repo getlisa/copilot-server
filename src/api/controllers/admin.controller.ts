@@ -734,7 +734,7 @@ export class AdminController {
       return res
         .status(200)
         .setHeader("Content-Type", "text/html; charset=utf-8")
-        .send(renderHtmlTemplate(stored, htmlTemplateData(AdminController.previewInput(company))));
+        .send(renderHtmlTemplate(stored, await htmlTemplateData(AdminController.previewInput(company))));
     if (!file)
       return fail(
         res,
@@ -748,7 +748,7 @@ export class AdminController {
     res
       .status(200)
       .setHeader("Content-Type", "text/html; charset=utf-8")
-      .send(renderHtmlTemplate(template, htmlTemplateData(input)));
+      .send(renderHtmlTemplate(template, await htmlTemplateData(input)));
   }
 
   /**
@@ -783,7 +783,7 @@ export class AdminController {
     // Render it once before storing: a template that cannot produce a document must not become
     // the one a technician reaches for at a customer's kitchen table.
     try {
-      renderHtmlTemplate(html, htmlTemplateData(AdminController.previewInput(company)));
+      renderHtmlTemplate(html, await htmlTemplateData(AdminController.previewInput(company)));
     } catch (err) {
       return fail(
         res,

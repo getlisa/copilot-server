@@ -19,11 +19,12 @@ import { imageDims, loadPhotos, type ProposalInput } from "./proposalDocx";
 import { validateProposalBlocks } from "./proposalTemplate";
 import { renderHtmlTemplate } from "./html/htmlTemplate";
 import { htmlTemplateData, loadHtmlTemplate } from "./html/htmlProposal";
-import { htmlToPdf } from "./html/htmlToPdf";
+import { htmlToPageImages, htmlToPdf } from "./html/htmlToPdf";
 import {
   renderTemplatedProposalDocx,
   renderTemplatedProposalPdf,
 } from "./proposalTemplateRender";
+import logger from "../../lib/logger";
 
 /**
  * The proposal's DEFAULT document is the estimate the platform's job feature produces (owner
@@ -375,7 +376,7 @@ export async function renderProposalPdf(input: ProposalInput, stored: unknown): 
     // A missing file must not fail a technician's download: fall through to the block
     // renderer, which every company can always produce.
     if (template)
-      return htmlToPdf(renderHtmlTemplate(template, htmlTemplateData(input)), {
+      return htmlToPdf(renderHtmlTemplate(template, await htmlTemplateData(input)), {
         trusted: stored.kind === "html",
       });
     return renderTemplatedProposalPdf(input, null);
@@ -393,13 +394,60 @@ export async function renderProposalPdf(input: ProposalInput, stored: unknown): 
   });
 }
 
+/**
+ * A .docx of an HTML document: one full-page picture per page.
+ *
+ * Word cannot express arbitrary CSS — flexbox, pinned footers, `@page` — so a converted
+ * .docx would be a guess at the design, and the customer would hold two documents that
+ * disagree. A picture of the page agrees with the emailed PDF exactly. It is NOT editable,
+ * which is the deliberate trade: a company that needs an editable Word proposal wants a
+ * .docx template, not a conversion of this one.
+ */
+async function renderHtmlProposalDocx(html: string, trusted: boolean): Promise<Buffer> {
+  const pages = await htmlToPageImages(html, { trusted });
+  if (!pages.length) throw new Error("The HTML proposal produced no pages");
+  const doc = new Document({
+    sections: [
+      {
+        // Full-bleed: the margins are already drawn inside the picture.
+        properties: { page: { margin: { top: 0, right: 0, bottom: 0, left: 0 } } },
+        children: pages.map(
+          (p) =>
+            new Paragraph({
+              children: [
+                new ImageRun({
+                  data: p.data,
+                  type: "png",
+                  transformation: { width: p.width, height: p.height },
+                }),
+              ],
+            })
+        ),
+      },
+    ],
+  });
+  return Packer.toBuffer(doc);
+}
+
 /** The one entry point for the proposal .docx — always the same branch as the PDF. */
 export async function renderProposalDocx(input: ProposalInput, stored: unknown): Promise<Buffer> {
-  // An HTML document has no faithful .docx form — Word cannot express arbitrary CSS, and a
-  // lossy conversion would hand a customer a document that disagrees with the PDF they were
-  // emailed. The Word download falls back to the built-in block layout, which is honest about
-  // being a different rendering of the same numbers.
-  if (isHtmlTemplate(stored)) return renderTemplatedProposalDocx(input, null);
+  if (isHtmlTemplate(stored)) {
+    const template = stored.kind === "html" ? loadHtmlTemplate(stored.file) : stored.html;
+    if (template)
+      try {
+        return await renderHtmlProposalDocx(
+          renderHtmlTemplate(template, await htmlTemplateData(input)),
+          stored.kind === "html"
+        );
+      } catch (err) {
+        // No Chromium, or a render that failed: a technician's download must still produce a
+        // document, so fall through to the block layout rather than erroring at the kitchen table.
+        logger.warn("HTML proposal .docx failed; falling back to the block layout", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    return renderTemplatedProposalDocx(input, null);
+  }
   const mode = modeFor(input, stored);
   if (mode === "stored-blocks") return renderTemplatedProposalDocx(input, stored);
   if (mode === "default-blocks") return renderTemplatedProposalDocx(input, null);

@@ -102,3 +102,18 @@ assert.ok(
 );
 
 console.log("check-html-template: stored-template safety assertions passed");
+
+// --- page images for the Word download ---------------------------------------------------------
+// The .docx of an HTML proposal is one picture per page, so the page COUNT is what decides
+// whether a customer opens a document with a blank sheet stapled to the end.
+import { pageCount } from "../src/copilot/estimating/html/htmlToPdf";
+
+eq("an empty document is still one page", pageCount(0), 1);
+eq("a short document is one page", pageCount(400), 1);
+eq("an exactly full page is one page", pageCount(1056), 1);
+eq("a few pixels of slop do not add a blank page", pageCount(1060), 1);
+eq("real overflow adds a second page", pageCount(1200), 2);
+eq("two full pages", pageCount(2112), 2);
+eq("a runaway template is capped", pageCount(10_000_000), 50);
+
+console.log("check-html-template: page-image assertions passed");

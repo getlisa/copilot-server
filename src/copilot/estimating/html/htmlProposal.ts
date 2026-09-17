@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "fs";
 import path from "path";
 import logger from "../../../lib/logger";
 import { payable, taxRowAmount, taxRowLabel } from "../proposalTotals";
-import { amountInWords, type ProposalInput } from "../proposalDocx";
+import { amountInWords, loadCompanyLogo, type ProposalInput } from "../proposalDocx";
 import { renderHtmlTemplate, type HtmlTemplateData } from "./htmlTemplate";
 
 /**
@@ -36,8 +36,17 @@ const money = (v: number | null | undefined): string =>
  * The values a template can reference. Flat and formatted — a template author writes
  * {{total}}, never arithmetic, so the money on the page can only be the money we computed.
  */
-export function htmlTemplateData(input: ProposalInput): HtmlTemplateData {
+export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTemplateData> {
   const { header } = input;
+  // The logo has to be INLINED, not linked. companies.logo_url is usually a bare S3 key
+  // (company registration stores one when no CDN is configured), so putting it straight in
+  // a src= yields a relative URL that resolves to nothing and prints a broken image. Every
+  // other renderer already resolves it through loadCompanyLogo; this does the same and
+  // embeds the bytes, which also means the page needs no network access to show a logo.
+  const logo = await loadCompanyLogo(header.logoUrl ?? null);
+  const logoUrl = logo
+    ? `data:image/${logo.type === "jpg" ? "jpeg" : "png"};base64,${logo.data.toString("base64")}`
+    : "";
   const taxLabel = taxRowLabel(input);
   const lineItems = (input.lineItems ?? []).map((l) => ({
     activity: l.code ?? l.description,
@@ -57,7 +66,7 @@ export function htmlTemplateData(input: ProposalInput): HtmlTemplateData {
     companyEmail: header.companyEmail ?? "",
     website: header.website ?? "",
     licenseNumber: header.licenseNumber ?? "",
-    logoUrl: header.logoUrl ?? "",
+    logoUrl,
     technicianName: header.technicianName ?? "",
     customerName: header.customerName ?? "",
     customerAddress: header.billingAddress ?? "",
@@ -85,7 +94,7 @@ export function htmlTemplateData(input: ProposalInput): HtmlTemplateData {
 }
 
 /** Fill a named template with a quote's values. */
-export function renderHtmlProposal(file: string, input: ProposalInput): string | null {
+export async function renderHtmlProposal(file: string, input: ProposalInput): Promise<string | null> {
   const template = loadHtmlTemplate(file);
-  return template ? renderHtmlTemplate(template, htmlTemplateData(input)) : null;
+  return template ? renderHtmlTemplate(template, await htmlTemplateData(input)) : null;
 }
