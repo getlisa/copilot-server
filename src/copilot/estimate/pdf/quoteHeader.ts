@@ -19,6 +19,8 @@ export interface QuoteHeader {
   technicianName: string;
   logoUrl: string | null;
   licenseNumber: string;
+  /** Company website, for the letterhead contact line and footer. Empty = omitted. */
+  website?: string;
 }
 
 const DEFAULTS: QuoteHeader = {
@@ -115,6 +117,7 @@ export async function loadQuoteHeader(conversation: {
       header.licenseNumber = company.license_number ?? "";
       header.companyPhone = company.phone ?? "";
       header.companyEmail = company.email ?? "";
+      header.website = company.website ?? "";
     }
     if (tech) {
       header.technicianName = `${tech.first_name ?? ""} ${tech.last_name ?? ""}`.trim();

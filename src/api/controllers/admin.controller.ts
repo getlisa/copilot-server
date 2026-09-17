@@ -13,6 +13,12 @@ import { resolveProposalBlocks } from "../../lib/proposalTemplates";
 import { renderProposalPdf } from "../../copilot/estimating/proposalEstimate";
 import { importProposalDocument } from "../../copilot/estimating/proposalImportClassify";
 import { ProposalImportError } from "../../copilot/estimating/proposalImport";
+import { renderHtmlTemplate } from "../../copilot/estimating/html/htmlTemplate";
+import {
+  htmlTemplateData,
+  htmlTemplateFor,
+  loadHtmlTemplate,
+} from "../../copilot/estimating/html/htmlProposal";
 import type { ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { validateDocxTemplate } from "../../copilot/estimating/templates";
 import {
@@ -669,6 +675,16 @@ export class AdminController {
       },
       projectTitle: "Sample Project — Preview Only",
       date: new Date(),
+      proposalNumber: "SAMPLE-2026-001",
+      facility: "Sample Facility",
+      contactName: "SAMPLE CUSTOMER",
+      jobType: "Sample Inspection",
+      workType: "Sample Work Type",
+      milestones: [
+        { label: "Due upon submittal", percent: 30 },
+        { label: "Due upon completion of work", percent: 60 },
+        { label: "Due upon acceptance", percent: 10 },
+      ],
       // Sample rows so the editor's preview shows the lineItems table the default ships with.
       lineItems: [
         { code: "LB-020", description: "Minimum Service Call", quantity: 1, unit: "CALL", unitPrice: 175, totalPrice: 175, priceSource: "Labor Rates" },
@@ -687,6 +703,37 @@ export class AdminController {
       total: 262.5,
       unpricedCount: 0,
     };
+  }
+
+  /**
+   * GET /admin/companies/:companyId/proposal-template/html — the company's HTML proposal,
+   * filled with the same sample quote the block preview uses, returned as a real web page.
+   *
+   * Authoring loop: edit the .html in the repo, refresh this tab. `?file=` previews any
+   * template in the folder, so a new company's document can be built before it is linked.
+   */
+  static async previewHtmlProposalTemplate(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const company = await prisma.companies.findUnique({ where: { id: companyId } });
+    if (!company) return fail(res, 404, "Company not found");
+    const requested = typeof req.query.file === "string" ? req.query.file : null;
+    const file = requested ?? htmlTemplateFor(companyId);
+    if (!file)
+      return fail(
+        res,
+        404,
+        "This company has no HTML proposal template. Add one under " +
+          "src/copilot/estimating/html/templates and link it in TEMPLATES_BY_COMPANY, " +
+          "or pass ?file=name.html to preview one."
+      );
+    const template = loadHtmlTemplate(file);
+    if (!template) return fail(res, 404, `No such template: ${file}`);
+    const input = AdminController.previewInput(company);
+    res
+      .status(200)
+      .setHeader("Content-Type", "text/html; charset=utf-8")
+      .send(renderHtmlTemplate(template, htmlTemplateData(input)));
   }
 
   /**

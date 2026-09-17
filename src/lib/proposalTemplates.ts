@@ -22,6 +22,35 @@ export function pickBlocks(sources: {
   return sources.chosen ?? sources.companyDefault ?? sources.legacy ?? null;
 }
 
+/**
+ * What a quote's proposal renders FROM: a hand-authored HTML document, or blocks.
+ *
+ * One chain, one decision point. Everything upstream — the chat's template ask, ZenTrades
+ * job-type matching, the company default — selects a template ROW by name and never learns
+ * which kind it is, so an HTML document can replace a block design for one company without
+ * touching the agent, the picker or the quote.
+ */
+export async function resolveProposalTemplate(
+  companyId: number,
+  proposalTemplateId: number | null | undefined
+): Promise<{ kind: "html"; file: string } | { kind: "blocks"; blocks: unknown }> {
+  const [chosen, companyDefault] = await Promise.all([
+    proposalTemplateId != null
+      ? prisma.proposalTemplate.findFirst({
+          where: { id: proposalTemplateId, companyId },
+          select: { blocks: true, htmlFile: true },
+        })
+      : Promise.resolve(null),
+    prisma.proposalTemplate.findFirst({
+      where: { companyId, isDefault: true },
+      select: { blocks: true, htmlFile: true },
+    }),
+  ]);
+  const row = chosen ?? companyDefault;
+  if (row?.htmlFile) return { kind: "html", file: row.htmlFile };
+  return { kind: "blocks", blocks: await resolveProposalBlocks(companyId, proposalTemplateId) };
+}
+
 /** Resolve the blocks a quote's proposal should render with. */
 export async function resolveProposalBlocks(
   companyId: number,

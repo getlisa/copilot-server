@@ -65,6 +65,12 @@ adminRoute.post(
   "/companies/:companyId/proposal-template/preview",
   AdminController.previewProposalTemplate
 );
+// The HTML document preview: GET so it opens straight in a browser tab while a template is
+// being authored (?file=name.html previews any template in the folder).
+adminRoute.get(
+  "/companies/:companyId/proposal-template/html",
+  AdminController.previewHtmlProposalTemplate
+);
 
 // QuickBooks Online, console side: status and disconnect only.
 // The connect route is deliberately GONE. This router is mounted UNAUTHENTICATED, and with Clara
