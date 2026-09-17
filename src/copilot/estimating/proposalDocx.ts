@@ -67,6 +67,20 @@ export interface ProposalInput {
   terms?: string[];
   projectTitle: string;
   date: Date;
+  /** Printed as Proposal # — the ZenTrades estimate number once posted, absent before. */
+  proposalNumber?: string | null;
+  /** Info-box row sources fed from the ZenTrades ticket a quote was seeded from (else absent):
+   *  the service address name, the site contact, and the ticket's job/work type. */
+  facility?: string | null;
+  contactName?: string | null;
+  jobType?: string | null;
+  workType?: string | null;
+  /** Chat-captured milestone schedule; rendered by the scheduleOfValues block when valid. */
+  milestones?: unknown;
+  /** Free notes beneath the table (deposit terms, job summary) — HTML templates print these. */
+  notes?: string | null;
+  /** Regulator/licensing footer some trades must print verbatim. */
+  legalFooter?: string | null;
   /** Numbered DETAILED SCOPE OF WORK sections describing the work to be performed. */
   scopeSections: ProposalScopeSection[];
   /** Overrides the static defaults when the caller has real assumptions. */

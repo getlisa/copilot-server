@@ -17,6 +17,9 @@ import type { EstimateQuote } from "../estimate/estimateQuoteSchema";
 import { buildQuotePdf } from "../estimate/pdf/quotePdf";
 import { imageDims, loadPhotos, type ProposalInput } from "./proposalDocx";
 import { validateProposalBlocks } from "./proposalTemplate";
+import { renderHtmlTemplate } from "./html/htmlTemplate";
+import { htmlTemplateData, loadHtmlTemplate } from "./html/htmlProposal";
+import { htmlToPdf } from "./html/htmlToPdf";
 import {
   renderTemplatedProposalDocx,
   renderTemplatedProposalPdf,
@@ -346,7 +349,30 @@ function modeFor(input: ProposalInput, stored: unknown): RenderMode {
 }
 
 /** The one entry point for a proposal PDF (download, email attachment, admin preview). */
+/**
+ * A template resolved to a hand-authored HTML document rather than blocks. Carried as a
+ * tagged value through the same `stored` argument every render path already passes, so the
+ * download, the email attachment and the CRM posts all switch together.
+ */
+export interface HtmlTemplateRef {
+  kind: "html";
+  file: string;
+}
+
+export const isHtmlTemplate = (stored: unknown): stored is HtmlTemplateRef =>
+  !!stored &&
+  typeof stored === "object" &&
+  (stored as HtmlTemplateRef).kind === "html" &&
+  typeof (stored as HtmlTemplateRef).file === "string";
+
 export async function renderProposalPdf(input: ProposalInput, stored: unknown): Promise<Buffer> {
+  if (isHtmlTemplate(stored)) {
+    const template = loadHtmlTemplate(stored.file);
+    // A missing file must not fail a technician's download: fall through to the block
+    // renderer, which every company can always produce.
+    if (template) return htmlToPdf(renderHtmlTemplate(template, htmlTemplateData(input)));
+    return renderTemplatedProposalPdf(input, null);
+  }
   const mode = modeFor(input, stored);
   if (mode === "stored-blocks") return renderTemplatedProposalPdf(input, stored);
   if (mode === "default-blocks") return renderTemplatedProposalPdf(input, null);
@@ -362,6 +388,11 @@ export async function renderProposalPdf(input: ProposalInput, stored: unknown): 
 
 /** The one entry point for the proposal .docx — always the same branch as the PDF. */
 export async function renderProposalDocx(input: ProposalInput, stored: unknown): Promise<Buffer> {
+  // An HTML document has no faithful .docx form — Word cannot express arbitrary CSS, and a
+  // lossy conversion would hand a customer a document that disagrees with the PDF they were
+  // emailed. The Word download falls back to the built-in block layout, which is honest about
+  // being a different rendering of the same numbers.
+  if (isHtmlTemplate(stored)) return renderTemplatedProposalDocx(input, null);
   const mode = modeFor(input, stored);
   if (mode === "stored-blocks") return renderTemplatedProposalDocx(input, stored);
   if (mode === "default-blocks") return renderTemplatedProposalDocx(input, null);

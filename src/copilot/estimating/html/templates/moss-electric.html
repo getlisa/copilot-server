@@ -1,0 +1,231 @@
+<!doctype html>
+<!--
+  Moss Electric — estimate, authored from their own QuickBooks-style document
+  (Ferris-Eve Lights.pdf). Everything here is theirs to change: fonts, rules, the black
+  panels, column widths. Values arrive as {{tokens}}; the line rows repeat.
+
+  Page geometry is print-first: US Letter with half-inch margins, so the browser PDF and a
+  server-side print render agree.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Estimate {{proposalNumber}}</title>
+    <style>
+      @page {
+        size: letter;
+        margin: 0.5in;
+      }
+      html {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      body {
+        margin: 0;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 10pt;
+        line-height: 1.35;
+        color: #000;
+      }
+      .sheet {
+        width: 7.5in;
+        margin: 0 auto;
+        padding: 0.25in 0;
+      }
+
+      /* ---------- letterhead: company left, logo and panels right ---------- */
+      .head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 24px;
+      }
+      .company .name {
+        font-weight: bold;
+      }
+      .panels {
+        width: 3.1in;
+        flex: none;
+      }
+      .logo {
+        text-align: right;
+        margin-bottom: 10px;
+      }
+      .logo img {
+        max-width: 2.6in;
+        max-height: 1.1in;
+      }
+      .panel {
+        background: #000;
+        color: #fff;
+        font-weight: bold;
+        padding: 7px 10px;
+        margin-bottom: 8px;
+      }
+      .panel .label {
+        font-weight: bold;
+      }
+      .panel.blank {
+        height: 12px;
+        padding: 7px 10px;
+      }
+
+      /* ---------- customer ---------- */
+      .customer {
+        margin-top: 14px;
+      }
+      .customer .label {
+        font-weight: bold;
+      }
+      .rule {
+        border-top: 6px solid #000;
+        width: 4.1in;
+        margin: 10px 0 26px;
+      }
+
+      /* ---------- line items ---------- */
+      table.items {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      table.items thead th {
+        background: #000;
+        color: #fff;
+        font-weight: bold;
+        text-align: left;
+        padding: 6px 8px;
+        font-size: 9.5pt;
+      }
+      table.items thead th.num {
+        text-align: right;
+      }
+      table.items tbody td {
+        padding: 5px 8px;
+        border-bottom: 1px solid #bcd7e6;
+        vertical-align: top;
+      }
+      table.items tbody td.activity {
+        font-weight: bold;
+        white-space: nowrap;
+      }
+      table.items tbody td.num {
+        text-align: right;
+        white-space: nowrap;
+      }
+
+      /* ---------- notes + totals ---------- */
+      .foot {
+        display: flex;
+        justify-content: space-between;
+        gap: 30px;
+        margin-top: 16px;
+      }
+      .notes {
+        white-space: pre-line;
+      }
+      .totals {
+        width: 3.2in;
+        flex: none;
+      }
+      .totals .row {
+        display: flex;
+        justify-content: space-between;
+        padding: 3px 10px;
+      }
+      .totals .total {
+        background: #000;
+        color: #fff;
+        font-weight: bold;
+        font-size: 12pt;
+        padding: 9px 10px;
+        margin-top: 18px;
+      }
+      .accept {
+        display: flex;
+        gap: 2.2in;
+        margin-top: 0.9in;
+      }
+      /* Pinned to the foot of every printed page, the way the source document carries its
+         regulator notice — a plain margin pushed it onto a second, otherwise empty page. */
+      .legal {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        text-align: center;
+        font-size: 7.5pt;
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="sheet">
+      <div class="head">
+        <div class="company">
+          <div class="name">{{companyName}} TECL# {{licenseNumber}}</div>
+          <div>{{companyAddress}}</div>
+          <div>{{companyCityStateZip}}</div>
+          <div>{{companyPhone}}</div>
+          <div>{{companyEmail}}</div>
+          <div>{{website}}</div>
+        </div>
+        <div class="panels">
+          {{#logoUrl}}
+          <div class="logo"><img src="{{logoUrl}}" alt="{{companyName}}" /></div>
+          {{/logoUrl}}
+          <div class="panel">Estimate {{proposalNumber}}</div>
+          <div class="panel"><span class="label">DATE</span> {{date}}</div>
+          <div class="panel blank"></div>
+        </div>
+      </div>
+
+      <div class="customer">
+        <div class="label">ADDRESS</div>
+        <div>{{customerName}}</div>
+        <div class="notes">{{customerAddress}}</div>
+      </div>
+      <div class="rule"></div>
+
+      <table class="items">
+        <thead>
+          <tr>
+            <th>ACTIVITY</th>
+            <th>DESCRIPTION</th>
+            <th class="num">QTY</th>
+            <th class="num">RATE</th>
+            <th class="num">AMOUNT</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{#lineItems}}
+          <tr>
+            <td class="activity">{{activity}}</td>
+            <td>{{description}}</td>
+            <td class="num">{{qty}}</td>
+            <td class="num">{{rate}}</td>
+            <td class="num">{{amount}}{{taxFlag}}</td>
+          </tr>
+          {{/lineItems}}
+        </tbody>
+      </table>
+
+      <div class="foot">
+        <div class="notes">{{notes}}</div>
+        <div class="totals">
+          <div class="row"><span>SUBTOTAL</span><span>{{subtotal}}</span></div>
+          {{#taxed}}
+          <div class="row"><span>TAX</span><span>{{taxAmount}}</span></div>
+          {{/taxed}}
+          <div class="total"><span>TOTAL</span> <span style="float: right">{{total}}</span></div>
+        </div>
+      </div>
+
+      <div class="accept">
+        <div>Accepted By</div>
+        <div>Accepted Date</div>
+      </div>
+
+      <div class="legal">{{legalFooter}}</div>
+    </div>
+  </body>
+</html>

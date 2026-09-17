@@ -29,17 +29,29 @@ RUN npx prisma generate
 RUN npm test
 
 RUN npx tsc
+# HTML proposal documents are data, not TypeScript, so tsc leaves them behind — copy them next
+# to the compiled module that reads them (__dirname/templates).
+RUN mkdir -p dist/copilot/estimating/html/templates \
+  && cp src/copilot/estimating/html/templates/*.html dist/copilot/estimating/html/templates/ 2>/dev/null || true
 
 # Stage 2: runtime
 FROM ${NODE_RUNTIME_IMAGE}
 COPY --from=builder /usr/bin/dumb-init /usr/bin/dumb-init
 WORKDIR /app
 
-# Install curl for ECS health checks
+# curl for ECS health checks; chromium to print HTML proposal documents to PDF.
+# puppeteer-core drives THIS binary (see html/htmlToPdf.ts) rather than downloading its own,
+# so the browser stays a patchable system package. The font packages matter: without them a
+# container renders tofu boxes for anything outside Latin-1, on a customer's proposal.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends curl \
+  && apt-get install -y --no-install-recommends \
+    curl \
+    chromium \
+    fonts-liberation \
+    fonts-dejavu-core \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
+ENV CHROMIUM_PATH=/usr/bin/chromium
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules

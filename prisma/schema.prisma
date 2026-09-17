@@ -1184,6 +1184,12 @@ model ProposalTemplate {
   companyId Int      @map("company_id")
   name      String   @db.VarChar(120)
   blocks    Json
+  /// When set, this template renders from the HTML document of that name in
+  /// src/copilot/estimating/html/templates instead of from `blocks` — a hand-authored file
+  /// matching a customer's own document exactly. Everything that CHOOSES a template (the
+  /// chat's ask, ZenTrades job-type matching, the company default) is unchanged: it picks a
+  /// row by name and never needs to know which kind it is.
+  htmlFile  String?  @map("html_file") @db.VarChar(120)
   isDefault Boolean  @default(false) @map("is_default")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
