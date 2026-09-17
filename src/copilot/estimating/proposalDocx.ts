@@ -187,6 +187,34 @@ export function amountInWords(amount: number): string {
 const money = (v: number) =>
   `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+/**
+ * The company's OWN logo, or null. Unlike loadLogo there is NO Clara-mark fallback: a
+ * client's proposal must never carry our branding, so a company with no logo prints none.
+ */
+export async function loadCompanyLogo(
+  logoUrl: string | null
+): Promise<{ data: Buffer; type: "png" | "jpg" } | null> {
+  if (!logoUrl) return null;
+  const type: "png" | "jpg" = /\.jpe?g(\?|$)/i.test(logoUrl) ? "jpg" : "png";
+  try {
+    // logo_url is either a full URL (CDN/external) or a bare S3 key
+    // (stored by company registration when no public CDN is configured).
+    if (/^https?:\/\//i.test(logoUrl)) {
+      const res = await fetch(logoUrl);
+      if (res.ok) return { data: Buffer.from(await res.arrayBuffer()), type };
+      logger.warn("Proposal logo fetch failed; printing no logo", { logoUrl, status: res.status });
+      return null;
+    }
+    return { data: await getObjectBufferFromS3(logoUrl), type };
+  } catch (err) {
+    logger.warn("Proposal logo load failed; printing no logo", {
+      logoUrl,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 export async function loadLogo(
   logoUrl: string | null
 ): Promise<{ data: Buffer; type: "png" | "jpg" }> {
