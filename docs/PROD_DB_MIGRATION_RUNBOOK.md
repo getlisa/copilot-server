@@ -119,6 +119,28 @@ Zero-risk to the app — it connects as `app_user`, not `postgres`.
 | Connection string auth fails with correct password | Password has `: # ? ] *` etc. — URL-encode it (step 4) |
 | Which DB is prod? | NOT the Supabase URLs in local `.env` — prod is the Aurora us-east-1 instance |
 
+## APPLIED 2026-09-17: HTML proposal documents — phase10
+
+`docs/sql/phase10.sql` — one additive column, `proposal_templates.html_file`. A template row
+may name a hand-authored HTML document in the repo instead of carrying blocks; everything that
+SELECTS a template (the chat's ask, ZenTrades job-type matching, the company default) is
+unchanged. Applied to dev Supabase and to PROD Aurora on 2026-09-17, both before any deploy.
+
+**Deploy note, new for this phase:** the runtime image now installs `chromium` (plus Liberation
+and DejaVu fonts) and sets `CHROMIUM_PATH=/usr/bin/chromium` — HTML proposals are printed to
+PDF by a headless browser. The image grows by roughly half a gigabyte and each render needs a
+few hundred MB of RAM briefly, so check the ECS task's memory reservation before rolling out.
+Without Chromium the server still runs: `htmlPdfAvailable()` is false and HTML templates fall
+back to the block renderer.
+
+## Pending migration: uploaded HTML documents — phase11 (2026-09-17)
+
+`docs/sql/phase11.sql` — one additive column, `proposal_templates.html`, holding a document
+uploaded through the admin console rather than hand-authored in the repo. Rendering prefers
+`html_file` (reviewed code) over `html`, and `html` over `blocks`, so a company that has both
+keeps the polished one. Applied to dev Supabase 2026-09-17; run on PROD Aurora in CloudShell
+per docs/CLOUDSHELL_PROD_SQL.md BEFORE the image that reads the column deploys.
+
 ## APPLIED 2026-09-10: catch-up — ONE file for everything below
 
 `docs/sql/prod-catchup-2026-09-10.sql` bundles every previously pending block in dependency

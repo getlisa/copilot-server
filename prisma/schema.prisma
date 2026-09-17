@@ -1190,6 +1190,11 @@ model ProposalTemplate {
   /// chat's ask, ZenTrades job-type matching, the company default) is unchanged: it picks a
   /// row by name and never needs to know which kind it is.
   htmlFile  String?  @map("html_file") @db.VarChar(120)
+  /// An uploaded/edited HTML document stored with the row, for companies whose document was
+  /// ingested rather than hand-authored in the repo. Rendering prefers htmlFile (reviewed
+  /// code) over this, and this over `blocks`. Untrusted input: it is sanitised on the way in
+  /// AND rendered with JavaScript disabled and network access restricted.
+  html      String?  @db.Text
   isDefault Boolean  @default(false) @map("is_default")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

@@ -71,6 +71,12 @@ adminRoute.get(
   "/companies/:companyId/proposal-template/html",
   AdminController.previewHtmlProposalTemplate
 );
+// Ingest an .html document as a company's template (sanitised and test-rendered on the way in).
+adminRoute.post(
+  "/companies/:companyId/proposal-templates/html",
+  pricebookUpload.single("file"),
+  AdminController.ingestHtmlProposalTemplate
+);
 
 // QuickBooks Online, console side: status and disconnect only.
 // The connect route is deliberately GONE. This router is mounted UNAUTHENTICATED, and with Clara

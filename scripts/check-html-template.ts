@@ -61,3 +61,44 @@ assert.ok(
 eq("escapeHtml handles null", escapeHtml(null), "");
 
 console.log("check-html-template: all assertions passed");
+
+// --- stored-template safety -------------------------------------------------------------------
+// An uploaded document is untrusted input handed to a browser running on our server. These
+// pin both layers: what is stripped on the way in, and what the renderer may fetch.
+import { sanitiseTemplateHtml, isAllowedResource } from "../src/copilot/estimating/html/htmlSafety";
+
+const strip = (html: string) => sanitiseTemplateHtml(html).html;
+
+assert.ok(!strip('<p>a</p><script>fetch("/x")</script>').includes("script"), "scripts are stripped");
+assert.ok(!strip('<iframe src="file:///app/.env"></iframe>').includes("iframe"), "iframes are stripped");
+assert.ok(!strip('<object data="x"></object>').includes("object"), "objects are stripped");
+assert.ok(!/onerror/i.test(strip('<img src=x onerror="steal()">')), "event handlers are stripped");
+assert.ok(!/javascript:/i.test(strip('<a href="javascript:x()">go</a>')), "script URLs are defused");
+assert.ok(!/refresh/i.test(strip('<meta http-equiv="refresh" content="0;url=http://x">')), "meta refresh is stripped");
+eq("the document itself survives", strip("<h1>Estimate {{total}}</h1>"), "<h1>Estimate {{total}}</h1>");
+assert.ok(
+  sanitiseTemplateHtml('<script>x</script><p>y</p>').removed.includes("<script>"),
+  "what was removed is reported, never silently applied"
+);
+
+// The renderer's allowlist — the control that holds even if the sanitiser misses something.
+assert.ok(isAllowedResource("data:image/png;base64,AAA"), "inline data is fine");
+assert.ok(!isAllowedResource("file:///etc/passwd"), "local files are blocked");
+assert.ok(
+  !isAllowedResource("http://169.254.169.254/latest/meta-data/iam/security-credentials/"),
+  "the cloud metadata endpoint is blocked"
+);
+assert.ok(!isAllowedResource("http://10.0.4.221:5432/"), "the private network is blocked");
+assert.ok(!isAllowedResource("http://localhost:7001/admin"), "localhost is blocked");
+assert.ok(!isAllowedResource("https://evil.example.com/pixel.png"), "an unlisted host is blocked");
+assert.ok(isAllowedResource("https://fonts.googleapis.com/css2?family=X"), "listed font hosts are allowed");
+assert.ok(
+  isAllowedResource("https://evil.example.com/pixel.png", true),
+  "a reviewed repo template may load public resources"
+);
+assert.ok(
+  !isAllowedResource("http://169.254.169.254/", true),
+  "even a trusted template cannot reach cloud metadata"
+);
+
+console.log("check-html-template: stored-template safety assertions passed");
