@@ -186,11 +186,48 @@ function extractNodes(): DocNode[] {
       .filter((k) => isBlock(k) || ["TABLE", "IMG"].includes((k.tagName || "").toUpperCase()));
 
   /**
+   * Group a container's children into the visual ROWS they occupy, by geometry.
+   *
+   * Deliberately not "is this flex, is this grid": the letterhead has been both, and the
+   * answer Word needs is the same either way — what ended up side by side. Rectangles say
+   * that directly, and they say it for float, inline-block and table display too. Children
+   * are taken in visual order (top, then left), so a grid whose DOM order differs from its
+   * `grid-template-areas` order still reads correctly.
+   */
+  const rowsOf = (kids: any[]): any[][] => {
+    const boxes = kids
+      .map((el) => ({ el, r: el.getBoundingClientRect() }))
+      .filter((b) => b.r.width > 0 && b.r.height > 0)
+      .sort((a, b) => a.r.top - b.r.top || a.r.left - b.r.left);
+    const rows: { el: any; r: any }[][] = [];
+    let band: { top: number; bottom: number } | null = null;
+    for (const b of boxes) {
+      // Same row when the box starts before the current band ends — overlapping vertically,
+      // with a couple of pixels of slack for rounding and borders.
+      if (band && b.r.top < band.bottom - 2) {
+        rows[rows.length - 1].push(b);
+        band.bottom = Math.max(band.bottom, b.r.bottom);
+      } else {
+        rows.push([b]);
+        band = { top: b.r.top, bottom: b.r.bottom };
+      }
+    }
+    // Reading order within a row is LEFT to right, not whichever box happens to start
+    // highest: a logo aligned a few pixels above the address block still belongs beside it,
+    // in its own column, not in front of it.
+    return rows.map((row) => row.sort((a, b) => a.r.left - b.r.left).map((b) => b.el));
+  };
+
+  /**
    * The nodes for ONE element: recurse when it is a container, otherwise emit its own text.
    * Both callers need this — a `<td>` holding plain text has no element children at all, and
    * walking only children would render every such cell empty.
+   *
+   * `fill` is the nearest ancestor's background. It has to be carried down: the TOTAL bar is
+   * a black div whose children are floated spans, so recursing into them and forgetting the
+   * parent's fill prints white text on white paper — an invisible total.
    */
-  function nodesFor(el: any, inCell: boolean): DocNode[] {
+  function nodesFor(el: any, inCell: boolean, fill?: string): DocNode[] {
     const tag = (el.tagName || "").toUpperCase();
     if (tag === "TABLE") return [tableNode(el)];
     if (tag === "IMG") {
@@ -199,9 +236,10 @@ function extractNodes(): DocNode[] {
     }
     if (tag === "BR") return [];
 
+    const own = fillOf(el) ?? fill;
     const rule = ruleOf(el);
     if (blockKidsOf(el).length > 0) {
-      const nested = collect(el, inCell);
+      const nested = collect(el, inCell, own);
       return rule ? [{ kind: "para", runs: [], ruleAbove: rule }, ...nested] : nested;
     }
     const runs = runsOf(el);
@@ -211,44 +249,39 @@ function extractNodes(): DocNode[] {
         kind: "para",
         runs,
         align: alignOf(el),
-        shading: fillOf(el),
+        shading: own,
         ...(rule ? { ruleAbove: rule } : {}),
       },
     ];
   }
 
-  function collect(root: any, inCell = false): DocNode[] {
-    const out: DocNode[] = [];
-    for (const el of Array.from(root.children) as any[]) {
-      if (!visible(el)) continue;
-      const s = styleOf(el);
-      const blockKids = blockKidsOf(el);
+  function collect(root: any, inCell = false, fill?: string): DocNode[] {
+    const kids = blockKidsOf(root);
+    const rows = rowsOf(kids);
 
-      // A flex ROW is the one layout Word can honestly reproduce: a borderless table, one
-      // cell per child. Without this the letterhead's two columns stack and the document
-      // stops looking like the customer's.
-      if (
-        s.display === "flex" &&
-        !String(s.flexDirection).startsWith("column") &&
-        blockKids.length > 1
-      ) {
-        const total = el.getBoundingClientRect().width || 1;
-        out.push({
+    // Anything genuinely side by side becomes a borderless table, so the layout survives in
+    // a format that has no columns of its own. All-single-child rows are ordinary stacked
+    // content and stay as paragraphs.
+    if (rows.some((r) => r.length > 1)) {
+      const total = root.getBoundingClientRect().width || 1;
+      return [
+        {
           kind: "table",
           borderless: true,
-          rows: [
-            blockKids.map((k) => ({
-              nodes: nodesFor(k, true),
-              shading: fillOf(k),
+          rows: rows.map((row) =>
+            row.map((k) => ({
+              nodes: nodesFor(k, true, fillOf(k) ?? fill),
+              shading: fillOf(k) ?? fill,
               width: Math.round(((k.getBoundingClientRect().width || 0) / total) * 100) || undefined,
-            })),
-          ],
-        });
-        continue;
-      }
-
-      out.push(...nodesFor(el, inCell));
+            }))
+          ),
+        },
+      ];
     }
+
+    const out: DocNode[] = [];
+    for (const el of (Array.from(root.children) as any[]).filter(visible))
+      out.push(...nodesFor(el, inCell, fill));
     return out;
   }
 
