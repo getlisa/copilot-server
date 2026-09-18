@@ -264,6 +264,31 @@ async function quoteDtoWithProducts(quote: Parameters<typeof toQuoteDto>[0] & { 
  * Shared proposal assembly: header from DB branding, the DTO, and the ProposalInput
  * that both document builders (docx download, PDF email attachment) render from.
  */
+/**
+ * The human-facing reference printed as "Proposal #".
+ *
+ * ZenTrades issues an estimate number only once the estimate is POSTED, so it cannot be the
+ * answer for every document: a proposal printed before posting, or for a quote with no
+ * ZenTrades job at all, would have nothing to show. The rule is therefore:
+ *
+ *   posted to ZenTrades  → their estimate number, so the two systems cross-reference
+ *   not yet, or no job   → the quote's own id, shortened
+ *
+ * The fallback is derived rather than generated, which makes it STABLE: the same estimate
+ * downloaded twice must not carry two different numbers, and anything clock-based would.
+ *
+ * WORTH KNOWING: a proposal sent before posting shows the fallback, and the same proposal
+ * re-downloaded after posting shows the ZenTrades number. If a customer must never see the
+ * reference change, post the estimate before sending the document.
+ */
+const proposalNumberFor = (quote: { id: string; createdAt: Date }): string => {
+  // Read defensively: the column that stores the posted estimate number is not on main yet,
+  // so this picks it up automatically when it lands rather than needing another change here.
+  const posted = (quote as { ztInvoiceNumber?: string | null }).ztInvoiceNumber;
+  if (posted && posted.trim()) return posted.trim();
+  return `${quote.createdAt.getFullYear()}-${quote.id.replace(/-/g, "").slice(0, 8).toUpperCase()}`;
+};
+
 async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
   const conversation = await prisma.conversation.findUnique({
     where: { id: quote.conversationId },
@@ -333,6 +358,12 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     header: mergedHeader,
     projectTitle,
     date: new Date(),
+    // Proposal # — every one of these documents prints it, and it was coming out blank
+    // because nothing ever set it. Derived from the quote so it is STABLE: the same estimate
+    // downloaded twice must not carry two different numbers, which rules out anything based
+    // on the clock. Once the ZenTrades estimate number is stored on the quote it takes over
+    // here, so the two systems cross-reference.
+    proposalNumber: proposalNumberFor(quote),
     // The document's line table. DTO prices already carry the markup, so the document shows
     // exactly what the review screen shows.
     lineItems: dto.lineItems.map((i) => ({
