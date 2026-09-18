@@ -264,6 +264,15 @@ async function quoteDtoWithProducts(quote: Parameters<typeof toQuoteDto>[0] & { 
  * Shared proposal assembly: header from DB branding, the DTO, and the ProposalInput
  * that both document builders (docx download, PDF email attachment) render from.
  */
+/**
+ * The human-facing reference printed as "Proposal #".
+ *
+ * The quote's own id, shortened — unique per estimate, unchanged between downloads, and
+ * short enough to read down a phone line.
+ */
+const proposalNumberFor = (quote: { id: string; createdAt: Date }): string =>
+  `${quote.createdAt.getFullYear()}-${quote.id.replace(/-/g, "").slice(0, 8).toUpperCase()}`;
+
 async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
   const conversation = await prisma.conversation.findUnique({
     where: { id: quote.conversationId },
@@ -333,6 +342,12 @@ async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof l
     header: mergedHeader,
     projectTitle,
     date: new Date(),
+    // Proposal # — every one of these documents prints it, and it was coming out blank
+    // because nothing ever set it. Derived from the quote so it is STABLE: the same estimate
+    // downloaded twice must not carry two different numbers, which rules out anything based
+    // on the clock. Once the ZenTrades estimate number is stored on the quote it takes over
+    // here, so the two systems cross-reference.
+    proposalNumber: proposalNumberFor(quote),
     // The document's line table. DTO prices already carry the markup, so the document shows
     // exactly what the review screen shows.
     lineItems: dto.lineItems.map((i) => ({
