@@ -31,8 +31,10 @@ RUN npm test
 RUN npx tsc
 # HTML proposal documents are data, not TypeScript, so tsc leaves them behind — copy them next
 # to the compiled module that reads them (__dirname/templates).
+# -r, because a company with a document per job type keeps them in its own folder
+# (templates/nlfp/*.html) and a flat copy would ship an image with none of them.
 RUN mkdir -p dist/copilot/estimating/html/templates \
-  && cp src/copilot/estimating/html/templates/*.html dist/copilot/estimating/html/templates/ 2>/dev/null || true
+  && cp -r src/copilot/estimating/html/templates/. dist/copilot/estimating/html/templates/ 2>/dev/null || true
 
 # Stage 2: runtime
 FROM ${NODE_RUNTIME_IMAGE}

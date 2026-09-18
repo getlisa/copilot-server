@@ -1,0 +1,379 @@
+<!doctype html>
+<!--
+  Next Level Fire Protection — ANNUAL FIRE SPRINKLER INSPECTION PROPOSAL
+
+  One of NLFP's per-job-type documents. It shares the design in _base.html and differs only in
+  the title above and the pricing columns below; edit this file to change THIS document, or
+  _base.html and re-copy to change all of them.
+
+  Sections appear when there is something to put in them: the Schedule of Values when
+  milestones were agreed, Payment Terms when notes were given, Deficiencies on an inspection
+  that found some.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ANNUAL FIRE SPRINKLER INSPECTION PROPOSAL</title>
+    <style>
+      @page {
+        size: letter;
+        margin: 0.6in 0.75in;
+      }
+      html {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      body {
+        margin: 0;
+        font-family: Calibri, Carlito, "Segoe UI", Arial, sans-serif;
+        font-size: 10.5pt;
+        line-height: 1.45;
+        color: #1a1a1a;
+      }
+
+      /* ---------- repeating letterhead ----------
+         The whole document sits in one table so the letterhead and footer REPEAT on every
+         printed page: a browser reprints <thead> and <tfoot> on each sheet, which is the only
+         mechanism that actually works. `position: fixed` also repeats, but its offsets cannot
+         reach into the page margin — a header at top:-0.95in prints near the page FOOT. */
+      table.sheet {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      table.sheet > thead > tr > td,
+      table.sheet > tbody > tr > td,
+      table.sheet > tfoot > tr > td {
+        padding: 0;
+        border: none;
+      }
+      table.sheet > thead > tr > td {
+        padding-bottom: 9px;
+      }
+      table.sheet > tbody > tr > td {
+        padding-top: 14px;
+      }
+      .letterhead {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+      .letterhead img {
+        max-height: 0.7in;
+        max-width: 1.4in;
+      }
+      .letterhead .titles {
+        flex: 1;
+        text-align: right;
+      }
+      .letterhead .doc-title {
+        color: #c00000;
+        font-weight: bold;
+        font-size: 13pt;
+        line-height: 1.2;
+      }
+      .letterhead .doc-sub {
+        color: #1f6fc0;
+        font-size: 9pt;
+      }
+      .page-foot {
+        border-top: 2.5px solid #c00000;
+        padding-top: 5px;
+        text-align: center;
+        color: #808080;
+        font-size: 8pt;
+      }
+
+      /* ---------- info boxes ---------- */
+      .info-row {
+        display: flex;
+        gap: 22px;
+        margin-bottom: 16px;
+      }
+      .info-box {
+        flex: 1;
+        border: 1px solid #d9d9d9;
+      }
+      .info-box .head {
+        background: #c00000;
+        color: #fff;
+        font-weight: bold;
+        font-size: 9.5pt;
+        padding: 5px 9px;
+      }
+      .info-box table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .info-box td {
+        padding: 4px 9px;
+        border-bottom: 1px solid #d9d9d9;
+        vertical-align: top;
+        font-size: 9.5pt;
+      }
+      .info-box tr:last-child td {
+        border-bottom: none;
+      }
+      .info-box td.k {
+        font-weight: bold;
+        width: 42%;
+      }
+
+      /* ---------- sections ---------- */
+      h2 {
+        color: #c00000;
+        font-size: 11pt;
+        margin: 18px 0 7px;
+        padding-bottom: 2px;
+        border-bottom: 1px solid #c00000;
+        display: inline-block;
+      }
+      p {
+        margin: 0 0 9px;
+      }
+      ul {
+        margin: 0 0 10px;
+        padding-left: 20px;
+      }
+      li {
+        margin-bottom: 3px;
+      }
+
+      /* ---------- tables ---------- */
+      table.grid {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 6px;
+      }
+      table.grid th {
+        background: #c00000;
+        color: #fff;
+        font-weight: bold;
+        font-size: 9.5pt;
+        text-align: left;
+        padding: 6px 9px;
+      }
+      table.grid th.num,
+      table.grid td.num {
+        text-align: right;
+        white-space: nowrap;
+      }
+      table.grid th.mid,
+      table.grid td.mid {
+        text-align: center;
+        white-space: nowrap;
+      }
+      table.grid td {
+        padding: 6px 9px;
+        border: 1px solid #d9d9d9;
+        vertical-align: top;
+      }
+      /* The total row: red label, blue amount — NLFP's two brand colours doing the work. */
+      tr.total td {
+        background: #c00000;
+        color: #fff;
+        font-weight: bold;
+        border-color: #c00000;
+      }
+      tr.total td.amount {
+        background: #1f6fc0;
+        border-color: #1f6fc0;
+        text-align: right;
+      }
+
+      /* ---------- signatures ---------- */
+      .signoff {
+        display: flex;
+        gap: 40px;
+        margin-top: 24px;
+      }
+      .signoff > div {
+        flex: 1;
+      }
+      .signoff .caption {
+        color: #808080;
+        font-size: 9pt;
+      }
+      .signoff .name {
+        font-weight: bold;
+        margin-top: 12px;
+      }
+      .sig-line {
+        border-bottom: 1px solid #404040;
+        height: 32px;
+      }
+      .sig-note {
+        color: #808080;
+        font-size: 9pt;
+        padding-top: 3px;
+      }
+    </style>
+  </head>
+  <body>
+    <table class="sheet">
+      <thead>
+        <tr>
+          <td>
+            <div class="letterhead">
+              {{#logoUrl}}<img src="{{logoUrl}}" alt="{{companyName}}" />{{/logoUrl}}
+              <div class="titles">
+                <div class="doc-title">ANNUAL FIRE SPRINKLER INSPECTION PROPOSAL</div>
+                <div class="doc-sub">{{companyName}} | {{website}}</div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      </thead>
+      <tfoot>
+        <tr>
+          <td>
+            <div class="page-foot">{{companyName}} | {{website}} | {{companyPhone}} | {{companyEmail}}</div>
+          </td>
+        </tr>
+      </tfoot>
+      <tbody>
+        <tr>
+          <td>
+
+    <div class="info-row">
+      <div class="info-box">
+        <div class="head">PROPOSAL INFORMATION</div>
+        <table>
+          <tr><td class="k">Proposal #:</td><td>{{proposalNumber}}</td></tr>
+          <tr><td class="k">Date:</td><td>{{date}}</td></tr>
+          <tr><td class="k">Valid Until:</td><td>{{validUntil}}</td></tr>
+          <tr><td class="k">Prepared By:</td><td>{{preparedBy}}</td></tr>
+          <tr><td class="k">Phone:</td><td>{{companyPhone}}</td></tr>
+          <tr><td class="k">Email:</td><td>{{companyEmail}}</td></tr>
+        </table>
+      </div>
+      <div class="info-box">
+        <div class="head">PROJECT INFORMATION</div>
+        <table>
+          <tr><td class="k">Client:</td><td>{{customerName}}</td></tr>
+          {{#facility}}<tr><td class="k">Facility:</td><td>{{facility}}</td></tr>{{/facility}}
+          <tr><td class="k">Address:</td><td>{{customerAddress}}</td></tr>
+          {{#contactName}}<tr><td class="k">Contact:</td><td>{{contactName}}</td></tr>{{/contactName}}
+          {{#systemType}}<tr><td class="k">System Type:</td><td>{{systemType}}</td></tr>{{/systemType}}
+          {{#workType}}<tr><td class="k">Work Type:</td><td>{{workType}}</td></tr>{{/workType}}
+        </table>
+      </div>
+    </div>
+
+    {{#scopeSections}}
+    <h2>{{title}}</h2>
+    <ul>
+      {{#bullets}}<li>{{text}}</li>{{/bullets}}
+    </ul>
+    {{/scopeSections}}
+
+    {{#hasDeficiencies}}
+    <h2>Deficiencies Identified — Prior Inspection</h2>
+    <table class="grid">
+      <tr>
+        <th>Location</th>
+        <th>Deficiency</th>
+        <th>Severity</th>
+        <th>Recommended Action</th>
+      </tr>
+      {{#deficiencies}}
+      <tr>
+        <td>{{location}}</td>
+        <td>{{deficiency}}</td>
+        <td>{{severity}}</td>
+        <td>{{action}}</td>
+      </tr>
+      {{/deficiencies}}
+    </table>
+    {{/hasDeficiencies}}
+
+    <h2>Pricing</h2>
+    <table class="grid">
+      <tr>
+        <th>DESCRIPTION</th>
+        <th class="mid">QTY</th>
+        <th class="num">TOTAL</th>
+      </tr>
+      {{#lineItems}}
+      <tr>
+        <td>{{item}}</td>
+        <td class="mid">{{qty}}</td>
+        <td class="num">{{amount}}</td>
+      </tr>
+      {{/lineItems}}
+      <tr class="total">
+        <td colspan="2">TOTAL PROPOSAL AMOUNT</td>
+        <td class="amount">{{total}}</td>
+      </tr>
+    </table>
+
+    {{#hasMilestones}}
+    <h2>Schedule of Values</h2>
+    <table class="grid">
+      <tr>
+        <th class="mid">#</th>
+        <th>Milestone</th>
+        <th class="mid">%</th>
+        <th class="num">Amount</th>
+      </tr>
+      {{#milestones}}
+      <tr>
+        <td class="mid">{{n}}</td>
+        <td>{{label}}</td>
+        <td class="mid">{{percent}}</td>
+        <td class="num">{{amount}}</td>
+      </tr>
+      {{/milestones}}
+    </table>
+    {{/hasMilestones}}
+
+    {{#notes}}
+    <h2>Payment Terms</h2>
+    <p>{{notes}}</p>
+    {{/notes}}
+
+    {{#hasClarifications}}
+    <h2>Clarifications</h2>
+    <ul>
+      {{#clarifications}}<li>{{text}}</li>{{/clarifications}}
+    </ul>
+    {{/hasClarifications}}
+
+    {{#hasExclusions}}
+    <h2>Exclusions</h2>
+    <ul>
+      {{#exclusions}}<li>{{text}}</li>{{/exclusions}}
+    </ul>
+    {{/hasExclusions}}
+
+    {{#legalFooter}}
+    <h2>Authorization</h2>
+    <p>{{legalFooter}}</p>
+    {{/legalFooter}}
+
+    <p>
+      We trust this will provide the information you need for your evaluation. Please call or
+      email with any questions or comments. Thank you and we look forward to working with you on
+      this project.
+    </p>
+
+    <div class="signoff">
+      <div>
+        <div class="caption">Respectfully Submitted,</div>
+        <div class="name">{{preparedBy}}</div>
+        <div>{{companyPhone}}</div>
+        <div>{{companyEmail}}</div>
+      </div>
+      <div>
+        <div class="caption">Client Acceptance:</div>
+        <div class="sig-line"></div>
+        <div class="sig-note">Authorized Signature — {{customerName}}</div>
+        <div class="sig-line"></div>
+        <div class="sig-note">Print Name / Title | Date</div>
+      </div>
+    </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </body>
+</html>
