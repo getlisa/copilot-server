@@ -228,17 +228,21 @@ function extractNodes(): DocNode[] {
    * `grid-template-areas` order still reads correctly.
    */
   const rowsOf = (kids: any[]): any[][] => {
-    // Zero-size children are KEPT. An empty notes column beside the totals is what holds the
-    // totals over on the right; drop it and they slide back to the left margin.
+    // Zero-WIDTH children are kept: an empty notes column beside the totals is what holds the
+    // totals over on the right, and a flex item stretches to full height even with no text.
+    // Zero-HEIGHT ones are dropped — an empty `<div>{{website}}</div>` in ordinary block flow
+    // shares its top with the line below it, and treating that as "side by side" put the
+    // phone number in a column of its own, one digit per line.
     const boxes = kids
       .map((el) => ({ el, r: el.getBoundingClientRect() }))
+      .filter((b) => b.r.height > 0)
       .sort((a, b) => a.r.top - b.r.top || a.r.left - b.r.left);
     const rows: { el: any; r: any }[][] = [];
     let band: { top: number; bottom: number } | null = null;
     for (const b of boxes) {
-      // Same row when the box overlaps the band vertically — or simply starts level with it,
-      // which is the only thing that identifies a zero-height spacer as part of the row.
-      if (band && (b.r.top < band.bottom - 2 || Math.abs(b.r.top - band.top) <= 2)) {
+      // Same row when the box overlaps the band vertically, with a couple of pixels of slack
+      // for rounding and borders.
+      if (band && b.r.top < band.bottom - 2) {
         rows[rows.length - 1].push(b);
         band.bottom = Math.max(band.bottom, b.r.bottom);
       } else {
@@ -302,18 +306,28 @@ function extractNodes(): DocNode[] {
     // a format that has no columns of its own. All-single-child rows are ordinary stacked
     // content and stay as paragraphs.
     if (rows.some((r) => r.length > 1)) {
-      const total = root.getBoundingClientRect().width || 1;
+      const box = root.getBoundingClientRect();
+      const total = box.width || 1;
       return [
         {
           kind: "table",
           borderless: true,
-          rows: rows.map((row) =>
-            row.map((k) => ({
-              nodes: nodesFor(k, true, fillOf(k) ?? fill),
-              shading: fillOf(k) ?? fill,
-              width: Math.round(((k.getBoundingClientRect().width || 0) / total) * 100) || undefined,
-            }))
-          ),
+          rows: rows.map((row) => {
+            // A cell spans from its own left edge to the next cell's, so the gaps between
+            // flex/grid items belong to a cell and the row always adds up to the full width.
+            // Each box's own width would leave the remainder unaccounted for, and a zero-width
+            // spacer would claim nothing at all.
+            const rects = row.map((k) => k.getBoundingClientRect());
+            return row.map((k, i) => {
+              const right = i + 1 < rects.length ? rects[i + 1].left : box.right;
+              const span = Math.max(0, right - rects[i].left);
+              return {
+                nodes: nodesFor(k, true, fillOf(k) ?? fill),
+                shading: fillOf(k) ?? fill,
+                width: Math.max(1, Math.round((span / total) * 100)),
+              };
+            });
+          }),
         },
       ];
     }
@@ -399,9 +413,21 @@ function paragraph(node: DocPara): Paragraph {
 const edgeOf = (e?: DocEdge) =>
   e ? { style: BorderStyle.SINGLE, size: e.size, color: e.color } : NO_BORDER;
 
-function table(node: DocTable): Table {
+/**
+ * Usable width of a Letter page inside the section margins below, in twips.
+ *
+ * Widths are absolute, NOT percentages. OOXML's `w:type="pct"` counts in FIFTIETHS of a
+ * percent, so a cell written as 18% is read as 0.36% of the table — under AUTOFIT Word
+ * quietly re-flowed by content and hid it, and the moment the layout was FIXED every column
+ * collapsed to a single character. Twips have one meaning.
+ */
+const CONTENT_TWIPS = 12240 - 720 * 2;
+
+function table(node: DocTable, availableTwips: number): Table {
+  const widthOf = (pct?: number) =>
+    Math.max(240, Math.round(((pct ?? 100) / 100) * availableTwips));
   return new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
+    width: { size: availableTwips, type: WidthType.DXA },
     // FIXED honours the measured column widths. Left to AUTOFIT, Word re-flows them by its
     // own content rules and narrow numeric columns wrap ("1 bulb" onto two lines).
     layout: TableLayoutType.FIXED,
@@ -411,26 +437,26 @@ function table(node: DocTable): Table {
     rows: node.rows.map(
       (row) =>
         new TableRow({
-          children: row.map(
-            (c) =>
-              new TableCell({
-                ...(c.width ? { width: { size: c.width, type: WidthType.PERCENTAGE } } : {}),
-                ...(c.shading ? { shading: { fill: c.shading } } : {}),
-                borders: c.borders
-                  ? {
-                      top: edgeOf(c.borders.top),
-                      bottom: edgeOf(c.borders.bottom),
-                      left: edgeOf(c.borders.left),
-                      right: edgeOf(c.borders.right),
-                    }
-                  : NO_BORDERS,
-                // Tight: Word's default cell padding plus a fixed width is what squeezes a
-                // right-aligned figure into wrapping.
-                margins: { top: 30, bottom: 30, left: 40, right: 40 },
-                // Word requires at least one paragraph per cell.
-                children: docxFromNodes(c.nodes, true) as (Paragraph | Table)[],
-              })
-          ),
+          children: row.map((c) => {
+            const twips = widthOf(c.width);
+            return new TableCell({
+              width: { size: twips, type: WidthType.DXA },
+              ...(c.shading ? { shading: { fill: c.shading } } : {}),
+              borders: c.borders
+                ? {
+                    top: edgeOf(c.borders.top),
+                    bottom: edgeOf(c.borders.bottom),
+                    left: edgeOf(c.borders.left),
+                    right: edgeOf(c.borders.right),
+                  }
+                : NO_BORDERS,
+              // Tight: Word's default cell padding plus a fixed width is what squeezes a
+              // right-aligned figure into wrapping.
+              margins: { top: 30, bottom: 30, left: 40, right: 40 },
+              // A nested table measures against THIS cell, not the page, or it overflows.
+              children: docxFromNodes(c.nodes, true, twips - 80) as (Paragraph | Table)[],
+            });
+          }),
         })
     ),
   });
@@ -440,11 +466,15 @@ function table(node: DocTable): Table {
  * Nodes → docx elements. Pure, so the shape of a converted document is asserted without a
  * browser (scripts/check-html-template.ts).
  */
-export function docxFromNodes(nodes: DocNode[], inCell = false): (Paragraph | Table)[] {
+export function docxFromNodes(
+  nodes: DocNode[],
+  inCell = false,
+  availableTwips: number = CONTENT_TWIPS
+): (Paragraph | Table)[] {
   const out: (Paragraph | Table)[] = [];
   for (const node of nodes) {
     if (node.kind === "para") out.push(paragraph(node));
-    else if (node.kind === "table") out.push(table(node));
+    else if (node.kind === "table") out.push(table(node, availableTwips));
     else
       out.push(
         new Paragraph({
