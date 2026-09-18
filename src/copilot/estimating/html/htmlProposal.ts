@@ -29,9 +29,13 @@ const TEMPLATE_DIR = path.join(__dirname, "templates");
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export function templatePath(file: string): string | null {
-  const parts = file.split("/").filter(Boolean);
+  // An absolute path is refused outright rather than quietly read as a relative one. It could
+  // not escape the directory either way — the segment check below rejects `..` — but a row
+  // naming /etc/passwd is a mistake or an attempt, and neither should resolve to a template.
+  if (!file || file.startsWith("/") || file.includes("\\")) return null;
+  const parts = file.split("/");
   if (parts.length < 1 || parts.length > 2) return null;
-  if (!parts.every((p) => SEGMENT.test(p) && p !== "..")) return null;
+  if (!parts.every((p) => SEGMENT.test(p))) return null;
   return path.join(TEMPLATE_DIR, ...parts);
 }
 

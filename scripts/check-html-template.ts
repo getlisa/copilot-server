@@ -180,6 +180,26 @@ function templateFiles(dir: string): string[] {
   });
 }
 
+// --- which template names may be loaded --------------------------------------------------------
+// This name comes from a proposal_templates row, so it is INPUT. A company folder is allowed
+// (nlfp/inspection.html); nothing that leaves the templates directory is.
+import { templatePath } from "../src/copilot/estimating/html/htmlProposal";
+
+const resolves = (file: string) => templatePath(file) != null;
+
+assert.ok(resolves("moss-electric.html"), "a plain template name resolves");
+assert.ok(resolves("nlfp/inspection.html"), "a company folder resolves");
+assert.ok(!resolves("../../etc/passwd"), "parent traversal is refused");
+assert.ok(!resolves("nlfp/../../lib/prisma.ts"), "traversal inside a folder is refused");
+assert.ok(!resolves("/etc/passwd"), "an absolute path is refused");
+assert.ok(!resolves("a/b/c.html"), "more than one folder deep is refused");
+assert.ok(!resolves(""), "an empty name is refused");
+assert.ok(!resolves("..\\windows\\system32"), "backslashes are refused");
+// _base.html is a reference copy carrying __TITLE__ placeholders; it must never render.
+assert.ok(!resolves("nlfp/_base.html"), "a leading underscore is not a loadable template");
+
+console.log("check-html-template: template-path assertions passed");
+
 void (async () => {
   const data = await htmlTemplateData({
     header: { companyName: "C" },
