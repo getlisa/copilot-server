@@ -2,12 +2,15 @@ import {
   AlignmentType,
   BorderStyle,
   ImageRun,
+  LineRuleType,
   Paragraph,
   Table,
   TableCell,
   TableRow,
   TextRun,
+  Tab,
   TableLayoutType,
+  TabStopType,
   WidthType,
   type ISectionOptions,
 } from "docx";
@@ -50,6 +53,14 @@ export interface DocPara {
   shading?: string;
   /** A heavy top border stands in for the template's rules and dividers. */
   ruleAbove?: { size: number; color: string };
+  /**
+   * Text the CSS floated to the right edge, set against a right tab stop. Keeps the TOTAL
+   * bar reading `TOTAL … $225.00` across the black band rather than as one run at the left.
+   */
+  rightRuns?: DocRun[];
+  /** The element's own vertical margin and padding, in twips. */
+  spaceBefore?: number;
+  spaceAfter?: number;
 }
 
 export interface DocImage {
@@ -122,9 +133,29 @@ function extractNodes(): DocNode[] {
     return s.display !== "none" && s.visibility !== "hidden" && s.opacity !== "0";
   };
 
-  const runsOf = (el: any): DocRun[] => {
+  /** CSS px → twips (1px = 0.75pt, 1pt = 20 twips). */
+  const twips = (px: string) => Math.round((parseFloat(px) || 0) * 15);
+
+  /**
+   * The element's own vertical margin and padding, as Word paragraph spacing.
+   *
+   * Without it every gap the template draws collapses: the estimate panels merge into one
+   * black block, the blank panel runs into the table header, and the whole document rides up
+   * the page. Capped, because a template using a large margin for page positioning would
+   * otherwise push content onto a second sheet.
+   */
+  const spacingOf = (el: any): { spaceBefore?: number; spaceAfter?: number } => {
     const s = styleOf(el);
-    const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+    const before = Math.min(1200, twips(s.marginTop) + twips(s.paddingTop));
+    const after = Math.min(1200, twips(s.marginBottom) + twips(s.paddingBottom));
+    return { ...(before ? { spaceBefore: before } : {}), ...(after ? { spaceAfter: after } : {}) };
+  };
+
+  /** `omit` drops a floated child's text, which is emitted separately against a tab stop. */
+  const runsOf = (el: any, omit = ""): DocRun[] => {
+    const s = styleOf(el);
+    let text = (el.textContent || "").replace(/\s+/g, " ").trim();
+    if (omit && text.endsWith(omit)) text = text.slice(0, -omit.length).trim();
     if (!text) return [];
     return [
       {
@@ -285,14 +316,21 @@ function extractNodes(): DocNode[] {
       const nested = collect(el, inCell, own);
       return rule ? [{ kind: "para", runs: [], ruleAbove: rule }, ...nested] : nested;
     }
-    const runs = runsOf(el);
-    if (!runs.length && !rule) return [];
+    // A child the CSS floated right is set against a right tab stop instead of running on
+    // after the label — that is what makes the TOTAL bar read across the black band.
+    const floated = kids.find((k) => styleOf(k).float === "right" && (k.textContent || "").trim());
+    const floatText = floated ? (floated.textContent || "").replace(/\s+/g, " ").trim() : "";
+    const runs = runsOf(el, floatText);
+    const rightRuns = floated ? runsOf(floated) : [];
+    if (!runs.length && !rightRuns.length && !rule) return [];
     return [
       {
         kind: "para",
         runs,
+        ...(rightRuns.length ? { rightRuns } : {}),
         align: alignOf(el),
         shading: own,
+        ...spacingOf(el),
         ...(rule ? { ruleAbove: rule } : {}),
       },
     ];
@@ -383,7 +421,19 @@ const NO_BORDERS = {
   insideVertical: NO_BORDER,
 };
 
-function paragraph(node: DocPara): Paragraph {
+const textRun = (r: DocRun) =>
+  new TextRun({
+    text: r.text,
+    bold: r.bold,
+    italics: r.italic,
+    // docx sizes are half-points.
+    size: Math.max(2, Math.round(r.size * 2)),
+    ...(r.color ? { color: r.color } : {}),
+    ...(r.font ? { font: r.font } : {}),
+  });
+
+function paragraph(node: DocPara, availableTwips: number): Paragraph {
+  const right = node.rightRuns ?? [];
   return new Paragraph({
     ...(node.align ? { alignment: ALIGN[node.align] } : {}),
     ...(node.shading ? { shading: { fill: node.shading } } : {}),
@@ -394,19 +444,23 @@ function paragraph(node: DocPara): Paragraph {
           },
         }
       : {}),
-    spacing: { before: 20, after: 20 },
-    children: node.runs.map(
-      (r) =>
-        new TextRun({
-          text: r.text,
-          bold: r.bold,
-          italics: r.italic,
-          // docx sizes are half-points.
-          size: Math.max(2, Math.round(r.size * 2)),
-          ...(r.color ? { color: r.color } : {}),
-          ...(r.font ? { font: r.font } : {}),
-        })
-    ),
+    // A right tab stop at the text edge is how Word pushes a figure to the margin.
+    ...(right.length
+      ? { tabStops: [{ type: TabStopType.RIGHT, position: Math.max(720, availableTwips - 120) }] }
+      : {}),
+    // A shaded paragraph's fill extends through its own trailing space, so the gap between
+    // two black panels would be black too. The space is emitted as an unshaded spacer
+    // paragraph instead (see docxFromNodes), and the panel itself ends where its text does.
+    spacing: {
+      before: node.spaceBefore ?? 20,
+      after: node.shading ? 0 : node.spaceAfter ?? 20,
+    },
+    children: [
+      ...node.runs.map(textRun),
+      ...(right.length
+        ? [new TextRun({ children: [new Tab()] }), ...right.map(textRun)]
+        : []),
+    ],
   });
 }
 
@@ -484,8 +538,19 @@ export function docxFromNodes(
 ): (Paragraph | Table)[] {
   const out: (Paragraph | Table)[] = [];
   for (const node of nodes) {
-    if (node.kind === "para") out.push(paragraph(node));
-    else if (node.kind === "table") out.push(table(node, availableTwips));
+    if (node.kind === "para") {
+      out.push(paragraph(node, availableTwips));
+      // The unshaded gap after a filled block, at exactly the height the CSS margin asked
+      // for — this is what keeps the two estimate panels apart, and the blank panel off the
+      // table header.
+      if (node.shading && node.spaceAfter)
+        out.push(
+          new Paragraph({
+            spacing: { before: 0, after: 0, line: node.spaceAfter, lineRule: LineRuleType.EXACT },
+            children: [new TextRun({ text: "", size: 2 })],
+          })
+        );
+    } else if (node.kind === "table") out.push(table(node, availableTwips));
     else
       out.push(
         new Paragraph({
