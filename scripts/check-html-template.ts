@@ -117,3 +117,37 @@ eq("two full pages", pageCount(2112), 2);
 eq("a runaway template is capped", pageCount(10_000_000), 50);
 
 console.log("check-html-template: page-image assertions passed");
+
+// --- HTML → a real Word document ---------------------------------------------------------------
+// The Word download is text and tables, not a picture, so these pin the mapping that Word
+// itself is strict about: a cell must contain at least one paragraph, and must not END on a
+// table, or the .docx will not open.
+import { docxFromNodes, type DocNode } from "../src/copilot/estimating/html/htmlToDocx";
+import { Paragraph as DocxParagraph, Table as DocxTable } from "docx";
+
+const para = (text: string): DocNode => ({ kind: "para", runs: [{ text, size: 10 }] });
+const tbl = (cells: DocNode[][]): DocNode => ({
+  kind: "table",
+  rows: [cells.map((nodes) => ({ nodes }))],
+});
+
+eq("a paragraph maps to one paragraph", docxFromNodes([para("hello")]).length, 1);
+assert.ok(docxFromNodes([para("x")])[0] instanceof DocxParagraph, "…and it is a Paragraph");
+assert.ok(docxFromNodes([tbl([[para("a")], [para("b")]])])[0] instanceof DocxTable, "a table maps to a Table");
+assert.ok(
+  docxFromNodes([{ kind: "image", data: "AAAA", type: "png", width: 10, height: 10 }])[0] instanceof
+    DocxParagraph,
+  "an image is carried by a paragraph"
+);
+
+// Word rejects both of these outright.
+const emptyCell = docxFromNodes([], true);
+eq("an empty cell still gets a paragraph", emptyCell.length, 1);
+const cellEndingInTable = docxFromNodes([tbl([[para("a")]])], true);
+assert.ok(
+  cellEndingInTable[cellEndingInTable.length - 1] instanceof DocxParagraph,
+  "a cell never ends on a table"
+);
+eq("a top-level list is left alone", docxFromNodes([tbl([[para("a")]])]).length, 1);
+
+console.log("check-html-template: docx mapping assertions passed");

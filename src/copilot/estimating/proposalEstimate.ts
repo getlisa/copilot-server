@@ -19,7 +19,8 @@ import { imageDims, loadPhotos, type ProposalInput } from "./proposalDocx";
 import { validateProposalBlocks } from "./proposalTemplate";
 import { renderHtmlTemplate } from "./html/htmlTemplate";
 import { htmlTemplateData, loadHtmlTemplate } from "./html/htmlProposal";
-import { htmlToPageImages, htmlToPdf } from "./html/htmlToPdf";
+import { htmlToPdf } from "./html/htmlToPdf";
+import { docxSection, htmlToDocxNodes } from "./html/htmlToDocx";
 import {
   renderTemplatedProposalDocx,
   renderTemplatedProposalPdf,
@@ -395,38 +396,17 @@ export async function renderProposalPdf(input: ProposalInput, stored: unknown): 
 }
 
 /**
- * A .docx of an HTML document: one full-page picture per page.
+ * A .docx of an HTML document: real text, real tables, editable in Word.
  *
- * Word cannot express arbitrary CSS — flexbox, pinned footers, `@page` — so a converted
- * .docx would be a guess at the design, and the customer would hold two documents that
- * disagree. A picture of the page agrees with the emailed PDF exactly. It is NOT editable,
- * which is the deliberate trade: a company that needs an editable Word proposal wants a
- * .docx template, not a conversion of this one.
+ * Chromium lays the page out and the computed styles are read back as Word-shaped nodes
+ * (html/htmlToDocx.ts), so the conversion deals in resolved sizes and colours rather than
+ * CSS. Positioned furniture — a footer pinned with `position: fixed` — lands in document
+ * order instead of on every page; the PDF stays the exact rendering.
  */
 async function renderHtmlProposalDocx(html: string, trusted: boolean): Promise<Buffer> {
-  const pages = await htmlToPageImages(html, { trusted });
-  if (!pages.length) throw new Error("The HTML proposal produced no pages");
-  const doc = new Document({
-    sections: [
-      {
-        // Full-bleed: the margins are already drawn inside the picture.
-        properties: { page: { margin: { top: 0, right: 0, bottom: 0, left: 0 } } },
-        children: pages.map(
-          (p) =>
-            new Paragraph({
-              children: [
-                new ImageRun({
-                  data: p.data,
-                  type: "png",
-                  transformation: { width: p.width, height: p.height },
-                }),
-              ],
-            })
-        ),
-      },
-    ],
-  });
-  return Packer.toBuffer(doc);
+  const nodes = await htmlToDocxNodes(html, { trusted });
+  if (!nodes.length) throw new Error("The HTML proposal produced no content");
+  return Packer.toBuffer(new Document({ sections: [docxSection(nodes)] }));
 }
 
 /** The one entry point for the proposal .docx — always the same branch as the PDF. */
