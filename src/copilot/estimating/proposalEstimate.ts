@@ -404,9 +404,10 @@ export async function renderProposalPdf(input: ProposalInput, stored: unknown): 
  * order instead of on every page; the PDF stays the exact rendering.
  */
 async function renderHtmlProposalDocx(html: string, trusted: boolean): Promise<Buffer> {
-  const nodes = await htmlToDocxNodes(html, { trusted });
-  if (!nodes.length) throw new Error("The HTML proposal produced no content");
-  return Packer.toBuffer(new Document({ sections: [docxSection(nodes)] }));
+  const doc = await htmlToDocxNodes(html, { trusted });
+  if (!doc.body.length && !doc.header.length)
+    throw new Error("The HTML proposal produced no content");
+  return Packer.toBuffer(new Document({ sections: [docxSection(doc)] }));
 }
 
 /** The one entry point for the proposal .docx — always the same branch as the PDF. */

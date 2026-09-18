@@ -1,6 +1,8 @@
 import {
   AlignmentType,
   BorderStyle,
+  Footer,
+  Header,
   ImageRun,
   LineRuleType,
   Paragraph,
@@ -108,6 +110,20 @@ export interface DocTable {
 
 export type DocNode = DocPara | DocImage | DocTable;
 
+/**
+ * A proposal split the way Word stores one.
+ *
+ * The templates wrap everything in a table so a BROWSER reprints the letterhead per page.
+ * Word has real header and footer parts for exactly this, so the wrapper's <thead> and
+ * <tfoot> become those and repeat on every page properly — rather than being flattened into
+ * the body, where they appeared once.
+ */
+export interface DocDocument {
+  header: DocNode[];
+  body: DocNode[];
+  footer: DocNode[];
+}
+
 // ------------------------------------------------------------------- extraction (in the page)
 
 /**
@@ -116,7 +132,7 @@ export type DocNode = DocPara | DocImage | DocTable;
  * Runs inside the page, so it is written against `globalThis` rather than DOM types — this
  * service's tsconfig has no DOM lib, and adding one would change typings service-wide.
  */
-function extractNodes(): DocNode[] {
+function extractNodes(): DocDocument {
   const g = globalThis as any;
   const doc = g.document;
   const styleOf = (el: any) => g.getComputedStyle(el);
@@ -373,8 +389,10 @@ function extractNodes(): DocNode[] {
     if (tag === "BR") return [];
 
     const own = fillOf(el) ?? fill;
-    const rule = ruleOf(el);
     const kids = (Array.from(el.children) as any[]).filter(visible);
+    // A lone wrapper carries nothing of its own, so read the rule off the child that draws it
+    // — the footer's red line lives on .page-foot, inside the cell holding it.
+    const rule = ruleOf(el) ?? (kids.length === 1 ? ruleOf(kids[0]) : undefined);
     // Recurse into a container UNLESS it is a single line of text that happens to contain
     // markup. Height decides it, because the markup does not: the TOTAL bar is
     // `<span>TOTAL</span><span style="float:right">$90.14</span>` — one line, and splitting it
@@ -456,7 +474,26 @@ function extractNodes(): DocNode[] {
     return out;
   }
 
-  return collect(doc.body);
+  /** The page-layout wrapper, wherever it sits, or null for a document without one. */
+  const findWrapper = (root: any): any =>
+    (Array.from(root.querySelectorAll("table")) as any[]).find((t) => visible(t) && isPageWrapper(t)) ??
+    null;
+
+  const sectionNodes = (el: any, section: string): DocNode[] => {
+    const out: DocNode[] = [];
+    for (const tr of ownRows(el).filter((tr) => sectionOf(tr) === section))
+      for (const cell of (Array.from(tr.children) as any[]).filter(visible))
+        out.push(...nodesFor(cell, false, fillOf(cell)));
+    return out;
+  };
+
+  const wrapper = findWrapper(doc.body);
+  if (!wrapper) return { header: [], body: collect(doc.body), footer: [] };
+  return {
+    header: sectionNodes(wrapper, "THEAD"),
+    body: sectionNodes(wrapper, "TBODY"),
+    footer: sectionNodes(wrapper, "TFOOT"),
+  };
 }
 
 /**
@@ -471,14 +508,14 @@ function extractNodes(): DocNode[] {
 export async function htmlToDocxNodes(
   html: string,
   opts: HtmlPdfOptions = {}
-): Promise<DocNode[]> {
+): Promise<DocDocument> {
   return withProposalPage(html, opts, async (page) => {
     await page.setViewport({ width: 816, height: 1056 });
     const source = `(() => {
       globalThis.__name = globalThis.__name || ((fn) => fn);
       return (${extractNodes.toString()})();
     })()`;
-    return (await page.evaluate(source)) as DocNode[];
+    return (await page.evaluate(source)) as DocDocument;
   });
 }
 
@@ -560,7 +597,8 @@ const edgeOf = (e?: DocEdge) =>
  * quietly re-flowed by content and hid it, and the moment the layout was FIXED every column
  * collapsed to a single character. Twips have one meaning.
  */
-const CONTENT_TWIPS = 12240 - 720 * 2;
+const PAGE_MARGIN = { top: 1440, right: 1080, bottom: 1080, left: 1080, header: 480, footer: 480 };
+const CONTENT_TWIPS = 12240 - PAGE_MARGIN.left - PAGE_MARGIN.right;
 
 function table(node: DocTable, availableTwips: number): Table {
   const widthOf = (pct?: number) =>
@@ -660,10 +698,20 @@ export function docxFromNodes(
   return out;
 }
 
-/** The whole document, ready for `new Document({ sections })`. */
-export function docxSection(nodes: DocNode[]): ISectionOptions {
+/**
+ * The whole document, ready for `new Document({ sections })`.
+ *
+ * The letterhead and footer go into Word's own header/footer parts, which it repeats on every
+ * page — the page margins leave the room for them.
+ */
+export function docxSection(doc: DocDocument): ISectionOptions {
+  const head = docxFromNodes(doc.header);
+  const foot = docxFromNodes(doc.footer);
   return {
-    properties: { page: { margin: { top: 720, right: 720, bottom: 720, left: 720 } } },
-    children: docxFromNodes(nodes),
+    // One source for the margins, so the table widths above cannot drift from the page.
+    properties: { page: { margin: PAGE_MARGIN } },
+    ...(head.length ? { headers: { default: new Header({ children: head }) } } : {}),
+    ...(foot.length ? { footers: { default: new Footer({ children: foot }) } } : {}),
+    children: docxFromNodes(doc.body),
   };
 }
