@@ -18,9 +18,30 @@ import { renderHtmlTemplate, type HtmlTemplateData } from "./htmlTemplate";
 
 const TEMPLATE_DIR = path.join(__dirname, "templates");
 
+/**
+ * A template file name, optionally inside ONE company folder: `nlfp/inspection.html`.
+ *
+ * A company with a document per job type has several files, and they belong together rather
+ * than loose in one directory. Exactly two segments are allowed and each is checked against a
+ * plain name — `..`, absolute paths and anything else cannot escape the templates directory,
+ * which matters because the name reaches here from a database row.
+ */
+const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+export function templatePath(file: string): string | null {
+  // An absolute path is refused outright rather than quietly read as a relative one. It could
+  // not escape the directory either way — the segment check below rejects `..` — but a row
+  // naming /etc/passwd is a mistake or an attempt, and neither should resolve to a template.
+  if (!file || file.startsWith("/") || file.includes("\\")) return null;
+  const parts = file.split("/");
+  if (parts.length < 1 || parts.length > 2) return null;
+  if (!parts.every((p) => SEGMENT.test(p))) return null;
+  return path.join(TEMPLATE_DIR, ...parts);
+}
+
 export function loadHtmlTemplate(file: string): string | null {
-  const full = path.join(TEMPLATE_DIR, path.basename(file));
-  if (!existsSync(full)) {
+  const full = templatePath(file);
+  if (!full || !existsSync(full)) {
     logger.warn("HTML proposal template missing; falling back to the block renderer", { file });
     return null;
   }
@@ -31,6 +52,50 @@ const money = (v: number | null | undefined): string =>
   v == null
     ? ""
     : `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** How long a proposal stands, matching the "Valid For: 30 Days" line these documents print. */
+const VALIDITY_DAYS = 30;
+
+const validUntil = (input: ProposalInput): string => {
+  const d = new Date(input.date);
+  d.setDate(d.getDate() + VALIDITY_DAYS);
+  return d.toLocaleDateString("en-US");
+};
+
+/** A list of strings as template rows, usable as {{.}} or {{text}}. */
+const bullets = (list: string[] | undefined) =>
+  (list ?? []).filter((t) => t && t.trim()).map((t) => ({ ".": t, text: t }));
+
+/**
+ * The Schedule of Values: milestones captured in chat ("30% on submittal, 60% on completion,
+ * 10% on acceptance") with their amounts COMPUTED from the total here.
+ *
+ * The percentages are the agreement; the money is arithmetic. Deriving it at render time is
+ * what stops the table disagreeing with the total after a price changes — and the last row
+ * absorbs the rounding, so the milestones always add up to exactly what is being charged.
+ */
+function scheduleOfValues(input: ProposalInput, total: number) {
+  const raw = Array.isArray(input.milestones) ? input.milestones : [];
+  const rows = raw
+    .map((m) => (m && typeof m === "object" ? (m as { label?: unknown; percent?: unknown }) : null))
+    .filter((m): m is { label?: unknown; percent?: unknown } => !!m)
+    .map((m) => ({
+      label: String(m.label ?? ""),
+      percent: Number(m.percent) || 0,
+    }))
+    .filter((m) => m.percent > 0);
+  if (!rows.length) return [];
+
+  let allocated = 0;
+  return rows.map((m, i) => {
+    const amount =
+      i === rows.length - 1
+        ? Math.round((total - allocated) * 100) / 100
+        : Math.round(total * m.percent) / 100;
+    allocated += amount;
+    return { n: i + 1, label: m.label, percent: `${m.percent}%`, amount: money(amount) };
+  });
+}
 
 /**
  * The values a template can reference. Flat and formatted — a template author writes
@@ -51,7 +116,19 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
   const lineItems = (input.lineItems ?? []).map((l) => ({
     activity: l.code ?? l.description,
     description: l.code ? l.description : "",
+    /**
+     * The whole line as one string, for documents with a single DESCRIPTION column.
+     * `activity`/`description` split a code from its text across two columns (the QuickBooks
+     * layout); a template with one column that used `description` printed an empty cell for
+     * every line that has no code.
+     */
+    item: [l.code, l.description].filter(Boolean).join(" — "),
     qty: l.quantity != null ? `${l.quantity}${l.unit ? ` ${l.unit}` : ""}` : "",
+    /**
+     * Labour hours on their own, for documents that price a repair by time. Only a line
+     * actually billed in hours has any — a flat-rate part shows nothing rather than "1".
+     */
+    hours: l.isLabor && /^h(r|our)/i.test(l.unit ?? "") && l.quantity != null ? String(l.quantity) : "",
     rate: money(l.unitPrice),
     amount: money(l.totalPrice),
     // The "T" a QuickBooks estimate prints beside a taxable amount.
@@ -90,6 +167,34 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
     taxAmount: money(taxRowAmount(input)),
     total: money(payable(input)),
     totalInWords: amountInWords(payable(input)),
+
+    // ---- the proposal-document fields (NLFP's letterhead and sections) --------------------
+    // Every one of these is defined even when empty: an unknown token renders LITERALLY, so a
+    // missing field would print "{{validUntil}}" on a customer's proposal. Sections that have
+    // nothing to say are hidden with {{#name}}…{{/name}} instead.
+    preparedBy: header.technicianName ?? "",
+    contactName: input.contactName ?? "",
+    contactPhone: header.customerPhone ?? "",
+    validUntil: validUntil(input),
+    validFor: `${VALIDITY_DAYS} Days`,
+    systemType: "",
+    clarifications: bullets(input.assumptions),
+    exclusions: bullets(input.exclusions),
+    milestones: scheduleOfValues(input, payable(input)),
+    deficiencies: (input.deficiencies ?? []).map((d) => ({
+      location: d.location ?? "",
+      deficiency: d.deficiency ?? "",
+      severity: d.severity ?? "",
+      action: d.action ?? "",
+    })),
+
+    // {{#list}} ITERATES — it is not a show/hide test. Wrapping a section in the same name it
+    // repeats inside prints that whole section once per row, so a three-milestone schedule
+    // appeared three times. These booleans are what a section guard uses.
+    hasClarifications: (input.assumptions ?? []).length > 0,
+    hasExclusions: (input.exclusions ?? []).length > 0,
+    hasMilestones: scheduleOfValues(input, payable(input)).length > 0,
+    hasDeficiencies: (input.deficiencies ?? []).length > 0,
   };
 }
 

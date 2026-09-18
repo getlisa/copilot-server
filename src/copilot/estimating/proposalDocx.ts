@@ -87,6 +87,16 @@ export interface ProposalInput {
   assumptions?: string[];
   /** Job-specific EXCLUSIONS; falls back to the standard set. */
   exclusions?: string[];
+  /**
+   * Open deficiencies from the job's last inspection. An inspection proposal lists them as
+   * findings; the repair estimate raised from them prices one line per deficiency.
+   */
+  deficiencies?: {
+    location?: string | null;
+    deficiency?: string | null;
+    severity?: string | null;
+    action?: string | null;
+  }[];
   /** Job-specific Coordination bullets; falls back to job-neutral defaults. */
   coordination?: string[];
   /** Base-scope total, BEFORE tax. With optionTotals present this is the base alone. */
@@ -187,10 +197,6 @@ export function amountInWords(amount: number): string {
 const money = (v: number) =>
   `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-/**
- * The company's OWN logo, or null. Unlike loadLogo there is NO Clara-mark fallback: a
- * client's proposal must never carry our branding, so a company with no logo prints none.
- */
 export async function loadCompanyLogo(
   logoUrl: string | null
 ): Promise<{ data: Buffer; type: "png" | "jpg" } | null> {
@@ -215,29 +221,20 @@ export async function loadCompanyLogo(
   }
 }
 
+/**
+ * Legacy builders only: falls back to the Clara mark. Company-branded TEMPLATES must use
+ * loadCompanyLogo instead — printing Clara's logo on a client's proposal because a CDN blipped
+ * is the 2026-08-24 bug through a different door (found 2026-09-17).
+ */
 export async function loadLogo(
   logoUrl: string | null
 ): Promise<{ data: Buffer; type: "png" | "jpg" }> {
-  if (logoUrl) {
-    const type: "png" | "jpg" = /\.jpe?g(\?|$)/i.test(logoUrl) ? "jpg" : "png";
-    try {
-      // logo_url is either a full URL (CDN/external) or a bare S3 key
-      // (stored by company registration when no public CDN is configured).
-      if (/^https?:\/\//i.test(logoUrl)) {
-        const res = await fetch(logoUrl);
-        if (res.ok) return { data: Buffer.from(await res.arrayBuffer()), type };
-        logger.warn("Proposal logo fetch failed; using Clara logo", { logoUrl, status: res.status });
-      } else {
-        return { data: await getObjectBufferFromS3(logoUrl), type };
-      }
-    } catch (err) {
-      logger.warn("Proposal logo load failed; using Clara logo", {
-        logoUrl,
-        error: err instanceof Error ? err.message : String(err),
-      });
+  return (
+    (await loadCompanyLogo(logoUrl)) ?? {
+      data: Buffer.from(CLARA_LOGO_PNG_BASE64, "base64"),
+      type: "png" as const,
     }
-  }
-  return { data: Buffer.from(CLARA_LOGO_PNG_BASE64, "base64"), type: "png" };
+  );
 }
 
 /**

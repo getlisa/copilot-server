@@ -151,3 +151,77 @@ assert.ok(
 eq("a top-level list is left alone", docxFromNodes([tbl([[para("a")]])]).length, 1);
 
 console.log("check-html-template: docx mapping assertions passed");
+
+// --- every token a shipped template uses must have a value -------------------------------------
+// The engine leaves an UNKNOWN token visible, by design — a typo is meant to be obvious rather
+// than silently blank. The consequence is that a template naming a field we never supply prints
+// "{{validUntil}}" on a customer's proposal. This walks the real templates and fails on any
+// token the data does not carry.
+import { readdirSync, readFileSync, statSync } from "fs";
+import { join } from "path";
+import { htmlTemplateData } from "../src/copilot/estimating/html/htmlProposal";
+
+const TEMPLATE_ROOT = join(__dirname, "..", "src", "copilot", "estimating", "html", "templates");
+
+/** Names the engine binds INSIDE a {{#list}} scope; they never appear at the top level. */
+const SCOPED = new Set([
+  ".", "text", "title", "bullets",
+  "activity", "description", "item", "qty", "hours", "rate", "amount", "taxFlag", "isLabor",
+  "n", "label", "percent",
+  "location", "deficiency", "severity", "action",
+]);
+
+function templateFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) return templateFiles(full);
+    // `_name.html` is a reference copy, never rendered for anyone.
+    return name.endsWith(".html") && !name.startsWith("_") ? [full] : [];
+  });
+}
+
+// --- which template names may be loaded --------------------------------------------------------
+// This name comes from a proposal_templates row, so it is INPUT. A company folder is allowed
+// (nlfp/inspection.html); nothing that leaves the templates directory is.
+import { templatePath } from "../src/copilot/estimating/html/htmlProposal";
+
+const resolves = (file: string) => templatePath(file) != null;
+
+assert.ok(resolves("moss-electric.html"), "a plain template name resolves");
+assert.ok(resolves("nlfp/inspection.html"), "a company folder resolves");
+assert.ok(!resolves("../../etc/passwd"), "parent traversal is refused");
+assert.ok(!resolves("nlfp/../../lib/prisma.ts"), "traversal inside a folder is refused");
+assert.ok(!resolves("/etc/passwd"), "an absolute path is refused");
+assert.ok(!resolves("a/b/c.html"), "more than one folder deep is refused");
+assert.ok(!resolves(""), "an empty name is refused");
+assert.ok(!resolves("..\\windows\\system32"), "backslashes are refused");
+// _base.html is a reference copy carrying __TITLE__ placeholders; it must never render.
+assert.ok(!resolves("nlfp/_base.html"), "a leading underscore is not a loadable template");
+
+console.log("check-html-template: template-path assertions passed");
+
+void (async () => {
+  const data = await htmlTemplateData({
+    header: { companyName: "C" },
+    projectTitle: "T",
+    date: new Date(),
+    scopeSections: [{ title: "Scope", bullets: ["b"] }],
+    lineItems: [{ description: "d", quantity: 1, unit: "EA", unitPrice: 1, totalPrice: 1 }],
+    total: 1,
+    unpricedCount: 0,
+  } as never);
+
+  const files = templateFiles(TEMPLATE_ROOT);
+  assert.ok(files.length > 0, "there are templates to check");
+  for (const file of files) {
+    // Comments are not rendered, and every template's banner explains the {{token}} syntax
+    // using tokens — scanning those would fail on the documentation rather than the document.
+    const html = readFileSync(file, "utf8").replace(/<!--[\s\S]*?-->/g, "");
+    const used = new Set(
+      [...html.matchAll(/\{\{[#^/]?\s*([A-Za-z_][\w.]*)\s*\}\}/g)].map((m) => m[1] as string)
+    );
+    const missing = [...used].filter((name) => !(name in data) && !SCOPED.has(name));
+    assert.deepStrictEqual(missing, [], `${file.split("/").pop()} uses undefined token(s)`);
+  }
+  console.log(`check-html-template: ${files.length} templates, every token is supplied`);
+})();
