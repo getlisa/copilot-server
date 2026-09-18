@@ -7,6 +7,7 @@ import {
   TableCell,
   TableRow,
   TextRun,
+  TableLayoutType,
   WidthType,
   type ISectionOptions,
 } from "docx";
@@ -60,17 +61,29 @@ export interface DocImage {
   height: number;
 }
 
+/** An edge Word should draw, in eighths of a point. */
+export interface DocEdge {
+  size: number;
+  color: string;
+}
+
 export interface DocCell {
   nodes: DocNode[];
   shading?: string;
   /** Percentage of the table width. */
   width?: number;
+  /**
+   * The edges the CSS actually drew. Without this every table gets Word's default full grid,
+   * which is the loudest thing on the page and almost never what the document asked for —
+   * the estimate table draws one thin rule under each row and nothing else.
+   */
+  borders?: { top?: DocEdge; bottom?: DocEdge; left?: DocEdge; right?: DocEdge };
 }
 
 export interface DocTable {
   kind: "table";
   rows: DocCell[][];
-  /** A layout table (a flex row) prints no borders; a real one keeps them. */
+  /** Layout tables (reconstructed rows) never draw edges of their own. */
   borderless?: boolean;
 }
 
@@ -153,6 +166,24 @@ function extractNodes(): DocNode[] {
     };
   };
 
+  /** CSS px of border → Word's eighths of a point, floored at a hairline it will still draw. */
+  const edge = (widthPx: string, colour: string): DocEdge | undefined => {
+    const w = parseFloat(widthPx) || 0;
+    if (w <= 0) return undefined;
+    return { size: Math.max(2, Math.min(48, Math.round(w * 6))), color: hex(colour) ?? "000000" };
+  };
+
+  const bordersOf = (el: any) => {
+    const s = styleOf(el);
+    const b = {
+      top: s.borderTopStyle === "none" ? undefined : edge(s.borderTopWidth, s.borderTopColor),
+      bottom: s.borderBottomStyle === "none" ? undefined : edge(s.borderBottomWidth, s.borderBottomColor),
+      left: s.borderLeftStyle === "none" ? undefined : edge(s.borderLeftWidth, s.borderLeftColor),
+      right: s.borderRightStyle === "none" ? undefined : edge(s.borderRightWidth, s.borderRightColor),
+    };
+    return b.top || b.bottom || b.left || b.right ? b : undefined;
+  };
+
   const tableNode = (el: any): DocTable => {
     const rows: DocCell[][] = [];
     const total = el.getBoundingClientRect().width || 1;
@@ -161,9 +192,11 @@ function extractNodes(): DocNode[] {
       const cells: DocCell[] = [];
       for (const td of Array.from(tr.children) as any[]) {
         if (!visible(td)) continue;
+        const fill = fillOf(td) ?? fillOf(tr);
         cells.push({
-          nodes: nodesFor(td, true),
-          shading: fillOf(td),
+          nodes: nodesFor(td, true, fill),
+          shading: fill,
+          borders: bordersOf(td),
           width: Math.round(((td.getBoundingClientRect().width || 0) / total) * 100) || undefined,
         });
       }
@@ -195,16 +228,17 @@ function extractNodes(): DocNode[] {
    * `grid-template-areas` order still reads correctly.
    */
   const rowsOf = (kids: any[]): any[][] => {
+    // Zero-size children are KEPT. An empty notes column beside the totals is what holds the
+    // totals over on the right; drop it and they slide back to the left margin.
     const boxes = kids
       .map((el) => ({ el, r: el.getBoundingClientRect() }))
-      .filter((b) => b.r.width > 0 && b.r.height > 0)
       .sort((a, b) => a.r.top - b.r.top || a.r.left - b.r.left);
     const rows: { el: any; r: any }[][] = [];
     let band: { top: number; bottom: number } | null = null;
     for (const b of boxes) {
-      // Same row when the box starts before the current band ends — overlapping vertically,
-      // with a couple of pixels of slack for rounding and borders.
-      if (band && b.r.top < band.bottom - 2) {
+      // Same row when the box overlaps the band vertically — or simply starts level with it,
+      // which is the only thing that identifies a zero-height spacer as part of the row.
+      if (band && (b.r.top < band.bottom - 2 || Math.abs(b.r.top - band.top) <= 2)) {
         rows[rows.length - 1].push(b);
         band.bottom = Math.max(band.bottom, b.r.bottom);
       } else {
@@ -238,7 +272,12 @@ function extractNodes(): DocNode[] {
 
     const own = fillOf(el) ?? fill;
     const rule = ruleOf(el);
-    if (blockKidsOf(el).length > 0) {
+    const kids = (Array.from(el.children) as any[]).filter(visible);
+    // Recurse only into a container whose children are ALL blocks. A mixture means this is a
+    // line of text that happens to contain markup — the TOTAL bar is `<span>TOTAL</span>
+    // <span style="float:right">$90.14</span>`, where the float counts as a block and the
+    // plain span does not. Splitting that put the label and the amount on separate lines.
+    if (kids.length > 0 && blockKidsOf(el).length === kids.length) {
       const nested = collect(el, inCell, own);
       return rule ? [{ kind: "para", runs: [], ruleAbove: rule }, ...nested] : nested;
     }
@@ -357,10 +396,18 @@ function paragraph(node: DocPara): Paragraph {
   });
 }
 
+const edgeOf = (e?: DocEdge) =>
+  e ? { style: BorderStyle.SINGLE, size: e.size, color: e.color } : NO_BORDER;
+
 function table(node: DocTable): Table {
   return new Table({
     width: { size: 100, type: WidthType.PERCENTAGE },
-    ...(node.borderless ? { borders: NO_BORDERS } : {}),
+    // FIXED honours the measured column widths. Left to AUTOFIT, Word re-flows them by its
+    // own content rules and narrow numeric columns wrap ("1 bulb" onto two lines).
+    layout: TableLayoutType.FIXED,
+    // Edges are a property of the cells the CSS drew them on; the table itself never adds
+    // Word's default grid on top.
+    borders: NO_BORDERS,
     rows: node.rows.map(
       (row) =>
         new TableRow({
@@ -369,8 +416,17 @@ function table(node: DocTable): Table {
               new TableCell({
                 ...(c.width ? { width: { size: c.width, type: WidthType.PERCENTAGE } } : {}),
                 ...(c.shading ? { shading: { fill: c.shading } } : {}),
-                ...(node.borderless ? { borders: NO_BORDERS } : {}),
-                margins: { top: 40, bottom: 40, left: 60, right: 60 },
+                borders: c.borders
+                  ? {
+                      top: edgeOf(c.borders.top),
+                      bottom: edgeOf(c.borders.bottom),
+                      left: edgeOf(c.borders.left),
+                      right: edgeOf(c.borders.right),
+                    }
+                  : NO_BORDERS,
+                // Tight: Word's default cell padding plus a fixed width is what squeezes a
+                // right-aligned figure into wrapping.
+                margins: { top: 30, bottom: 30, left: 40, right: 40 },
                 // Word requires at least one paragraph per cell.
                 children: docxFromNodes(c.nodes, true) as (Paragraph | Table)[],
               })
