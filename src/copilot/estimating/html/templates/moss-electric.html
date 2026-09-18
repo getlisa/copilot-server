@@ -33,27 +33,47 @@
         padding: 0.25in 0;
       }
 
-      /* ---------- letterhead: company left, logo and panels right ---------- */
+      /* ---------- letterhead ----------
+         Two columns, three rows: company details beside the logo, the customer address
+         beneath them with the estimate panels opposite, and the heavy rule level with
+         the blank panel on the right. */
       .head {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 24px;
+        display: grid;
+        grid-template-columns: 1fr 3.1in;
+        grid-template-areas:
+          "company  logo"
+          "customer panels"
+          "rule     blank";
+        column-gap: 24px;
+        row-gap: 8px;
+        margin-bottom: 26px;
+      }
+      .company {
+        grid-area: company;
+        align-self: center; /* level with the logo; use start to top-align */
       }
       .company .name {
         font-weight: bold;
       }
-      .panels {
-        width: 3.1in;
-        flex: none;
-      }
       .logo {
+        grid-area: logo;
+        align-self: center;
         text-align: right;
-        margin-bottom: 10px;
       }
       .logo img {
         max-width: 2.6in;
         max-height: 1.1in;
+      }
+      .customer {
+        grid-area: customer;
+        margin-top: 6px;
+      }
+      .panels {
+        grid-area: panels;
+        margin-top: 6px;
+      }
+      .panels .panel:last-child {
+        margin-bottom: 0;
       }
       .panel {
         background: #000;
@@ -66,21 +86,22 @@
         font-weight: bold;
       }
       .panel.blank {
+        grid-area: blank;
         height: 12px;
         padding: 7px 10px;
+        margin-bottom: 0;
       }
 
       /* ---------- customer ---------- */
-      .customer {
-        margin-top: 14px;
-      }
       .customer .label {
         font-weight: bold;
       }
       .rule {
+        grid-area: rule;
+        align-self: center; /* centres the 6pt line against the blank panel */
         border-top: 6px solid #000;
         width: 4.1in;
-        margin: 10px 0 26px;
+        margin: 0;
       }
 
       /* ---------- line items ---------- */
@@ -169,22 +190,25 @@
           <div>{{companyEmail}}</div>
           <div>{{website}}</div>
         </div>
+
+        
+        <div class="logo"><img src="{{logoUrl}}" alt="{{companyName}}" /></div>
+        
+
+        <div class="customer">
+          <div class="label">ADDRESS</div>
+          <div>{{customerName}}</div>
+          <div class="notes">{{customerAddress}}</div>
+        </div>
+
         <div class="panels">
-          {{#logoUrl}}
-          <div class="logo"><img src="{{logoUrl}}" alt="{{companyName}}" /></div>
-          {{/logoUrl}}
           <div class="panel">Estimate {{proposalNumber}}</div>
           <div class="panel"><span class="label">DATE</span> {{date}}</div>
-          <div class="panel blank"></div>
         </div>
-      </div>
 
-      <div class="customer">
-        <div class="label">ADDRESS</div>
-        <div>{{customerName}}</div>
-        <div class="notes">{{customerAddress}}</div>
+        <div class="rule"></div>
+        <div class="panel blank"></div>
       </div>
-      <div class="rule"></div>
 
       <table class="items">
         <thead>
