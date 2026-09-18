@@ -120,6 +120,11 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
      */
     item: [l.code, l.description].filter(Boolean).join(" — "),
     qty: l.quantity != null ? `${l.quantity}${l.unit ? ` ${l.unit}` : ""}` : "",
+    /**
+     * Labour hours on their own, for documents that price a repair by time. Only a line
+     * actually billed in hours has any — a flat-rate part shows nothing rather than "1".
+     */
+    hours: l.isLabor && /^h(r|our)/i.test(l.unit ?? "") && l.quantity != null ? String(l.quantity) : "",
     rate: money(l.unitPrice),
     amount: money(l.totalPrice),
     // The "T" a QuickBooks estimate prints beside a taxable amount.
@@ -172,7 +177,12 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
     clarifications: bullets(input.assumptions),
     exclusions: bullets(input.exclusions),
     milestones: scheduleOfValues(input, payable(input)),
-    deficiencies: [],
+    deficiencies: (input.deficiencies ?? []).map((d) => ({
+      location: d.location ?? "",
+      deficiency: d.deficiency ?? "",
+      severity: d.severity ?? "",
+      action: d.action ?? "",
+    })),
 
     // {{#list}} ITERATES — it is not a show/hide test. Wrapping a section in the same name it
     // repeats inside prints that whole section once per row, so a three-milestone schedule
@@ -180,7 +190,7 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
     hasClarifications: (input.assumptions ?? []).length > 0,
     hasExclusions: (input.exclusions ?? []).length > 0,
     hasMilestones: scheduleOfValues(input, payable(input)).length > 0,
-    hasDeficiencies: false,
+    hasDeficiencies: (input.deficiencies ?? []).length > 0,
   };
 }
 

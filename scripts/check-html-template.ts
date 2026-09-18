@@ -166,7 +166,7 @@ const TEMPLATE_ROOT = join(__dirname, "..", "src", "copilot", "estimating", "htm
 /** Names the engine binds INSIDE a {{#list}} scope; they never appear at the top level. */
 const SCOPED = new Set([
   ".", "text", "title", "bullets",
-  "activity", "description", "item", "qty", "rate", "amount", "taxFlag", "isLabor",
+  "activity", "description", "item", "qty", "hours", "rate", "amount", "taxFlag", "isLabor",
   "n", "label", "percent",
   "location", "deficiency", "severity", "action",
 ]);
