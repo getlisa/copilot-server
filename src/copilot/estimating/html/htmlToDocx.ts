@@ -53,6 +53,8 @@ export interface DocPara {
   shading?: string;
   /** A heavy top border stands in for the template's rules and dividers. */
   ruleAbove?: { size: number; color: string };
+  /** A bottom border — an empty div with one is a signature line, not a blank paragraph. */
+  ruleBelow?: { size: number; color: string };
   /**
    * Text the CSS floated to the right edge, set against a right tab stop. Keeps the TOTAL
    * bar reading `TOTAL … $225.00` across the black band rather than as one run at the left.
@@ -83,6 +85,12 @@ export interface DocCell {
   shading?: string;
   /** Percentage of the table width. */
   width?: number;
+  /**
+   * Columns this cell covers. The TOTAL row's label spans DESCRIPTION and QTY so the amount
+   * sits under TOTAL; dropping the span put the label in column one and the amount adrift
+   * across the rest, lining up with nothing above it.
+   */
+  span?: number;
   /**
    * The edges the CSS actually drew. Without this every table gets Word's default full grid,
    * which is the loudest thing on the page and almost never what the document asked for —
@@ -126,7 +134,7 @@ function extractNodes(): DocNode[] {
       .toUpperCase();
   };
 
-  const BLOCKS = ["block", "flex", "grid", "list-item", "table", "flow-root"];
+  const BLOCKS = ["block", "flex", "grid", "list-item", "table", "flow-root", "inline-block"];
   const isBlock = (el: any) => BLOCKS.includes(styleOf(el).display);
   const visible = (el: any) => {
     const s = styleOf(el);
@@ -215,11 +223,47 @@ function extractNodes(): DocNode[] {
     return b.top || b.bottom || b.left || b.right ? b : undefined;
   };
 
+  /**
+   * The rows belonging to THIS table.
+   *
+   * querySelectorAll finds every descendant, so a table containing tables collected THEIR rows
+   * too and flattened the lot into one grid — the letterhead wrapper swallowed the info boxes
+   * and the pricing table, and the document came out as a wall of text followed by stray rows
+   * measured against the wrong columns.
+   */
+  const ownRows = (el: any): any[] =>
+    (Array.from(el.querySelectorAll("tr")) as any[]).filter(
+      (tr) => tr.closest("table") === el && visible(tr)
+    );
+
+  /** Which section a row sits in, so a wrapper's header and footer stay in document order. */
+  const sectionOf = (tr: any): string => (tr.parentElement?.tagName || "TBODY").toUpperCase();
+
+  /**
+   * A table whose body is a single cell is not a table — it is the page-layout wrapper the
+   * templates use so a browser reprints the letterhead on every sheet. Word paginates its own
+   * way, so it is unwrapped: the header, the document, then the footer, as ordinary content.
+   * Leaving it in would put the entire proposal inside one cell, which nobody can edit.
+   */
+  const isPageWrapper = (el: any): boolean => {
+    const body = ownRows(el).filter((tr) => sectionOf(tr) === "TBODY");
+    return body.length === 1 && (Array.from(body[0].children) as any[]).filter(visible).length === 1;
+  };
+
+  const unwrapPage = (el: any, fill?: string): DocNode[] => {
+    const out: DocNode[] = [];
+    for (const section of ["THEAD", "TBODY", "TFOOT"]) {
+      for (const tr of ownRows(el).filter((tr) => sectionOf(tr) === section))
+        for (const cell of (Array.from(tr.children) as any[]).filter(visible))
+          out.push(...nodesFor(cell, false, fillOf(cell) ?? fill));
+    }
+    return out;
+  };
+
   const tableNode = (el: any): DocTable => {
     const rows: DocCell[][] = [];
     const total = el.getBoundingClientRect().width || 1;
-    for (const tr of Array.from(el.querySelectorAll("tr")) as any[]) {
-      if (!visible(tr)) continue;
+    for (const tr of ownRows(el)) {
       const cells: DocCell[] = [];
       for (const td of Array.from(tr.children) as any[]) {
         if (!visible(td)) continue;
@@ -228,6 +272,7 @@ function extractNodes(): DocNode[] {
           nodes: nodesFor(td, true, fill),
           shading: fill,
           borders: bordersOf(td),
+          span: Math.max(1, Number(td.colSpan) || 1),
           width: Math.round(((td.getBoundingClientRect().width || 0) / total) * 100) || undefined,
         });
       }
@@ -242,6 +287,28 @@ function extractNodes(): DocNode[] {
     const w = parseFloat(s.borderTopWidth) || 0;
     if (w < 2) return undefined;
     return { size: Math.min(24, Math.round(w * 4)), color: hex(s.borderTopColor) ?? "000000" };
+  };
+
+  /** The line someone signs on: an empty box whose only mark is its bottom border. */
+  const underlineOf = (el: any): DocPara["ruleBelow"] => {
+    const s = styleOf(el);
+    const w = parseFloat(s.borderBottomWidth) || 0;
+    if (w <= 0 || (el.textContent || "").trim()) return undefined;
+    return { size: Math.max(2, Math.min(24, Math.round(w * 6))), color: hex(s.borderBottomColor) ?? "000000" };
+  };
+
+  /**
+   * Is this element one line of text?
+   *
+   * The test that separates "a container of sections" from "a line with markup in it", and it
+   * has to be geometric — inline-block, float and inline-flex all read as one or the other
+   * depending only on how tall the thing came out.
+   */
+  const isSingleLine = (el: any): boolean => {
+    const s = styleOf(el);
+    const lh = parseFloat(s.lineHeight) || parseFloat(s.fontSize) * 1.4 || 16;
+    const pad = (parseFloat(s.paddingTop) || 0) + (parseFloat(s.paddingBottom) || 0);
+    return el.getBoundingClientRect().height <= lh * 1.6 + pad;
   };
 
   const blockKidsOf = (el: any): any[] =>
@@ -298,7 +365,7 @@ function extractNodes(): DocNode[] {
    */
   function nodesFor(el: any, inCell: boolean, fill?: string): DocNode[] {
     const tag = (el.tagName || "").toUpperCase();
-    if (tag === "TABLE") return [tableNode(el)];
+    if (tag === "TABLE") return isPageWrapper(el) ? unwrapPage(el, fill) : [tableNode(el)];
     if (tag === "IMG") {
       const img = imageNode(el);
       return img ? [img] : [];
@@ -308,11 +375,19 @@ function extractNodes(): DocNode[] {
     const own = fillOf(el) ?? fill;
     const rule = ruleOf(el);
     const kids = (Array.from(el.children) as any[]).filter(visible);
-    // Recurse only into a container whose children are ALL blocks. A mixture means this is a
-    // line of text that happens to contain markup — the TOTAL bar is `<span>TOTAL</span>
-    // <span style="float:right">$90.14</span>`, where the float counts as a block and the
-    // plain span does not. Splitting that put the label and the amount on separate lines.
-    if (kids.length > 0 && blockKidsOf(el).length === kids.length) {
+    // Recurse into a container UNLESS it is a single line of text that happens to contain
+    // markup. Height decides it, because the markup does not: the TOTAL bar is
+    // `<span>TOTAL</span><span style="float:right">$90.14</span>` — one line, and splitting it
+    // put the label and the amount on separate rows. An earlier rule asked whether every child
+    // was block-level, which collapsed an entire page into one paragraph the moment a heading
+    // was `display: inline-block`.
+    // …but a single line whose children sit SIDE BY SIDE is still a row — SUBTOTAL and its
+    // amount, or "Accepted By" beside "Accepted Date". The exception is a floated-right child,
+    // which is the TOTAL bar and belongs on one line against a tab stop, not split into cells.
+    const blocks = blockKidsOf(el);
+    const sideBySide = blocks.length > 1 && rowsOf(blocks).some((r) => r.length > 1);
+    const floatsRight = kids.some((k) => styleOf(k).float === "right");
+    if (kids.length > 0 && blocks.length > 0 && (!isSingleLine(el) || (sideBySide && !floatsRight))) {
       const nested = collect(el, inCell, own);
       return rule ? [{ kind: "para", runs: [], ruleAbove: rule }, ...nested] : nested;
     }
@@ -321,8 +396,12 @@ function extractNodes(): DocNode[] {
     const floated = kids.find((k) => styleOf(k).float === "right" && (k.textContent || "").trim());
     const floatText = floated ? (floated.textContent || "").replace(/\s+/g, " ").trim() : "";
     const runs = runsOf(el, floatText);
+    // A list marker is drawn by the browser, not stored in the text, so Word would print the
+    // bullets as unmarked lines. One character is all these documents need.
+    if (tag === "LI" && runs.length) runs[0].text = `• ${runs[0].text}`;
     const rightRuns = floated ? runsOf(floated) : [];
-    if (!runs.length && !rightRuns.length && !rule) return [];
+    const under = underlineOf(el);
+    if (!runs.length && !rightRuns.length && !rule && !under) return [];
     return [
       {
         kind: "para",
@@ -332,6 +411,7 @@ function extractNodes(): DocNode[] {
         shading: own,
         ...spacingOf(el),
         ...(rule ? { ruleAbove: rule } : {}),
+        ...(under ? { ruleBelow: under } : {}),
       },
     ];
   }
@@ -437,10 +517,15 @@ function paragraph(node: DocPara, availableTwips: number): Paragraph {
   return new Paragraph({
     ...(node.align ? { alignment: ALIGN[node.align] } : {}),
     ...(node.shading ? { shading: { fill: node.shading } } : {}),
-    ...(node.ruleAbove
+    ...(node.ruleAbove || node.ruleBelow
       ? {
           border: {
-            top: { style: BorderStyle.SINGLE, size: node.ruleAbove.size, color: node.ruleAbove.color },
+            ...(node.ruleAbove
+              ? { top: { style: BorderStyle.SINGLE, size: node.ruleAbove.size, color: node.ruleAbove.color } }
+              : {}),
+            ...(node.ruleBelow
+              ? { bottom: { style: BorderStyle.SINGLE, size: node.ruleBelow.size, color: node.ruleBelow.color } }
+              : {}),
           },
         }
       : {}),
@@ -485,10 +570,14 @@ function table(node: DocTable, availableTwips: number): Table {
   // `<w:tblGrid>` filled with the library's placeholder columns, all equal, and Word and
   // LibreOffice both size from the grid and ignore the cells — which squeezed DESCRIPTION
   // until it wrapped while the numeric columns sat half empty.
+  // The grid comes from a row with no spans — that is the one stating every column.
+  const columnsIn = (row: DocCell[]) => row.reduce((n, c) => n + (c.span ?? 1), 0);
   const widest = node.rows.reduce((a, r) => (r.length > a.length ? r : a), node.rows[0] ?? []);
   const columnWidths = widest.map((c) => widthOf(c.width));
-  // Ragged rows have no single grid; let Word lay those out rather than mis-state one.
-  const uniform = node.rows.every((r) => r.length === widest.length) && columnWidths.length > 0;
+  // Ragged rows have no single grid; let Word lay those out rather than mis-state one. A row
+  // that SPANS is not ragged — it covers the same columns with fewer cells.
+  const columns = columnsIn(widest);
+  const uniform = node.rows.every((r) => columnsIn(r) === columns) && columnWidths.length > 0;
 
   return new Table({
     width: { size: availableTwips, type: WidthType.DXA },
@@ -506,6 +595,7 @@ function table(node: DocTable, availableTwips: number): Table {
             const twips = widthOf(c.width);
             return new TableCell({
               width: { size: twips, type: WidthType.DXA },
+              ...((c.span ?? 1) > 1 ? { columnSpan: c.span } : {}),
               ...(c.shading ? { shading: { fill: c.shading } } : {}),
               borders: c.borders
                 ? {
