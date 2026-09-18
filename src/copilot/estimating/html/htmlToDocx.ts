@@ -426,11 +426,22 @@ const CONTENT_TWIPS = 12240 - 720 * 2;
 function table(node: DocTable, availableTwips: number): Table {
   const widthOf = (pct?: number) =>
     Math.max(240, Math.round(((pct ?? 100) / 100) * availableTwips));
+
+  // THE GRID IS WHAT ACTUALLY SIZES A FIXED-LAYOUT TABLE. Per-cell widths alone leave
+  // `<w:tblGrid>` filled with the library's placeholder columns, all equal, and Word and
+  // LibreOffice both size from the grid and ignore the cells — which squeezed DESCRIPTION
+  // until it wrapped while the numeric columns sat half empty.
+  const widest = node.rows.reduce((a, r) => (r.length > a.length ? r : a), node.rows[0] ?? []);
+  const columnWidths = widest.map((c) => widthOf(c.width));
+  // Ragged rows have no single grid; let Word lay those out rather than mis-state one.
+  const uniform = node.rows.every((r) => r.length === widest.length) && columnWidths.length > 0;
+
   return new Table({
     width: { size: availableTwips, type: WidthType.DXA },
+    ...(uniform ? { columnWidths } : {}),
     // FIXED honours the measured column widths. Left to AUTOFIT, Word re-flows them by its
     // own content rules and narrow numeric columns wrap ("1 bulb" onto two lines).
-    layout: TableLayoutType.FIXED,
+    layout: uniform ? TableLayoutType.FIXED : TableLayoutType.AUTOFIT,
     // Edges are a property of the cells the CSS drew them on; the table itself never adds
     // Word's default grid on top.
     borders: NO_BORDERS,
