@@ -86,6 +86,12 @@ export interface DocCell {
   /** Percentage of the table width. */
   width?: number;
   /**
+   * Columns this cell covers. The TOTAL row's label spans DESCRIPTION and QTY so the amount
+   * sits under TOTAL; dropping the span put the label in column one and the amount adrift
+   * across the rest, lining up with nothing above it.
+   */
+  span?: number;
+  /**
    * The edges the CSS actually drew. Without this every table gets Word's default full grid,
    * which is the loudest thing on the page and almost never what the document asked for —
    * the estimate table draws one thin rule under each row and nothing else.
@@ -266,6 +272,7 @@ function extractNodes(): DocNode[] {
           nodes: nodesFor(td, true, fill),
           shading: fill,
           borders: bordersOf(td),
+          span: Math.max(1, Number(td.colSpan) || 1),
           width: Math.round(((td.getBoundingClientRect().width || 0) / total) * 100) || undefined,
         });
       }
@@ -563,10 +570,14 @@ function table(node: DocTable, availableTwips: number): Table {
   // `<w:tblGrid>` filled with the library's placeholder columns, all equal, and Word and
   // LibreOffice both size from the grid and ignore the cells — which squeezed DESCRIPTION
   // until it wrapped while the numeric columns sat half empty.
+  // The grid comes from a row with no spans — that is the one stating every column.
+  const columnsIn = (row: DocCell[]) => row.reduce((n, c) => n + (c.span ?? 1), 0);
   const widest = node.rows.reduce((a, r) => (r.length > a.length ? r : a), node.rows[0] ?? []);
   const columnWidths = widest.map((c) => widthOf(c.width));
-  // Ragged rows have no single grid; let Word lay those out rather than mis-state one.
-  const uniform = node.rows.every((r) => r.length === widest.length) && columnWidths.length > 0;
+  // Ragged rows have no single grid; let Word lay those out rather than mis-state one. A row
+  // that SPANS is not ragged — it covers the same columns with fewer cells.
+  const columns = columnsIn(widest);
+  const uniform = node.rows.every((r) => columnsIn(r) === columns) && columnWidths.length > 0;
 
   return new Table({
     width: { size: availableTwips, type: WidthType.DXA },
@@ -584,6 +595,7 @@ function table(node: DocTable, availableTwips: number): Table {
             const twips = widthOf(c.width);
             return new TableCell({
               width: { size: twips, type: WidthType.DXA },
+              ...((c.span ?? 1) > 1 ? { columnSpan: c.span } : {}),
               ...(c.shading ? { shading: { fill: c.shading } } : {}),
               borders: c.borders
                 ? {
