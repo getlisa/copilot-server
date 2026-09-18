@@ -1,5 +1,5 @@
 import { existsSync } from "fs";
-import puppeteer, { type Browser } from "puppeteer-core";
+import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import logger from "../../../lib/logger";
 import { isAllowedResource } from "./htmlSafety";
 
@@ -70,21 +70,26 @@ export interface HtmlPdfOptions {
 }
 
 /**
- * Render a complete HTML document to a Letter-size PDF.
+ * Load a proposal document into a locked-down page and hand it to `fn`.
  *
- * Backgrounds are printed (the template's black panels and table headers ARE the design) and
- * margins come from the document's own `@page` rule, so page geometry lives with the template
- * rather than here.
+ * Every renderer here — PDF, page images, the .docx extraction — goes through this, so the
+ * two safety controls are stated once and cannot drift apart:
+ *
+ *  - JavaScript OFF. A proposal is a printed document; nothing in it needs to execute. This
+ *    is what makes rendering an UPLOADED template safe, without depending on the sanitiser
+ *    having parsed the HTML correctly. (page.evaluate still works — it runs over CDP, not as
+ *    page script — so the extraction below is unaffected.)
+ *  - Every request vetted, so a template cannot reach the cloud metadata endpoint, the
+ *    private network around the container, or local files.
  */
-export async function htmlToPdf(html: string, opts: HtmlPdfOptions = {}): Promise<Buffer> {
+export async function withProposalPage<T>(
+  html: string,
+  opts: HtmlPdfOptions,
+  fn: (page: Page) => Promise<T>
+): Promise<T> {
   const page = await (await browser()).newPage();
   try {
-    // A proposal is a printed document: nothing in it needs to execute. Turning JavaScript off
-    // is what makes rendering an UPLOADED template safe — it neuters anything the sanitiser
-    // missed, without depending on having parsed the HTML correctly.
     await page.setJavaScriptEnabled(false);
-    // And every request the page makes is vetted, so a template cannot reach the cloud
-    // metadata endpoint, the private network around the container, or local files.
     await page.setRequestInterception(true);
     page.on("request", (req) => {
       if (isAllowedResource(req.url(), opts.trusted === true)) return void req.continue();
@@ -98,15 +103,24 @@ export async function htmlToPdf(html: string, opts: HtmlPdfOptions = {}): Promis
     // logo is on the page when it prints; the timeout keeps one unreachable image from
     // holding a technician's download open indefinitely.
     await page.setContent(html, { waitUntil: "load", timeout: opts.timeoutMs ?? 15_000 });
-    const pdf = await page.pdf({
-      format: "letter",
-      printBackground: true,
-      preferCSSPageSize: true,
-    });
-    return Buffer.from(pdf);
+    return await fn(page);
   } finally {
     await page.close().catch(() => undefined);
   }
+}
+
+/**
+ * Render a complete HTML document to a Letter-size PDF.
+ *
+ * Backgrounds are printed (the template's black panels and table headers ARE the design) and
+ * margins come from the document's own `@page` rule, so page geometry lives with the template
+ * rather than here.
+ */
+export async function htmlToPdf(html: string, opts: HtmlPdfOptions = {}): Promise<Buffer> {
+  return withProposalPage(html, opts, async (page) => {
+    const pdf = await page.pdf({ format: "letter", printBackground: true, preferCSSPageSize: true });
+    return Buffer.from(pdf);
+  });
 }
 
 /** One rendered page of a document, as a PNG sized in CSS pixels. */
@@ -148,23 +162,11 @@ export async function htmlToPageImages(
   html: string,
   opts: HtmlPdfOptions = {}
 ): Promise<RenderedPage[]> {
-  const page = await (await browser()).newPage();
-  try {
-    await page.setJavaScriptEnabled(false);
-    await page.setRequestInterception(true);
-    page.on("request", (req) => {
-      if (isAllowedResource(req.url(), opts.trusted === true)) return void req.continue();
-      logger.warn("Blocked a resource request from a proposal template", {
-        url: req.url().slice(0, 200),
-        resourceType: req.resourceType(),
-      });
-      void req.abort();
-    });
+  return withProposalPage(html, opts, async (page) => {
     await page.setViewport({ width: PAGE_W, height: PAGE_H });
     // Print media, so the template's @page rules and print-only styling apply here exactly
     // as they do when the same document is printed to PDF.
     await page.emulateMediaType("print");
-    await page.setContent(html, { waitUntil: "load", timeout: opts.timeoutMs ?? 15_000 });
     // Paper. A template needs no background when it prints — the page it lands on is white —
     // so most set none and a screenshot of one comes out transparent, which every viewer
     // composites onto whatever it likes (black, in Word's case). Declared without
@@ -180,9 +182,7 @@ export async function htmlToPageImages(
       pages.push({ data: Buffer.from(shot), width: PAGE_W, height: PAGE_H });
     }
     return pages;
-  } finally {
-    await page.close().catch(() => undefined);
-  }
+  });
 }
 
 /** Close the shared browser (process shutdown, tests). */
