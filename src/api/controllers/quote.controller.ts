@@ -267,11 +267,27 @@ async function quoteDtoWithProducts(quote: Parameters<typeof toQuoteDto>[0] & { 
 /**
  * The human-facing reference printed as "Proposal #".
  *
- * The quote's own id, shortened — unique per estimate, unchanged between downloads, and
- * short enough to read down a phone line.
+ * ZenTrades issues an estimate number only once the estimate is POSTED, so it cannot be the
+ * answer for every document: a proposal printed before posting, or for a quote with no
+ * ZenTrades job at all, would have nothing to show. The rule is therefore:
+ *
+ *   posted to ZenTrades  → their estimate number, so the two systems cross-reference
+ *   not yet, or no job   → the quote's own id, shortened
+ *
+ * The fallback is derived rather than generated, which makes it STABLE: the same estimate
+ * downloaded twice must not carry two different numbers, and anything clock-based would.
+ *
+ * WORTH KNOWING: a proposal sent before posting shows the fallback, and the same proposal
+ * re-downloaded after posting shows the ZenTrades number. If a customer must never see the
+ * reference change, post the estimate before sending the document.
  */
-const proposalNumberFor = (quote: { id: string; createdAt: Date }): string =>
-  `${quote.createdAt.getFullYear()}-${quote.id.replace(/-/g, "").slice(0, 8).toUpperCase()}`;
+const proposalNumberFor = (quote: { id: string; createdAt: Date }): string => {
+  // Read defensively: the column that stores the posted estimate number is not on main yet,
+  // so this picks it up automatically when it lands rather than needing another change here.
+  const posted = (quote as { ztInvoiceNumber?: string | null }).ztInvoiceNumber;
+  if (posted && posted.trim()) return posted.trim();
+  return `${quote.createdAt.getFullYear()}-${quote.id.replace(/-/g, "").slice(0, 8).toUpperCase()}`;
+};
 
 async function buildProposalParts(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
   const conversation = await prisma.conversation.findUnique({
