@@ -324,7 +324,7 @@ async function ingestDeficiencies(conn: ZtConnection, companyId: number): Promis
  * Mode first, every sync: a company has EITHER a pricebook OR flat-rate items, decided by
  * GET /api/setting/allSettings → pricebooksettings.isPricebookEnabled (an admin can flip it).
  */
-async function ingestCatalog(conn: ZtConnection, companyId: number): Promise<number> {
+export async function ingestCatalog(conn: ZtConnection, companyId: number): Promise<number> {
   setProgress(companyId, "catalog", "Catalog: fetching…");
   const settings = (await ztFetch(conn, "/api/setting/allSettings")) as Record<
     string,
@@ -365,31 +365,17 @@ async function ingestCatalog(conn: ZtConnection, companyId: number): Promise<num
   }
 
   const kind = pricebookMode ? "PRICEBOOK" : "FLATRATE";
-  // The projection target: one ZenTrades-sourced book per company, priced LAST (priority 9999)
-  // so any admin-uploaded book outranks it — the priority rule as plain data, no pricing-code
-  // changes. The estimating agent picks it up through the existing pricing pool.
-  const book = await prisma.pricebook.upsert({
-    where: { companyId_name: { companyId, name: "ZenTrades catalog" } },
-    update: {},
-    create: { companyId, name: "ZenTrades catalog", priority: 9999, source: "ZENTRADES" },
-  });
 
-  let synced = 0;
-  // One lookup for the whole catalog; the write path below stays per-CHANGED-row because the
-  // projection needs each created PricebookItem id back. ponytail: fine at catalog sizes —
-  // revisit with createMany + externalId read-back if a client ever has 10k+ items.
+  // Raw first, ALWAYS — an unmappable row still lands in the raw store, so a later fix to the
+  // field mapping re-projects it without a re-sync (the raw-ingest rule).
   const existingRows = await prisma.ztCatalogRaw.findMany({
     where: { companyId, kind, ztItemId: { in: rows.map((r) => r.id) } },
-    select: { ztItemId: true, contentHash: true, projectedItemId: true },
+    select: { ztItemId: true, contentHash: true },
   });
-  const existingById = new Map(existingRows.map((e) => [e.ztItemId, e]));
+  const hashById = new Map(existingRows.map((e) => [e.ztItemId, e.contentHash]));
   for (const { id: ztItemId, row } of rows) {
     const contentHash = hash(row);
-    const existing = existingById.get(ztItemId);
-    if (existing?.contentHash === contentHash && existing.projectedItemId != null) continue;
-
-    // Raw first, ALWAYS — an unmappable row still lands in the raw store, so a later fix to
-    // the field mapping re-projects it without a re-sync (the raw-ingest rule).
+    if (hashById.get(ztItemId) === contentHash) continue;
     await prisma.ztCatalogRaw.upsert({
       where: { companyId_kind_ztItemId: { companyId, kind, ztItemId } },
       update: { rawPayload: row as Prisma.InputJsonValue, contentHash },
@@ -401,41 +387,118 @@ async function ingestCatalog(conn: ZtConnection, companyId: number): Promise<num
         contentHash,
       },
     });
+  }
 
-    // VERIFY field names against real payloads: common shapes covered defensively.
-    const description = String(
-      row.name ?? row.description ?? row.itemName ?? row.title ?? ""
-    ).trim();
-    const priceRaw = row.price ?? row.unitPrice ?? row.rate ?? row.sellingPrice ?? null;
-    const price = priceRaw != null ? Number(priceRaw) : NaN;
-    if (!description || !Number.isFinite(price)) continue; // unmappable: raw kept, projection skipped
-    const code = String(row.code ?? row.sku ?? row.itemCode ?? `ZT-${ztItemId}`);
-    const unit = typeof row.unit === "string" && row.unit ? row.unit : "EA";
+  setProgress(companyId, "catalog", "Catalog: pricing…");
+  return projectCatalog(companyId);
+}
 
-    const projected = await prisma.pricebookItem.upsert({
-      where:
-        existing?.projectedItemId != null
-          ? { id: existing.projectedItemId }
-          : { id: -1 }, // no prior projection: force the create branch
-      update: { code, description, unit, unitPrice: price },
+/** First candidate that is a non-blank string. ZenTrades sends " " where a field is unset, so
+ *  `a ?? b` stops on the blank and loses the real value — this keeps walking. */
+const firstText = (...values: unknown[]): string => {
+  for (const value of values) {
+    const text = value == null ? "" : String(value).trim();
+    if (text) return text;
+  }
+  return "";
+};
+
+/**
+ * One raw ZenTrades catalog row → PricebookItem fields, or null when the row cannot be priced.
+ * Pure and exported so a mapping fix re-projects the stored raw rows with no re-sync
+ * (scripts/zt-reproject-catalog.ts).
+ *
+ * The two endpoints name their fields differently and neither matches the generic shapes this
+ * once guessed at: flat-rate items carry description/sellPrice, pricebook materials carry
+ * salesDescription/identifier/sellPrice. sellPrice being the price field on BOTH is why the
+ * first version projected nothing.
+ */
+export function mapCatalogRow(
+  row: Record<string, unknown>,
+  ztItemId: string
+): { code: string; description: string; unit: string; price: number } | null {
+  if (row.isDeleted === true || row.isActive === false) return null;
+  const description = firstText(
+    row.description,
+    row.salesDescription,
+    row.name,
+    row.itemName,
+    row.title,
+    row.purchaseDescription,
+    row.fullyQualifiedName,
+    row.code,
+    row.identifier
+  );
+  const priceRaw = row.sellPrice ?? row.price ?? row.unitPrice ?? row.rate ?? row.sellingPrice;
+  const price = priceRaw != null ? Number(priceRaw) : NaN;
+  // No sell price is not a mapping failure — ZenTrades holds cost-only rows. Cost is NOT a
+  // substitute: quoting cost as price would sell the job at zero margin.
+  if (!description || !Number.isFinite(price)) return null;
+  const code = firstText(row.code, row.identifier, row.sku, row.itemCode) || `ZT-${ztItemId}`;
+  const unit = firstText(row.unit, row.uom) || "EA";
+  return { code, description, unit, price };
+}
+
+/**
+ * Project a company's stored raw catalog into its "ZenTrades catalog" pricebook — the whole
+ * raw store every time, so a mapping fix lands on old rows too. ponytail: ~100 upserts per
+ * sync at real catalog sizes; batch it if a client ever crosses a few thousand items.
+ */
+export async function projectCatalog(companyId: number): Promise<number> {
+  // The projection target: one ZenTrades-sourced book per company, priced LAST (priority 9999)
+  // so any admin-uploaded book outranks it — the priority rule as plain data, no pricing-code
+  // changes. The estimating agent picks it up through the existing pricing pool.
+  const book = await prisma.pricebook.upsert({
+    where: { companyId_name: { companyId, name: "ZenTrades catalog" } },
+    update: {},
+    create: { companyId, name: "ZenTrades catalog", priority: 9999, source: "ZENTRADES" },
+  });
+
+  const raws = await prisma.ztCatalogRaw.findMany({ where: { companyId } });
+  const mapped = raws
+    .map((raw) => ({ raw, item: mapCatalogRow(raw.rawPayload as Record<string, unknown>, raw.ztItemId) }))
+    .filter((m): m is { raw: (typeof raws)[number]; item: NonNullable<ReturnType<typeof mapCatalogRow>> } =>
+      m.item != null
+    );
+
+  // pricebook_items is unique on (company, code). A company-authored row owns its code and the
+  // synced catalog is the lowest-priority book, so a clash is skipped rather than overwritten —
+  // the admin's price would win the lookup anyway.
+  const owned = await prisma.pricebookItem.findMany({
+    where: { companyId, code: { in: mapped.map((m) => m.item.code) }, source: { not: "ZENTRADES" } },
+    select: { code: true },
+  });
+  const taken = new Set(owned.map((o) => o.code));
+
+  let projected = 0;
+  for (const { raw, item } of mapped) {
+    if (taken.has(item.code)) continue;
+    const row = await prisma.pricebookItem.upsert({
+      where: { companyId_code: { companyId, code: item.code } },
+      update: {
+        description: item.description,
+        unit: item.unit,
+        unitPrice: item.price,
+        pricebookId: book.id,
+        externalId: raw.ztItemId,
+      },
       create: {
         companyId,
-        code,
-        description,
-        unit,
-        unitPrice: price,
+        code: item.code,
+        description: item.description,
+        unit: item.unit,
+        unitPrice: item.price,
         pricebookId: book.id,
         source: "ZENTRADES",
-        externalId: ztItemId,
+        externalId: raw.ztItemId,
       },
     });
-    await prisma.ztCatalogRaw.update({
-      where: { companyId_kind_ztItemId: { companyId, kind, ztItemId } },
-      data: { projectedItemId: projected.id },
-    });
-    synced++;
+    if (raw.projectedItemId !== row.id) {
+      await prisma.ztCatalogRaw.update({ where: { id: raw.id }, data: { projectedItemId: row.id } });
+    }
+    projected++;
   }
-  return synced;
+  return projected;
 }
 
 // ---------- sales tax ----------
