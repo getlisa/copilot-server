@@ -146,7 +146,9 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
         doc.font("Helvetica").fontSize(9).fillColor(INK);
         doc.text("Quoted", COL.status, titleY, { width: 50 });
         doc.text(money(li.unitPrice, quote.currency), COL.rate, titleY, { width: 50, align: "right" });
-        doc.text(`${li.quantity}${li.unit && li.unit !== "EA" ? ` ${li.unit}` : ""}`, COL.qty, titleY, { width: 28, align: "center" });
+        // A quantity-less line reaches a customer document now that blocking flags no longer
+        // gate completion, and `${null}` prints the word "null". Blank, like the DOCX does.
+        doc.text(li.quantity == null ? "" : `${li.quantity}${li.unit && li.unit !== "EA" ? ` ${li.unit}` : ""}`, COL.qty, titleY, { width: 28, align: "center" });
         if (taxed) drawCheck(COL.taxed + 20, titleY + 5);
         else doc.fillColor(MUTED).text("-", COL.taxed, titleY, { width: 40, align: "center" });
         doc.fillColor(INK).text(money(li.lineTotal, quote.currency), COL.total, titleY, { width: RIGHT - COL.total, align: "right" });

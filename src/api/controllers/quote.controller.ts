@@ -13,8 +13,6 @@ import {
   toQuoteDto,
   toLineItemDto,
   stripMarkup,
-  flagsFor,
-  BLOCKING_FLAGS,
   ESTIMATED_PRICE_CODE,
   type CatalogIndex,
   type PricebookNameIndex,
@@ -1232,12 +1230,17 @@ export class QuoteController {
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     const dto = await quoteDtoWithProducts(quote);
-    if (dto.blockingFlagCount > 0)
-      return fail(
-        res,
-        409,
-        `${dto.blockingFlagCount} line item(s) still need attention before this quote can be marked Completed`
-      );
+    // Blocking flags no longer gate completion (owner decision): an unpriced, unquantified or
+    // unreviewed line is surfaced on the review screen and in `blockingFlagCount`, but the
+    // technician decides whether to ship it. An unpriced line completes — and prices at $0 in
+    // the document and in QuickBooks. The option-choice and TaxCode gates below still stand:
+    // those two do not produce a wrong number, they produce no estimate at all.
+    //
+    // An EMPTY estimate is the one exception. There is nothing to ship and nothing to price, the
+    // QuickBooks post throws on it anyway (qbo.ts, "Quote has no line items to post"), and
+    // completing freezes it — so the technician would have to reopen it to add the first line.
+    if (dto.lineItems.length === 0)
+      return fail(res, 409, "Add at least one line item before marking this estimate Completed");
     let chosenOption: string | null = quote.chosenOptionGroup;
     if (dto.optionTotals.length > 0) {
       const raw = req.body?.chosenOption;
@@ -1323,31 +1326,12 @@ export class QuoteController {
      * up with two estimates that no later sync reconciles.
      */
     /**
-     * Flip FIRST, then re-derive the blocking flags from the rows the flip itself locked, and
-     * roll back if they disagree with the pre-check above.
-     *
-     * The obvious order — gate, then flip — is what shipped, and it reads two different
-     * snapshots. `blockingFlagCount` came from the read at the top of this handler, while the
-     * payload posted to QuickBooks and ZenTrades came from the flip; between them sit a
-     * QuickBooks connection lookup and a TaxCode read. A pricebook replacement un-pricing a
-     * line in that gap passed a gate computed against the older rows and shipped the newer
-     * ones. Wrapping that order in a transaction does not help: under READ COMMITTED the gate
-     * read still takes its own snapshot.
-     *
-     * Flipping first inverts it. The UPDATE takes the quote row lock, so any writer that got
-     * there first has already committed and is visible to the read that follows; a late
-     * blocking flag throws, the flip rolls back, and the technician gets the same 409 they
-     * would have got from the pre-check. The gate and the payload are now the same rows.
-     *
-     * `flagsFor` is pure and needs only the line item, so nothing inside this transaction
-     * reaches for the global client — which matters, because `connection_limit=1` means a
-     * nested query here would wait on the connection this transaction is holding.
+     * The flip is `updateMany ... where status: "DRAFT"` and the row count is the guard: only
+     * the request that actually moved the row out of DRAFT owns the completion. Everything
+     * above — the QuickBooks connection lookup, the TaxCode read, sometimes a full
+     * listSalesTax — is latency during which a second Complete can arrive.
      */
-    class LateBlockingFlags extends Error {
-      constructor(readonly blocking: number) {
-        super("blocked");
-      }
-    }
+    class AlreadyCompleted extends Error {}
     let updated: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>;
     try {
       updated = await prisma.$transaction(async (tx) => {
@@ -1364,26 +1348,16 @@ export class QuoteController {
         // tabs, or the ordinary Complete → Reopen → Complete. Each posted its own estimate
         // while `qboEstimateId` was still null, so neither saw the other's id and the job
         // ended up with two QuickBooks estimates nothing later reconciles.
-        if (flipped.count === 0) throw new LateBlockingFlags(-1);
+        if (flipped.count === 0) throw new AlreadyCompleted();
         const fresh = await tx.quote.findFirst({
           where: { id: quote.id, userId: user.userId, companyId: user.companyId },
           include: quoteDtoInclude,
         });
-        const blocking = fresh!.lineItems.filter((li) =>
-          flagsFor(li).some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
-        ).length;
-        if (blocking > 0) throw new LateBlockingFlags(blocking);
         return fresh!;
       });
     } catch (e) {
-      if (e instanceof LateBlockingFlags)
-        return e.blocking < 0
-          ? fail(res, 409, "This estimate has already been marked Completed")
-          : fail(
-              res,
-              409,
-              `${e.blocking} line item(s) still need attention before this quote can be marked Completed`
-            );
+      if (e instanceof AlreadyCompleted)
+        return fail(res, 409, "This estimate has already been marked Completed");
       throw e;
     }
     QuoteController.postToQboInBackground(updated);
