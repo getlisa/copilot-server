@@ -80,8 +80,30 @@ export class CompanyController {
     const existing = await prisma.users.findUnique({ where: { email: accountEmail } });
     if (existing) return fail(409, "An account with this email already exists");
 
+    /**
+     * A name that already belongs to a company JOINS that company rather than standing up a
+     * second one. Two registrations for "Moss Electric" are the same business filling the form
+     * twice, and separate tenants would split its pricebook, QuickBooks connection and estimates
+     * across two ids that nothing reconciles.
+     *
+     * Matched case-insensitively on the trimmed name, oldest id first so repeated duplicates
+     * already in the table converge on one tenant instead of ping-ponging.
+     *
+     * NOTE: this route is unauthenticated (see company.route.ts) and the account below is created
+     * with role "admin", so a correct company name is now enough to get admin inside an existing
+     * tenant. That is the product decision; if it needs closing, the options are an invite code on
+     * the join path, creating joiners as "technician", or holding them inactive until an existing
+     * admin approves.
+     */
+    const joined = await prisma.companies.findFirst({
+      where: { name: { equals: name, mode: "insensitive" } },
+      orderBy: { id: "asc" },
+    });
+
     let logoUrl: string | null = null;
-    const file = (req as Request & { file?: Express.Multer.File }).file;
+    // Only a NEW company takes branding from this form. A join must not repaint the tenant's
+    // logo or address from whatever the second registrant happened to type.
+    const file = joined ? undefined : (req as Request & { file?: Express.Multer.File }).file;
     if (file) {
       const ext = file.mimetype === "image/jpeg" ? "jpg" : "png";
       const safeName = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40);
@@ -114,21 +136,23 @@ export class CompanyController {
     const hasServiceAddress = Object.values(serviceAddress).some(Boolean);
     const hashedPassword = await bcrypt.hash(password, 10);
     const { company, user } = await prisma.$transaction(async (tx) => {
-      const company = await tx.companies.create({
-        data: {
-          name,
-          logo_url: logoUrl,
-          phone: str(b.phone),
-          email,
-          license_number: str(b.licenseNumber),
-          city: str(b.city),
-          state: str(b.state),
-          postal_code: str(b.postalCode),
-          country: str(b.country),
-          ...(addressLine ? { address: { line1: addressLine } } : {}),
-          ...(hasServiceAddress ? { service_address: serviceAddress } : {}),
-        },
-      });
+      const company =
+        joined ??
+        (await tx.companies.create({
+          data: {
+            name,
+            logo_url: logoUrl,
+            phone: str(b.phone),
+            email,
+            license_number: str(b.licenseNumber),
+            city: str(b.city),
+            state: str(b.state),
+            postal_code: str(b.postalCode),
+            country: str(b.country),
+            ...(addressLine ? { address: { line1: addressLine } } : {}),
+            ...(hasServiceAddress ? { service_address: serviceAddress } : {}),
+          },
+        }));
       const user = await tx.users.create({
         data: {
           first_name: firstName,
@@ -143,10 +167,11 @@ export class CompanyController {
       return { company, user };
     });
 
-    logger.info("Company registered", {
+    logger.info(joined ? "Account joined an existing company" : "Company registered", {
       companyId: company.id,
       name: company.name,
       adminUserId: String(user.id),
+      joined: !!joined,
     });
     res.status(201).json({
       success: true,
