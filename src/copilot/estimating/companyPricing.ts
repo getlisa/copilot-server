@@ -43,6 +43,12 @@ export interface CompanyPricing {
   byCode: Map<string, PricedMatch>;
   /** The deduped underlying rows, for product-provenance maps (turn context, DTOs). */
   rawRows: PricebookItem[];
+  /**
+   * The client's OWN rows only (their books + legacy manual), for showing the agent what this
+   * company stocks. Home Depot cache rows are excluded: they are a retail fallback, not this
+   * client's catalog, and must not shape the variants the agent offers the technician.
+   */
+  ownRows: MatchableRow[];
 }
 
 const toRow = (p: PricebookItem): MatchableRow => ({
@@ -110,7 +116,13 @@ export async function loadCompanyPricing(companyId: number): Promise<CompanyPric
 
   const match = (term: string) => matchPools(term, pools, hdCache, fallbackEnabled, companyId);
 
-  return { fallbackEnabled, match, byCode, rawRows: deduped };
+  return {
+    fallbackEnabled,
+    match,
+    byCode,
+    rawRows: deduped,
+    ownRows: pools.flatMap((p) => p.items),
+  };
 }
 
 export interface MatchPool {
