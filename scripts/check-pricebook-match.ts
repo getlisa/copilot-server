@@ -3,7 +3,11 @@
  *   npx tsx scripts/check-pricebook-match.ts
  */
 import assert from "assert";
-import { dedupeSharedRows, matchPricebook } from "../src/copilot/estimating/pricebookMatch";
+import {
+  dedupeSharedRows,
+  matchPricebook,
+  searchPricebookCandidates,
+} from "../src/copilot/estimating/pricebookMatch";
 
 const items = [
   { id: 1, code: "EL-005", description: "Wago 221 Lever Nut Connector (pack of 10)", unit: "PACK", unitPrice: 8.5, synonyms: ["wago", "wago connector"] },
@@ -85,6 +89,28 @@ assert.strictEqual(matchPricebook("1/2 in upright sprinkler head 200F", heads)?.
 assert.strictEqual(matchPricebook("1/2 in sidewall sprinkler head 200F", heads), null, "no 200F sidewall in the book → blank, never a 155F price");
 assert.strictEqual(matchPricebook("1/2 in chrome sidewall sprinkler head", heads)?.code, "SP-030", "orientation outranks a finish word on another orientation");
 assert.notStrictEqual(matchPricebook("sprinkler head", heads)?.code, "SP-021", "an unqualified query must not land on the concealed head (°F merging once made it the shortest row, moving the price from \\$5.25 to \\$14.50)");
+
+// Candidate search feeds the agent's clarifying questions: it must surface the variants the
+// book actually carries (so the options are answerable) and stay on-subject (so the sample
+// does not drown the prompt). Loose where matchPricebook is strict — different question.
+const book = [
+  ...heads,
+  { id: 95, code: "SP-031", description: 'Sprinkler heads SIDEWALL F1FR-SW Viking 1/2" Standard Sidewall 155°F K=5.6', unit: "EA", unitPrice: 6.5, synonyms: [] },
+  { id: 96, code: "VL-001", description: 'Valves OS&Y Gate 2-1/2"', unit: "EA", unitPrice: 185, synonyms: [] },
+  { id: 97, code: "LB-002", description: "Tech II (Journeyman, DEFAULT)", unit: "HR", unitPrice: 75, synonyms: [] },
+];
+const candidates = searchPricebookCandidates("I need to change a sprinkler head half inch", book);
+assert.ok(candidates.length >= 5, "the heads the book carries are all offered to the agent");
+assert.ok(
+  candidates.every((c) => c.code.startsWith("SP-")),
+  "valves and labor rates stay out of a sprinkler-head question"
+);
+assert.ok(
+  ["SP-030", "SP-031"].every((code) => candidates.some((c) => c.code === code)),
+  "both sidewall rows are visible, so the ask can offer 155\u00b0F and never 200\u00b0F"
+);
+assert.deepStrictEqual(searchPricebookCandidates("roof flashing", book), [], "nothing overlaps \u2192 no section, no extra rules");
+assert.strictEqual(searchPricebookCandidates("sprinkler head", book, 2).length, 2, "limit caps what reaches the prompt");
 
 // Cross-company HD cache sharing: own row beats foreign, freshest foreign wins, no dupes.
 const shared = dedupeSharedRows(

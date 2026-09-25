@@ -325,3 +325,44 @@ export function matchPricebook<T extends MatchablePricebookItem>(
 
   return bestScore >= MATCH_THRESHOLD ? best : null;
 }
+
+/**
+ * LOOSE search: every row of the client's book whose words overlap the utterance, best first.
+ *
+ * `matchPricebook()` answers "which row IS this part" and is deliberately strict — one row or
+ * nothing. This answers the different question "what does this client actually stock around
+ * here", so the agent can build its clarifying questions out of the catalog's OWN variants.
+ * Without it the model invents plausible specs the book cannot price: a technician answering
+ * "sidewall / 200°F / chrome" got a line with no price, because that book stocks sidewall
+ * heads at 155°F only (bug report 2026-09-25).
+ *
+ * No hard gates here on purpose — a candidate list is for reading, not for pricing, and an
+ * over-tight list would hide exactly the near-variants the question needs to offer.
+ */
+export function searchPricebookCandidates<T extends MatchablePricebookItem>(
+  query: string,
+  items: T[],
+  limit = 12
+): T[] {
+  const qTokens = tokenize(stripNegations(query));
+  if (qTokens.length === 0) return [];
+  // Two shared words keeps "sprinkler head" out of every row that merely says "head"; a
+  // one-word utterance can only ever clear one.
+  const minHits = Math.min(2, qTokens.length);
+
+  const scored: { item: T; hits: number }[] = [];
+  for (const item of items) {
+    const haySet = new Set(
+      tokenize(
+        `${stripNegations(item.description)} ${item.synonyms.join(" ")} ${item.code}`
+      ).flatMap(variants)
+    );
+    let hits = 0;
+    for (const t of qTokens) if (variants(t).some((v) => haySet.has(v))) hits += 1;
+    if (hits >= minHits) scored.push({ item, hits });
+  }
+  return scored
+    .sort((a, b) => b.hits - a.hits || a.item.description.length - b.item.description.length)
+    .slice(0, limit)
+    .map((s) => s.item);
+}

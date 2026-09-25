@@ -5,7 +5,8 @@ import { ESTIMATED_PRICE_CODE } from "./quoteDto";
 import { packAwareQuantity, unitsCompatible } from "./packMath";
 import { enqueueResolve } from "./homeDepotCatalog";
 import { quoteIsDraft, updateDraftLineItem, updateDraftQuote } from "./draftWrite";
-import { loadCompanyPricing } from "./companyPricing";
+import { loadCompanyPricing, MatchableRow } from "./companyPricing";
+import { searchPricebookCandidates } from "./pricebookMatch";
 import { listProposalTemplateChoices } from "../../lib/proposalTemplates";
 import { ztChatContext } from "../../lib/ztIngest";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
@@ -146,6 +147,21 @@ PROPOSAL TEMPLATE. The context may list this client's PROPOSAL TEMPLATES — the
 
 const MARKUP_PROMPT = `
 MATERIALS MARKUP. The quote carries one markup percentage that applies to every material line. When the technician states one ("mark it up 20 percent", "add a 15% markup", "make the markup 10"), set markupPercent to that number — 20 for 20%, not 0.2 — and leave it null on every turn where they do not. Setting it replaces any previous value; it is one number for the whole quote, never per line, so never emit line-item operations to apply a markup yourself. A stated 0 clears it. Never invent or suggest a percentage they did not say, and never treat a negative number as a markup: if they ask for a discount or a negative markup, set markupPercent null and say in your reply that markup cannot go below 0%. A price the technician states for a line is always their own cost or rate, never a marked-up figure, so a markup being set changes nothing about how you record it.`;
+
+/**
+ * Appended to the system prompt: ground the clarifying questions in what the client actually
+ * stocks. The turn context carries a relevance sample of their own pricebook (see
+ * `searchPricebookCandidates`); when nothing overlaps, the section is absent and these rules
+ * idle, so the agent keeps its normal freedom on items the book says nothing about.
+ */
+const CATALOG_PROMPT = `
+CLIENT CATALOG. The context may list CATALOG ROWS THIS CLIENT SELLS — rows from their own pricebook whose wording overlaps what the technician just said. Those rows are the only prices this quote can use, so they decide what is worth asking.
+- Build every spec question OUT OF THOSE ROWS. When you ask which type, size, temperature rating, finish, material or capacity, the options must be values that actually appear in the listed rows — and a spec the rows DISAGREE on is exactly the right thing to ask about, because that answer picks the row. Use the catalog's own wording for each option.
+- NEVER offer a variant the listed rows do not carry. An answer no row matches produces a line with NO PRICE at all: a technician who answered "sidewall / 200°F / chrome" got an unpriced line, because that book stocks sidewall heads at 155°F only and in no finish (real failure, 2026-09-25). A question whose answers cannot be priced is worse than no question.
+- When every listed row shares one value for a spec, that spec is SETTLED — use it, do not ask. A question with one possible answer wastes the technician's turn.
+- When what the technician already described is something the listed rows cannot supply, say so in the reply in one plain sentence ("their book carries sidewall heads at 155°F only"), and ask what they want instead: the nearest row the catalog does carry, or the item added at a price they state themselves.
+- The list is a RELEVANCE SAMPLE, not the whole book. Never tell the technician an item does not exist because it is absent here, and never let its absence stop you adding a line they asked for.
+- These rows are for asking and choosing only. Never copy a listed price into unitPrice and never present a code as the line's own — pricing still runs downstream against the whole book.`;
 
 export const TURN_JSON_SCHEMA = {
   name: "estimating_turn",
@@ -330,7 +346,9 @@ function buildTurnContext(
   proposalTemplates: string[] = [],
   templateAsked = false,
   /** ZenTrades job context for a ZT-seeded quote (ztChatContext); null otherwise. */
-  ztContext: string | null = null
+  ztContext: string | null = null,
+  /** Rows of the client's OWN book that overlap this utterance — what the asks must offer. */
+  catalogCandidates: MatchableRow[] = []
 ): string {
   // Product provenance is included so the agent can answer "what's the link / brand / price"
   // from context instead of guessing or web-searching. Keyed off the line's pricebookCode.
@@ -372,6 +390,11 @@ function buildTurnContext(
       : laborRates
           .map((r) => `- ${r.name} — $${r.hourlyRate}/hr`)
           .join("\n");
+  // Only the specs matter here, so rows are rendered bare: the agent reads them to learn which
+  // variants exist, never to price anything (CATALOG_PROMPT).
+  const catalogLines = catalogCandidates
+    .map((r) => `- ${r.code} | ${r.description} | $${r.unitPrice}/${r.unit}`)
+    .join("\n");
   return `${ztContext ? `${ztContext}\n\n` : ""}CURRENT LINE ITEMS:
 ${itemLines}
 
@@ -389,6 +412,14 @@ PROPOSAL TEMPLATES for this client:
 ${proposalTemplates.map((n) => `- ${n}`).join("\n")}
 
 THE TEMPLATE ASK was already made for this quote: ${templateAsked ? "YES — never ask again" : "no"}.
+`
+    : ""
+}
+${
+  catalogCandidates.length > 0
+    ? `
+CATALOG ROWS THIS CLIENT SELLS (relevance sample of their own pricebook, for your questions — never for prices):
+${catalogLines}
 `
     : ""
 }
@@ -478,10 +509,25 @@ export async function runEstimatingTurn(opts: {
     // The ask needs a real choice: 0-1 templates → no list in context, the rule never fires.
     proposalTemplates.length >= 2 ? proposalTemplates.map((t) => t.name) : [],
     quoteRow?.templateAsked === true,
-    ztContext
+    ztContext,
+    // Searched on the technician's OWN words — this turn's plus their last two, because the
+    // turn that matters most is the ANSWER turn ("sidewall", "chrome"), whose words name no
+    // product at all: searched alone it would show the agent nothing at the moment it is about
+    // to add the line. A turn overlapping nothing in the book gets no section and no extra rules.
+    searchPricebookCandidates(
+      [
+        ...opts.history
+          .filter((t) => t.role === "user")
+          .slice(-2)
+          .map((t) => t.content),
+        opts.utterance,
+      ].join(" "),
+      pricing.ownRows
+    )
   );
   const { raw } = await callStructured({
-    system: SYSTEM_PROMPT + MARKUP_PROMPT + CUSTOMER_PROMPT + TEMPLATE_PROMPT,
+    system:
+      SYSTEM_PROMPT + MARKUP_PROMPT + CUSTOMER_PROMPT + TEMPLATE_PROMPT + CATALOG_PROMPT,
     userContent: opts.imageUrls?.length
       ? [
           { type: "text", text: turnContext },
