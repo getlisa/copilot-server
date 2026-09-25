@@ -65,6 +65,27 @@ assert.strictEqual(matchPricebook("VSRF0100", coded)?.code, "VSRF0100", "bare pa
 assert.strictEqual(matchPricebook("vsrf0100 flow switch", coded)?.code, "VSRF0100", "part number + words match");
 assert.strictEqual(matchPricebook("solvent cement", coded)?.code, "V5097P", "words match via description");
 
+// Temperature rating + orientation (bug report 2026-09-25: a 1/2 in sidewall head came back
+// with NO price although the uploaded book carried it). "155F" and "155°F" must be the same
+// token, and an orientation the query named is required, not merely scored.
+const heads = [
+  { id: 90, code: "SP-001", description: 'Sprinkler heads UPRIGHT TY3251 Tyco 1/2" Upright 155°F SR K=5.6', unit: "EA", unitPrice: 5.25, synonyms: [] },
+  { id: 91, code: "SP-005", description: 'Sprinkler heads UPRIGHT G5A8 Victaulic 1/2" Upright 200°F Extra-High-Temp K=5.6', unit: "EA", unitPrice: 5.9, synonyms: [] },
+  { id: 92, code: "SP-010", description: 'Sprinkler heads PENDANT TY3151 Tyco 1/2" Pendant 155°F SR K=5.6 (standard)', unit: "EA", unitPrice: 5.25, synonyms: [] },
+  { id: 93, code: "SP-021", description: 'Sprinkler heads CONCEALED TY2936 Tyco 1/2" Concealed Pendant 155/165°F QR Chrome', unit: "EA", unitPrice: 14.5, synonyms: [] },
+  { id: 94, code: "SP-030", description: 'Sprinkler heads SIDEWALL TY1131 Tyco 1/2" Extended Coverage Sidewall 155°F K=5.6', unit: "EA", unitPrice: 7.9, synonyms: [] },
+];
+for (const spelling of ["155F", "155°F", "155 degrees F"])
+  assert.strictEqual(
+    matchPricebook(`1/2 in sidewall sprinkler head ${spelling}`, heads)?.code,
+    "SP-030",
+    `temperature spelling ${spelling} must not decide the match`
+  );
+assert.strictEqual(matchPricebook("1/2 in upright sprinkler head 200F", heads)?.code, "SP-005", "temperature picks the right head");
+assert.strictEqual(matchPricebook("1/2 in sidewall sprinkler head 200F", heads), null, "no 200F sidewall in the book → blank, never a 155F price");
+assert.strictEqual(matchPricebook("1/2 in chrome sidewall sprinkler head", heads)?.code, "SP-030", "orientation outranks a finish word on another orientation");
+assert.notStrictEqual(matchPricebook("sprinkler head", heads)?.code, "SP-021", "an unqualified query must not land on the concealed head (°F merging once made it the shortest row, moving the price from \\$5.25 to \\$14.50)");
+
 // Cross-company HD cache sharing: own row beats foreign, freshest foreign wins, no dupes.
 const shared = dedupeSharedRows(
   [

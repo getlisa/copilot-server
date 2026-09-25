@@ -90,6 +90,14 @@ function canonicalizeUnits(text: string): string {
       .replace(/\b(single|double|triple)\s*-?\s*(?:pole|poles|p)\b/gi, (_m, w: string) =>
         `${({ single: 1, double: 2, triple: 3 } as Record<string, number>)[w.toLowerCase()]}p`
       )
+      // Temperature rating: the catalog writes "155°F", the model writes "155F", "155 F" or
+      // "155 degrees F". The degree sign splits the number off the F on the CATALOG side only,
+      // so the query's "200f" became a spec token (it carries a digit) that no row could ever
+      // satisfy — every temperature-qualified sprinkler head came back unmatched and unpriced
+      // on a customer-facing quote. Both sides normalize, so the spelling cannot decide it.
+      // Known gap: a dual-rating row ("135/165°F") reduces to one "135/165f" token, which a
+      // single-temperature query still misses.
+      .replace(/(\d+(?:\.\d+)?)\s*(?:°|\s*-?\s*deg(?:ree)?s?\.?)?\s*-?\s*([fc])\b/gi, "$1$2")
       // Inch marks and words, INCLUDING the bare "in" the prompt teaches the model to emit.
       // Without the last form, "4 in square junction box" lost its 4 to the bare-digit filter
       // below and matched a 2 in box at score 1.0 — full confidence, wrong size.
@@ -179,6 +187,15 @@ function variants(t: string): string[] {
   return v;
 }
 
+/**
+ * Mutually exclusive product orientations. Like a measurement, one of these NAMES THE PART:
+ * a sidewall head and an upright head share every other word in the row, so scoring alone
+ * priced a 200°F UPRIGHT head for a 200°F SIDEWALL request once the temperature matched.
+ * Required, never scored — a row that does not carry the orientation the technician asked
+ * for is a different part, and a blank line beats a plausible wrong price.
+ */
+const VARIANT_WORDS = new Set(["upright", "pendant", "sidewall", "concealed"]);
+
 const MATCH_THRESHOLD = 0.6;
 
 /**
@@ -230,12 +247,13 @@ export function matchPricebook<T extends MatchablePricebookItem>(
   const qNegated = negatedTokens(query);
   const qTokens = tokenize(stripNegations(query));
   if (qTokens.length === 0) return null;
-  const required = specTokens(qTokens);
+  const required = [...specTokens(qTokens), ...qTokens.filter((t) => VARIANT_WORDS.has(t))];
   const noun = productNoun(qTokens);
 
   let best: T | null = null;
   let bestScore = 0;
   let bestHaySize = Infinity;
+  let bestExtraVariants = Infinity;
 
   for (const item of items) {
     const hayNegated = negatedTokens(item.description);
@@ -249,9 +267,10 @@ export function matchPricebook<T extends MatchablePricebookItem>(
     if ([...hayNegated].some((t) => !qNegated.has(t) && qTokens.some((q) => variants(q).includes(t)))) continue;
     if ([...qNegated].some((t) => !hayNegated.has(t) && haySet.has(t))) continue;
 
-    // HARD CONSTRAINT: every measurement in the query must be present. A row missing one is
-    // a different product, however well the remaining words score. Rejecting it leaves the
-    // line blank for the technician, which is always preferable to a near-miss price.
+    // HARD CONSTRAINT: every measurement and orientation word in the query must be present.
+    // A row missing one is a different product, however well the remaining words score.
+    // Rejecting it leaves the line blank for the technician, which is always preferable to a
+    // near-miss price.
     if (!required.every((t) => haySet.has(t))) continue;
     // HARD CONSTRAINT: the row must name the same kind of thing. Fittings, straps, conduit
     // and connectors of one size are otherwise indistinguishable by score.
@@ -283,9 +302,23 @@ export function matchPricebook<T extends MatchablePricebookItem>(
     // ALARM SWITCH W/ RETARD' for the query "flow switch with retard". Before this, a tie
     // went to whichever row happened to scan first (DB order), which priced that CR variant.
     const descSize = tokenize(item.description).length;
-    if (score > bestScore || (score === bestScore && best && descSize < bestHaySize)) {
+    // Tie-break, first key: the row carrying FEWER orientations the query never named. Raw
+    // token count is an accidental proxy for "plainest" — a dual-rating row like
+    // "155/165°F CONCEALED" is one token shorter than a plain "155°F PENDANT" row, so a bare
+    // "sprinkler head" query silently moved from a \$5.25 pendant to a \$14.50 concealed head.
+    const extraVariants = new Set(
+      hay.filter((t) => VARIANT_WORDS.has(t) && !qTokens.includes(t))
+    ).size;
+    if (
+      score > bestScore ||
+      (score === bestScore &&
+        best &&
+        (extraVariants < bestExtraVariants ||
+          (extraVariants === bestExtraVariants && descSize < bestHaySize)))
+    ) {
       bestScore = score;
       bestHaySize = descSize;
+      bestExtraVariants = extraVariants;
       best = item;
     }
   }
