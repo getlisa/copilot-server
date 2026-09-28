@@ -83,20 +83,109 @@ async function resolveThumbnail(input: {
   return null;
 }
 
+type GeneratedPdf = {
+  url: string;
+  directUrl: string;
+  key: string;
+  filename: string;
+  estimateNumber: string;
+  generatedAt: string;
+  suggestedCustomerEmail: string | null;
+};
+
 /**
- * Decode a customer signature into a Buffer. Accepts a raw base64 string or a data URL
- * from a browser signature pad (e.g. "data:image/png;base64,iVBORw0...").
+ * Render the final quotation PDF for an estimate quote turn, upload it to S3 and record
+ * it on the message metadata. Returns a 404/409 error instead when the message isn't a
+ * quote in this conversation; anything else throws (→ 500).
  */
-function decodeSignature(input: string): Buffer | null {
-  if (!input || typeof input !== "string") return null;
-  const match = input.match(/^data:[^;]+;base64,(.*)$/s);
-  const b64 = (match ? match[1] : input).trim();
-  try {
-    const buffer = Buffer.from(b64, "base64");
-    return buffer.length > 0 ? buffer : null;
-  } catch {
-    return null;
+async function generateQuotePdf(
+  req: Request,
+  conversationId: string,
+  messageId: string
+): Promise<{ data: GeneratedPdf } | { error: { status: 404 | 409; message: string } }> {
+  const msg = await messageRepository.getById(messageId);
+  if (!msg || msg.conversationId !== conversationId) {
+    return { error: { status: 404, message: "Quote not found" } };
   }
+
+  const meta = (msg.metadata ?? {}) as any;
+  const quote = meta?.quote as
+    | (EstimateQuote & { estimateNumber?: string | null; equipmentImageKey?: string | null })
+    | null;
+  const isEstimate = meta?.mode === "estimate" || meta?.route === "estimate";
+  if (!isEstimate || meta?.responseKind !== "quote" || !quote) {
+    return { error: { status: 409, message: "This message has no estimate to generate a PDF for." } };
+  }
+
+  // Rebuild the PDF inputs: header from the conversation, thumbnail from the stashed photo.
+  const conversation = await conversationRepository.getById(conversationId);
+  const header = await loadQuoteHeader({
+    jobId: conversation?.jobId as any,
+    userId: conversation?.userId as any,
+  });
+
+  let thumbnail: { buffer: Buffer; mimeType?: string } | undefined;
+  if (quote.equipmentImageKey) {
+    try {
+      thumbnail = { buffer: await getObjectBufferFromS3(quote.equipmentImageKey) };
+    } catch {
+      /* photo missing/unreadable — PDF just renders without a thumbnail */
+    }
+  }
+
+  const estimateNumber = quote.estimateNumber || `E${Date.now().toString(36).toUpperCase()}`;
+  const generatedAt = new Date();
+  const buffer = await buildQuotePdf({
+    quote: quote as EstimateQuote,
+    header,
+    estimateNumber,
+    date: generatedAt,
+    thumbnail,
+    photos: await loadConversationPhotos(conversationId, quote.equipmentImageKey),
+  });
+
+  const key = `estimates/${conversationId}/${messageId}.pdf`;
+  const filename = `Estimate-${estimateNumber}.pdf`;
+  await uploadBufferToS3({
+    key,
+    buffer,
+    contentType: "application/pdf",
+    contentDisposition: pdfContentDisposition(filename),
+  });
+  // Permanent download link = our own streaming endpoint (never expires). Also hand
+  // back a presigned direct-to-S3 link (up to 7 days) for clients that want one.
+  const url = pdfDownloadUrl(req, conversationId, messageId);
+  const directUrl = await getPresignedUrlForKey(key, PDF_URL_TTL, { downloadFilename: filename });
+
+  // Suggest a customer email (from the job) for the frontend to confirm before emailing.
+  const suggestedCustomerEmail = await loadSuggestedCustomerEmail(conversation?.jobId as any);
+
+  // Record the PDF on the quote (merge into existing metadata).
+  await messageRepository.update(messageId, {
+    metadata: {
+      ...meta,
+      quote: {
+        ...quote,
+        estimateNumber,
+        pdfKey: key,
+        pdfGeneratedAt: generatedAt.toISOString(),
+        suggestedCustomerEmail,
+      },
+    },
+  });
+
+  logger.info("Estimate PDF generated", { conversationId, messageId, key });
+  return {
+    data: {
+      url,
+      directUrl,
+      key,
+      filename,
+      estimateNumber,
+      generatedAt: generatedAt.toISOString(),
+      suggestedCustomerEmail,
+    },
+  };
 }
 
 /**
@@ -261,10 +350,10 @@ export class EstimateController {
         }
       }
 
-      // On a quote turn we do NOT generate the PDF yet — the customer must first
-      // confirm the estimate with a digital signature (see `sign`). We assign a stable
-      // estimate number now, and stash the uploaded equipment photo in S3 so the signed
-      // PDF can re-embed the thumbnail later. Best-effort — failures never break the stream.
+      // On a quote turn we do NOT generate the PDF yet — the technician does that on
+      // demand (see `generate`). We assign a stable estimate number now, and stash the
+      // uploaded equipment photo in S3 so the PDF can re-embed the thumbnail later.
+      // Best-effort — failures never break the stream.
       let estimateNumber: string | undefined;
       let equipmentImageKey: string | null = null;
       if (responseKind === "quote" && quote) {
@@ -314,7 +403,6 @@ export class EstimateController {
                   ...quote,
                   estimateNumber: estimateNumber ?? null,
                   equipmentImageKey,
-                  signed: false,
                   pdfKey: null,
                 }
               : null,
@@ -325,8 +413,7 @@ export class EstimateController {
         },
       });
 
-      // A quote must be signed by the customer before its PDF is generated.
-      send({ type: "done", data: aiMessage, responseKind, requiresSignature: responseKind === "quote" });
+      send({ type: "done", data: aiMessage, responseKind });
       clearInterval(heartbeat);
       res.end();
 
@@ -350,9 +437,9 @@ export class EstimateController {
 
   /**
    * GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
-   * Stream the stored signed PDF straight from S3. This is a PERMANENT link (it never
+   * Stream the stored quotation PDF straight from S3. This is a PERMANENT link (it never
    * expires — no presigning), so it's the canonical URL to share/store. Add `?inline=1`
-   * to view in-browser instead of downloading. 409 if the estimate isn't signed yet.
+   * to view in-browser instead of downloading. 409 if the PDF hasn't been generated yet.
    */
   static async downloadPdf(req: Request, res: Response) {
     const { conversationId, messageId } = req.params;
@@ -366,7 +453,7 @@ export class EstimateController {
       if (!pdfKey) {
         return res
           .status(409)
-          .json({ success: false, error: { status: 409, message: "Estimate not signed yet — sign it to generate the PDF." } });
+          .json({ success: false, error: { status: 409, message: "No PDF yet — generate it first." } });
       }
       const filename = `Estimate-${meta?.quote?.estimateNumber ?? messageId}.pdf`;
 
@@ -393,10 +480,10 @@ export class EstimateController {
   /**
    * GET /api/v1/copilot/:conversationId/estimate/:messageId/preview
    *
-   * Stream an UNSIGNED draft of the quotation PDF so the customer can preview the
-   * estimate before committing a signature. Generated on the fly (never stored), served
-   * inline (`?download=1` to force a download). Works as soon as the quote exists — it
-   * does NOT require the estimate to be signed (that's `downloadPdf`).
+   * Stream a draft of the quotation PDF so the customer can preview the estimate before
+   * generating the PDF. Generated on the fly (never stored), served inline (`?download=1`
+   * to force a download). Works as soon as the quote exists — it does NOT require the
+   * PDF to have been generated (that's `downloadPdf`).
    */
   static async previewPdf(req: Request, res: Response) {
     const { conversationId, messageId } = req.params;
@@ -434,7 +521,6 @@ export class EstimateController {
       }
 
       const estimateNumber = quote.estimateNumber || `E${Date.now().toString(36).toUpperCase()}`;
-      // No `signature` → buildQuotePdf renders the unsigned draft (empty signature area).
       const buffer = await buildQuotePdf({
         quote: quote as EstimateQuote,
         header,
@@ -459,112 +545,49 @@ export class EstimateController {
   }
 
   /**
+   * POST /api/v1/copilot/:conversationId/estimate/:messageId/generate
+   *
+   * Generate the FINAL quotation PDF for a previously-streamed estimate, store it in S3,
+   * and return a permanent download link (plus a presigned direct link). The quote message
+   * metadata is updated with the pdfKey so the PDF can be re-downloaded and emailed later.
+   * Calling it again regenerates and overwrites the PDF.
+   *
+   * Body: {} (no fields)
+   */
+  static async generate(req: Request, res: Response) {
+    const { conversationId, messageId } = req.params;
+    try {
+      const result = await generateQuotePdf(req, conversationId, messageId);
+      if ("error" in result) {
+        return res.status(result.error.status).json({ success: false, error: result.error });
+      }
+      return res.json({ success: true, data: result.data });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("Estimate PDF generate error", { conversationId, messageId, error: message });
+      return res.status(500).json({ success: false, error: { status: 500, message } });
+    }
+  }
+
+  /**
    * POST /api/v1/copilot/:conversationId/estimate/:messageId/sign
    *
-   * Confirm a previously-streamed estimate with the customer's digital signature, then
-   * generate the FINAL signed quotation PDF (signature embedded), store it in S3, and
-   * return a downloadable presigned URL. The quote message metadata is updated with the
-   * pdfKey + signed flag so the PDF can be re-downloaded later.
-   *
-   * Body: { signatureBase64 (raw base64 or data URL), signatureMimeType?, signerName? }
+   * @deprecated Signing was removed — use `generate`. Kept only so the web client, which
+   * still posts a signature pad image here, keeps working until it moves to `/generate`.
+   * Any signature in the body is ignored; the response also carries `signedAt` (the
+   * generation time) for clients that still read it.
    */
   static async sign(req: Request, res: Response) {
     const { conversationId, messageId } = req.params;
-    const signatureBase64: string = req.body?.signatureBase64 ?? "";
-    const signatureMimeType: string | undefined = req.body?.signatureMimeType;
-    const signerName: string | undefined = req.body?.signerName;
-
     try {
-      const msg = await messageRepository.getById(messageId);
-      if (!msg || msg.conversationId !== conversationId) {
-        return res.status(404).json({ success: false, error: { status: 404, message: "Quote not found" } });
+      const result = await generateQuotePdf(req, conversationId, messageId);
+      if ("error" in result) {
+        return res.status(result.error.status).json({ success: false, error: result.error });
       }
-
-      const meta = (msg.metadata ?? {}) as any;
-      const quote = meta?.quote as
-        | (EstimateQuote & { estimateNumber?: string | null; equipmentImageKey?: string | null })
-        | null;
-      if (meta?.mode !== "estimate" || meta?.responseKind !== "quote" || !quote) {
-        return res
-          .status(409)
-          .json({ success: false, error: { status: 409, message: "This message has no estimate to sign." } });
-      }
-
-      const signature = decodeSignature(signatureBase64);
-      if (!signature) {
-        return res
-          .status(400)
-          .json({ success: false, error: { status: 400, message: "Invalid or empty signature image." } });
-      }
-
-      // Rebuild the PDF inputs: header from the conversation, thumbnail from the stashed photo.
-      const conversation = await conversationRepository.getById(conversationId);
-      const header = await loadQuoteHeader({
-        jobId: conversation?.jobId as any,
-        userId: conversation?.userId as any,
-      });
-
-      let thumbnail: { buffer: Buffer; mimeType?: string } | undefined;
-      if (quote.equipmentImageKey) {
-        try {
-          thumbnail = { buffer: await getObjectBufferFromS3(quote.equipmentImageKey) };
-        } catch {
-          /* photo missing/unreadable — PDF just renders without a thumbnail */
-        }
-      }
-
-      const estimateNumber = quote.estimateNumber || `E${Date.now().toString(36).toUpperCase()}`;
-      const signedAt = new Date();
-      const buffer = await buildQuotePdf({
-        quote: quote as EstimateQuote,
-        header,
-        estimateNumber,
-        date: signedAt,
-        thumbnail,
-        signature: { buffer: signature, mimeType: signatureMimeType, signerName, signedAt },
-        photos: await loadConversationPhotos(conversationId, quote.equipmentImageKey),
-      });
-
-      const key = `estimates/${conversationId}/${messageId}.pdf`;
-      const filename = `Estimate-${estimateNumber}.pdf`;
-      await uploadBufferToS3({
-        key,
-        buffer,
-        contentType: "application/pdf",
-        contentDisposition: pdfContentDisposition(filename),
-      });
-      // Permanent download link = our own streaming endpoint (never expires). Also hand
-      // back a presigned direct-to-S3 link (up to 7 days) for clients that want one.
-      const url = pdfDownloadUrl(req, conversationId, messageId);
-      const directUrl = await getPresignedUrlForKey(key, PDF_URL_TTL, { downloadFilename: filename });
-
-      // Suggest a customer email (from the job) for the frontend to confirm before emailing.
-      const suggestedCustomerEmail = await loadSuggestedCustomerEmail(conversation?.jobId as any);
-
-      // Persist the signed state (merge into existing metadata).
-      await messageRepository.update(messageId, {
-        metadata: {
-          ...meta,
-          quote: {
-            ...quote,
-            estimateNumber,
-            pdfKey: key,
-            signed: true,
-            signedAt: signedAt.toISOString(),
-            signerName: signerName ?? null,
-            suggestedCustomerEmail,
-          },
-        },
-      });
-
-      logger.info("Estimate signed + PDF generated", { conversationId, messageId, key });
-      return res.json({
-        success: true,
-        data: { url, directUrl, key, filename, estimateNumber, signedAt: signedAt.toISOString(), suggestedCustomerEmail },
-      });
+      return res.json({ success: true, data: { ...result.data, signedAt: result.data.generatedAt } });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error("Estimate sign error", { conversationId, messageId, error: message });
+      logger.error("Estimate sign (deprecated) error", { conversationId, messageId, error: message });
       return res.status(500).json({ success: false, error: { status: 500, message } });
     }
   }
@@ -572,7 +595,7 @@ export class EstimateController {
   /**
    * POST /api/v1/copilot/:conversationId/estimate/:messageId/email
    *
-   * Email the SIGNED quotation PDF to the customer via SendGrid. The PDF is attached and
+   * Email the generated quotation PDF to the customer via SendGrid. The PDF is attached and
    * a structured quote summary is rendered in the body.
    *
    * From = SENDGRID_FROM_EMAIL (company) when set, CC the technician; otherwise From =
@@ -598,7 +621,8 @@ export class EstimateController {
 
       const meta = (msg.metadata ?? {}) as any;
       const quote = meta?.quote as (EstimateQuote & { estimateNumber?: string | null; pdfKey?: string | null }) | null;
-      if (meta?.mode !== "estimate" || meta?.responseKind !== "quote" || !quote) {
+      const isEstimate = meta?.mode === "estimate" || meta?.route === "estimate";
+      if (!isEstimate || meta?.responseKind !== "quote" || !quote) {
         return res
           .status(409)
           .json({ success: false, error: { status: 409, message: "This message has no estimate to email." } });
@@ -606,10 +630,10 @@ export class EstimateController {
       if (!quote.pdfKey) {
         return res
           .status(409)
-          .json({ success: false, error: { status: 409, message: "Sign the estimate first — no signed PDF to email yet." } });
+          .json({ success: false, error: { status: 409, message: "Generate the PDF first — no PDF to email yet." } });
       }
 
-      // Rebuild header (company name + technician email/name) and fetch the signed PDF.
+      // Rebuild header (company name + technician email/name) and fetch the stored PDF.
       const conversation = await conversationRepository.getById(conversationId);
       const header = await loadQuoteHeader({
         jobId: conversation?.jobId as any,

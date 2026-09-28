@@ -56,6 +56,9 @@ Flow/alarm/monitoring:
 Hangers/supports:
   HG-001 Hanger Arm 1" $2.20 | HG-002 Arm 2" $3.40 | HG-003 Rod 1/2"x10ft $6.80
   HG-004 Seismic Sway Brace 2" $12.50 | HG-005 Offset Hanger 1" $3.80
+Spares & signage:
+  SA-001 Spare Sprinkler Head Cabinet 6-head (w/ wrench) $28 | SA-002 Control Valve ID Sign (aluminum) $14
+  SA-003 FDC ID Sign "Automatic Sprinkler" (aluminum) $18
 
 ────────────────────  SHEET: FIRE ALARM MATERIALS  ────────────────────
 Panels (FACP):
@@ -115,134 +118,8 @@ LB-005 NICET IV/PE $145 | LB-006 Foreman $105
 LB-010 OT 1.5x $112.50 | LB-011 Double 2x $150 | LB-012 Emergency/On-Call $165 (min 2hr) | LB-013 Holiday $175 (min 4hr)
 LB-020 Minimum Service Call $175/CALL | LB-021 Travel <30mi $65/TRIP | LB-022 30-75mi $145/TRIP | LB-023 >75mi $285/TRIP
 LB-024 Mileage $0.67/MILE | LB-025 Per Diem $195/DAY
-Equipment rentals: LB-030 Scissor Lift 19ft $245/DAY | LB-031 Scissor 26ft $320/DAY | LB-032 Boom 40ft $480/DAY
-  LB-033 Tall Ladder $45/DAY | LB-034 Scaffolding $380/DAY | LB-035 Pipe Threader $85/DAY | LB-036 Hydro Test Pump $95/DAY
+Equipment rentals: LB-030 Scissor Lift 19ft $10/hour | LB-031 Scissor 26ft $10/hour | LB-032 Boom 40ft $10/hour
+  LB-033 Tall Ladder $10/hour | LB-034 Scaffolding $10/hour | LB-035 Pipe Threader $10/hour | LB-036 Hydro Test Pump $10/hour
 Permits (pass-through): LB-040 Permit Small(1-5) $185 | LB-041 Medium(6-50) $380 | LB-042 Large(51+) $750
   LB-043 Plan Review $225 | LB-044 AHJ Inspection $150 | LB-045 As-Built Drawings $110/HR
-
-────────────────────  SHEET: STANDARD SERVICES (List price; flat-fee services)  ────────────────────
-Sprinkler (NFPA 25): SV-001 Inspect <50 heads $285 | SV-002 50-200 $420 | SV-003 201-500 $620 | SV-004 500+ $950
-  SV-005 Quarterly Wet $75 | SV-006 Weekly Gauges $35 | SV-007 Dry System Inspect $560 | SV-008 Deluge/Preaction $680
-  SV-020 Main Drain Flow Test $145 | SV-021 Fwd Flow Test (pump) $425 | SV-022 5-Yr Internal $850
-  SV-023 50-Yr Head Replace (per head, labor) $28 | SV-024 Standpipe 5-Yr Hydro $980 | SV-025 Underground Flush $280
-Fire alarm (NFPA 72): SV-030 Inspect <25 dev $380 | SV-031 25-100 $620 | SV-032 101-300 $980
-  SV-033 Semi-Annual $195 | SV-034 Voice Evac Test $420 | SV-035 Emergency Lighting/Exit $185
-Extinguishers (NFPA 10): SV-040 Annual (per unit) $18 | SV-041 6-Yr Maint $55 | SV-042 12-Yr Hydro $75
-  SV-043 Recharge ABC 10lb $38 | SV-044 Recharge CO2 10lb $48 | SV-045 Recharge Class K $195
-Kitchen hood (NFPA 96): SV-050 Semi-Annual Service $245 | SV-051 Annual + Trip Test $380
-  SV-052 Post-Discharge Clean & Recharge $680 | SV-053 Duct Cleaning Coord $125
-Fire pump: SV-060 Annual Test $580 | SV-061 Weekly Inspect $65 | SV-062 Monthly No-Flow $125
-Backflow: SV-070 Test RPZ 3/4-2" $145 | SV-071 RPZ 2.5-4" $195 | SV-072 DCVA 3/4-2" $95 | SV-073 Minor Repair $285
-Reports: SV-080 Std Report $75 | SV-081 Deficiency Letter $55 | SV-082 Emergency Re-inspect $385 | SV-083 AHJ Meeting $295
-Monitoring (monthly): SV-090 Basic $38 | SV-091 Premium $62 | SV-092 IP Airtime $18
-
-────────────────────  SHEET: LABOR BENCHMARKS (task | condition → MidHrs, Tier, Offline?)  ────────────────────
-Estimate labor = Mid Hrs × tier rate. OFFLINE=YES → wet system must drain; ALSO add
-LI-001 (drain 2.0h), LI-003 (restore 2.0h), LI-004 (impairment/fire watch 0.75h Tech III),
-and a main drain test LT-002 (1.0h) after wet repairs — and tell the customer.
-SPRINKLER HEADS:
-  LH-001 Replace head | open/accessible            0.38h Tech II  NO
-  LH-002 Replace head | drop ceiling, cut tile      0.63h Tech II  NO
-  LH-003 Replace head | concealed cover plate       0.75h Tech II  NO
-  LH-004 Replace painted-over head | any ceiling    0.63h Tech II  NO
-  LH-005 Replace 2-5 heads | open, grouped          1.13h Tech II  NO
-  LH-006 Replace 6-20 heads | open, walkable        3.00h Tech II  YES
-  LH-007 Replace head at height >14ft | lift, open  1.38h Tech II  NO
-  LH-008 Replace head at height >14ft | obstructed  2.00h Tech II  NO
-  LH-009 Add new head to branch | open, existing tee 1.00h Tech II YES
-  LH-010 Relocate head | same zone, open            1.50h Tech II  YES
-PIPE & FITTING:
-  LP-001 Repair leak at threaded fitting            1.50h Tech II  YES
-  LP-002 Repair leak at grooved coupling            1.13h Tech II  YES
-  LP-003 Repair pinhole in pipe body                3.00h Tech II  YES
-  LP-004 Add branch line (new tee off main)         2.75h Tech II  YES
-  LP-005 Reroute/relocate pipe (<=10ft)             3.50h Tech II  YES
-  LP-006 Install escutcheon/trim | cosmetic         0.15h Tech I   NO
-  LP-007 Underground pipe repair | excavate         9.00h Tech III YES
-VALVES:
-  LV-001 Replace OS&Y gate 2-3"                      4.00h Tech III YES
-  LV-002 Replace OS&Y gate 4-6"                      5.50h Tech III YES
-  LV-003 Replace butterfly valve w/ tamper          2.75h Tech II  YES
-  LV-004 Replace check valve 2"                      2.00h Tech II  YES
-  LV-005 Service/rebuild dry pipe valve             5.00h Tech III YES
-  LV-006 Service/rebuild deluge valve               5.75h Tech III YES
-  LV-007 Replace PRV 1"                              1.50h Tech II  YES
-  LV-008 Add/replace tamper switch                   1.38h Tech II  NO
-FIRE ALARM DEVICES:
-  LA-001 Replace smoke detector (addr) | exist base 0.38h Tech II  NO
-  LA-002 Replace smoke detector + new base          0.75h Tech II  NO
-  LA-003 Add smoke detector (addr) | open, pull wire 1.50h Tech II NO
-  LA-004 Add smoke detector | fish finished wall    3.00h Tech III NO
-  LA-005 Replace heat detector                       0.38h Tech II  NO
-  LA-006 Replace duct smoke detector + housing      2.00h Tech III NO
-  LA-007 Replace manual pull station                0.63h Tech II  NO
-  LA-008 Replace horn/strobe                         0.38h Tech II  NO
-  LA-009 Add horn/strobe (+wire <50ft)              2.00h Tech II  NO
-  LA-010 Replace relay/control module               0.75h Tech II  NO
-  LA-011 Add monitor module                          1.50h Tech II  NO
-  LA-012 Install flow switch (new)                   2.00h Tech II  NO
-  LA-013 Wire run new cable | per 100ft             1.38h Tech II  NO
-  LA-014 Wire run conduit fish | per 50ft finished  3.00h Tech III NO
-FIRE ALARM PANEL:
-  LP-101 Reprogram addressable panel                1.50h Tech III NO
-  LP-102 Replace FACP small (<50 pts)               8.00h Tech III YES
-  LP-103 Replace FACP large (50-200 pts)            16.00h Tech IV YES
-  LP-104 Replace batteries                           0.63h Tech II  NO
-  LP-105 Install/replace DACT/IP communicator       2.00h Tech II  NO
-  LP-106 Troubleshoot ground fault                   4.00h Tech III NO
-  LP-107 Troubleshoot open/short circuit            3.50h Tech III NO
-EXTINGUISHERS:
-  LE-001 Annual inspect single                       0.20h Tech I   NO
-  LE-002 Annual inspect 10-unit site                 1.25h Tech I   NO
-  LE-003 Annual inspect 25+ units                    3.25h Tech I   NO
-  LE-004 Recharge ABC 10lb after discharge          0.38h Tech I   NO
-  LE-005 6-yr internal maintenance (per unit)        0.50h Tech II  NO
-  LE-006 12-yr hydrostatic test (per unit)           0.38h Tech II  NO
-  LE-007 Install wall bracket + mount                0.38h Tech I   NO
-  LE-008 Install recessed cabinet                    2.00h Tech II  NO
-KITCHEN HOOD:
-  LK-001 Semi-annual service 1 hood (<=6 nozzles)   1.50h Tech II  NO
-  LK-002 Semi-annual 2-3 hoods                       2.50h Tech II  NO
-  LK-003 Replace fusible links (per hood)            0.40h Tech II  NO
-  LK-004 Replace nozzle blow-off caps (all)          0.20h Tech I   NO
-  LK-005 Trip test (discharge)                       1.25h Tech II  YES
-  LK-006 Post-discharge recharge + clean            4.25h Tech II  NO
-  LK-007 Replace fuel shutoff valve                  2.00h Tech III YES
-  LK-008 Replace pull station/actuator               1.00h Tech II  NO
-SYSTEM IMPAIRMENT / DRAIN-DOWN:
-  LI-001 Drain wet system single zone                2.00h Tech II  YES
-  LI-002 Drain wet system multi-zone (3+ floors)    4.00h Tech II  YES
-  LI-003 Restore/refill wet system                   2.00h Tech II  YES
-  LI-004 Impairment tag / fire watch coord          0.75h Tech III YES
-  LI-005 Nitrogen charge dry system                  1.38h Tech II  YES
-  LI-006 Low point drain dry system                  0.75h Tech II  NO
-ACCESS / SETUP ADDERS:
-  LS-001 Scissor lift 19ft setup+op                  1.25h Tech II  NO
-  LS-002 Scissor lift 26ft setup+op                  1.63h Tech II  NO
-  LS-003 Boom lift 40ft operation                    2.00h Tech II  NO
-  LS-004 Roof/attic access                           0.75h Tech II  NO
-  LS-005 Confined space entry prep                   1.50h Tech III NO
-  LS-006 Open/patch ceiling tiles (per tile)         0.08h Tech I   NO
-  LS-007 Drywall opening+patch (per 12x12, no finish) 1.00h Tech II NO
-  LS-008 After-hours/occupied building adder         1.50h Tech II  NO
-  LS-009 Multi-story coordination (per extra floor)  0.75h Tech II  NO
-BACKFLOW:
-  LBF-001 Test RPZ 3/4-2" (annual cert)             0.88h Tech II  NO
-  LBF-002 Test RPZ 2.5-4"                            1.25h Tech II  NO
-  LBF-003 Rebuild RPZ (seats/O-rings)               2.00h Tech II  YES
-  LBF-004 Replace full RPZ assembly 3/4-1"          2.50h Tech II  YES
-TESTING/COMMISSIONING:
-  LT-001 FA functional test (per device)            0.20h Tech II  NO
-  LT-002 Main drain test (timed, gauges)            1.00h Tech II  NO
-  LT-003 Hydrostatic test sprinkler section         4.00h Tech III YES
-  LT-004 Fire pump annual test (full flow)          4.25h Tech III YES
-  LT-005 Central station comm test                   0.38h Tech II  NO
-  LT-006 Acceptance test new install                 6.00h Tech III NO
-SITE ASSESSMENT:
-  LQ-001 Site survey small (1 floor, 1 system)      1.25h Tech III NO
-  LQ-002 Site survey medium (multi-floor)           2.75h Tech III NO
-  LQ-003 Deficiency re-inspection                    1.50h Tech II  NO
-  LQ-004 Emergency troubleshoot call                 3.00h Tech III NO
-  LQ-005 System design review / plan markup         3.00h Tech IV  NO
-====================================================================================
 `.trim();

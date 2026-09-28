@@ -163,19 +163,18 @@ quote; `followUps` are optional AI suggestions; `actions` are operational API ca
 
 `actions` items carry `actionType` + `endpoint` + `method`. Map them:
 
-- **`preview_estimate`** → `GET /api/v1/copilot/:cid/estimate/:mid/preview` — streams an **unsigned draft** quotation PDF (`Content-Type: application/pdf`, served `inline`). Available as soon as the quote exists (before signing). Let the user click to **view the estimate before committing a signature**. Web: open in a new tab / embed in an `<iframe>`/`<embed>`. Mobile: open in the in-app PDF viewer. Append `?download=1` to force a download instead of inline view.
-- **`sign_estimate`** → `POST /api/v1/copilot/:cid/estimate/:mid/sign`
-  `{ signatureBase64, signatureMimeType?, signerName? }` →
-  `{ url, directUrl, estimateNumber, suggestedCustomerEmail }`.
-  - Web: HTML canvas signature pad → PNG data URL.
-  - Mobile: `react-native-signature-canvas`.
+- **`preview_estimate`** → `GET /api/v1/copilot/:cid/estimate/:mid/preview` — streams a **draft** quotation PDF (`Content-Type: application/pdf`, served `inline`). Available as soon as the quote exists (before the PDF is generated). Let the user click to **view the estimate before generating the PDF**. Web: open in a new tab / embed in an `<iframe>`/`<embed>`. Mobile: open in the in-app PDF viewer. Append `?download=1` to force a download instead of inline view.
+- **`generate_pdf`** → `POST /api/v1/copilot/:cid/estimate/:mid/generate` `{}` →
+  `{ url, directUrl, key, filename, estimateNumber, generatedAt, suggestedCustomerEmail }`.
+  No signature is collected. Calling it again regenerates the PDF. (The old
+  `POST …/sign` is a deprecated alias that ignores any signature.)
 - **`email_estimate`** → `POST /api/v1/copilot/:cid/estimate/:mid/email` `{ to }`
-  (prefill with `suggestedCustomerEmail` from the sign response).
+  (prefill with `suggestedCustomerEmail` from the generate response).
 - **`download_pdf`** → `GET /api/v1/copilot/:cid/estimate/:mid/pdf` (append `?inline=1`
   to view in browser). Web: open in a new tab. Mobile: download / share sheet.
 
-The PDF only exists **after** signing; `download_pdf`/`email_estimate` return 409
-until then.
+The PDF only exists **after** `generate_pdf`; `download_pdf`/`email_estimate` return
+409 until then.
 
 ---
 

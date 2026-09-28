@@ -26,28 +26,24 @@ export const estimateStreamSchema = z.object({
 });
 
 /**
- * POST /api/v1/copilot/:conversationId/estimate/:messageId/sign
+ * POST /api/v1/copilot/:conversationId/estimate/:messageId/generate
  *
- * Confirm an estimate with the customer's digital signature. `signatureBase64` may be a
- * raw base64 string or a data URL (e.g. "data:image/png;base64,...") from a signature pad.
+ * Generate the final quotation PDF. Takes no body fields. The deprecated `/sign` alias
+ * uses it too — passthrough lets old clients keep posting a signature, which is ignored.
  */
-export const estimateSignSchema = z.object({
+export const estimateGenerateSchema = z.object({
   params: z.object({
     conversationId: z.string().uuid("conversationId must be a valid UUID"),
     messageId: z.string().uuid("messageId must be a valid UUID"),
   }),
-  body: z.object({
-    signatureBase64: z.string().min(1, "signatureBase64 is required"),
-    signatureMimeType: z.string().optional(),
-    signerName: z.string().optional(),
-  }),
+  body: z.object({}).passthrough(),
   query: z.object({}).passthrough(),
 });
 
 /**
  * POST /api/v1/copilot/:conversationId/estimate/:messageId/email
  *
- * Email the signed estimate PDF to the customer. `to` is the confirmed/edited address
+ * Email the generated estimate PDF to the customer. `to` is the confirmed/edited address
  * (suggested from the job when available) or the one the technician typed in.
  */
 export const estimateEmailSchema = z.object({

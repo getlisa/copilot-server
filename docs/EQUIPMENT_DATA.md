@@ -119,6 +119,13 @@ quotation. Prices are list prices in **USD**.
 | HG-004 | SS-CLAMP-2 | Seismic Sway Brace Clamp 2" (seismic zones) | AFAC | EA | $12.50 |
 | HG-005 | OFFSET-1 | Offset Hanger 1" UL Listed | AFAC | EA | $3.80 |
 
+### Spares & Signage
+| Item # | Model | Description | Mfr | Unit | Unit Cost |
+|---|---|---|---|---|---|
+| SA-001 | SHC-6 | Spare Sprinkler Head Cabinet 6-head, incl. head wrench (NFPA 13) | Generic | EA | $28.00 |
+| SA-002 | SIGN-CV | Control Valve Identification Sign, aluminum | Generic | EA | $14.00 |
+| SA-003 | SIGN-FDC | FDC Identification Sign "Automatic Sprinkler", aluminum | Generic | EA | $18.00 |
+
 ---
 
 ## 2. Materials — Fire Alarm Systems

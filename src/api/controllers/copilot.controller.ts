@@ -77,14 +77,14 @@ async function resolveThumbnail(input: {
   return null;
 }
 
-/** Build the estimate-lifecycle CTA buttons for a signed-eligible quote turn. */
+/** Build the estimate-lifecycle CTA buttons for a quote turn. */
 function quoteActions(conversationId: string, messageId: string): ActionItem[] {
   const base = `/api/v1/copilot/${conversationId}/estimate/${messageId}`;
   return [
     { id: "preview", label: "Preview estimate", actionType: "preview_estimate", endpoint: `${base}/preview`, method: "GET", style: "secondary" },
-    { id: "sign", label: "Sign estimate", actionType: "sign_estimate", endpoint: `${base}/sign`, method: "POST", style: "primary" },
+    { id: "generate", label: "Generate PDF", actionType: "generate_pdf", endpoint: `${base}/generate`, method: "POST", style: "primary" },
     { id: "email", label: "Email to customer", actionType: "email_estimate", endpoint: `${base}/email`, method: "POST", style: "secondary" },
-    { id: "pdf", label: "Download signed PDF", actionType: "download_pdf", endpoint: `${base}/pdf`, method: "GET", style: "secondary" },
+    { id: "pdf", label: "Download PDF", actionType: "download_pdf", endpoint: `${base}/pdf`, method: "GET", style: "secondary" },
   ];
 }
 
@@ -280,7 +280,7 @@ export class CopilotController {
 
       const finalText = streamedText || bubbleText;
 
-      // ---- Quote turn: assign number + stash equipment photo (for the signed PDF) ----
+      // ---- Quote turn: assign number + stash equipment photo (for the generated PDF) ----
       let estimateNumber: string | undefined;
       let equipmentImageKey: string | null = null;
       if (responseKind === "quote" && quote) {
@@ -323,7 +323,7 @@ export class CopilotController {
           runId,
           quote:
             responseKind === "quote" && quote
-              ? { ...quote, estimateNumber: estimateNumber ?? null, equipmentImageKey, signed: false, pdfKey: null }
+              ? { ...quote, estimateNumber: estimateNumber ?? null, equipmentImageKey, pdfKey: null }
               : null,
           questions: responseKind === "questions" ? questions : null,
           toolsUsed,
@@ -341,8 +341,8 @@ export class CopilotController {
       if (sources.length) blocks.push({ kind: "sources", items: sources });
       if (followUps.length) blocks.push({ kind: "followUps", items: followUps });
       if (responseKind === "quote" && quote) {
-        // Surface the estimate number + unsigned state on the card the UI renders.
-        blocks.push({ kind: "quote", data: { ...quote, estimateNumber: estimateNumber ?? null, signed: false } });
+        // Surface the estimate number on the card the UI renders.
+        blocks.push({ kind: "quote", data: { ...quote, estimateNumber: estimateNumber ?? null } });
         blocks.push({ kind: "actions", items: quoteActions(conversationId, aiMessage.id) });
       }
       if (responseKind === "questions" && questions.length) {
@@ -359,7 +359,6 @@ export class CopilotController {
         type: "done",
         data: aiMessage,
         responseKind,
-        requiresSignature: responseKind === "quote",
         response,
       });
       clearInterval(heartbeat);
