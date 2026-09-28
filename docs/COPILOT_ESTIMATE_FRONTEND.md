@@ -104,11 +104,7 @@ with `:` are heartbeats — ignore them.
 | `message`      | `{ content: string }`                    | **RENDER** — the assistant's chat-bubble text (concise markdown). |
 | `quote`        | `{ data: EstimateQuote }`                | **FORMAT** — render the quote card. Sent only on a quote turn. |
 | `questions`    | `{ data: { questions: FollowUpQuestion[] } }` | **FORMAT** — render option buttons + "Other". Sent only on a questions turn. |
-| `done`         | `{ data: Message, responseKind, requiresSignature }` | Final state. `responseKind ∈ "quote" \| "questions" \| "message"`. On a quote turn `requiresSignature` is `true` — show the **signature pad** to confirm before generating the PDF. |
-
-> **No PDF is generated during the stream.** The customer must first **confirm the
-> quote with a digital signature**. After they sign, call the **sign endpoint** (below)
-> to generate the final signed PDF and get a download link.
+| `done`         | `{ data: Message, responseKind }` | Final state. `responseKind ∈ "quote" \| "questions" \| "message"`. On a quote turn, show a **Generate PDF** button. |
 | `error`        | `{ error: string }`                      | Something failed. Surface a retry. |
 
 **Exactly one** of `quote` / `questions` is sent per turn (or neither, for a plain
@@ -118,8 +114,8 @@ with `:` are heartbeats — ignore them.
 quote turn:     user_message → thinking
   → node:identify(start) → identified → node:identify(end)
   → node:build_quote(start) → message → quote → node:build_quote(end)
-  → done (requiresSignature: true)
-  … customer signs … → POST …/sign → signed PDF download URL
+  → done
+  … technician taps Generate PDF … → POST …/generate → PDF download URL
 
 questions turn: user_message → thinking
   → node:identify(start) → identified → node:identify(end)
@@ -218,26 +214,22 @@ rows. Render `lineTotal`/`total` as currency.
 
 ---
 
-## Signing the estimate → signed quotation PDF
+## Generating the quotation PDF
 
-The PDF is **not** generated during the stream. The flow is:
+The PDF is **not** generated during the stream, and no customer signature is needed.
+The flow is:
 
-1. The stream finishes with `done` + `requiresSignature: true` and the rendered quote card.
-2. The customer reviews the quote and **signs** on a signature pad (canvas).
-   Export the signature as a PNG **data URL** (`canvas.toDataURL("image/png")`).
-3. POST the signature to the **sign endpoint**. The backend renders the branded
-   quotation PDF (Clara logo, company + customer addresses, line-item table, totals,
-   **the embedded signature**, terms), stores it in S3, and returns a downloadable URL.
+1. The stream finishes with `done` and the rendered quote card.
+2. The technician taps **Generate PDF**.
+3. POST to the **generate endpoint**. The backend renders the branded quotation PDF
+   (Clara logo, company + customer addresses, line-item table, totals, terms), stores it
+   in S3, and returns a downloadable URL.
 
 ```
-POST /api/v1/copilot/:conversationId/estimate/:messageId/sign
+POST /api/v1/copilot/:conversationId/estimate/:messageId/generate
 Content-Type: application/json
 
-{
-  "signatureBase64": "data:image/png;base64,iVBORw0KGgo...",  // raw base64 also accepted
-  "signatureMimeType": "image/png",   // optional
-  "signerName": "Jane Doe"            // optional — printed under the signature line
-}
+{}
 ```
 
 `:messageId` is the **AI message's `id`** from the `done` frame (`done.data.id`).
@@ -250,10 +242,10 @@ Response:
   data: {
     url: string;          // PERMANENT download link (our API, streams the PDF — never expires)
     directUrl: string;    // presigned direct-to-S3 link (downloadable, expires in ≤7 days)
-    key: string;
+    key: string;          // "estimates/<conversationId>/<messageId>.pdf"
     filename: string;     // e.g. "Estimate-E0ABC12.pdf"
     estimateNumber: string;
-    signedAt: string;     // ISO timestamp
+    generatedAt: string;  // ISO timestamp
     suggestedCustomerEmail: string | null; // from the job (if any) — pre-fill the email step
   }
 }
@@ -265,16 +257,22 @@ Response:
   specifically need a direct-S3 URL; for normal use prefer `url`.
 - If the user uploaded an equipment photo, it's embedded as a **thumbnail on the
   matching line item** automatically — nothing to do on the client.
-- After signing, the message metadata is updated with `quote.pdfKey`,
-  `quote.signed: true`, `quote.signedAt`, and `quote.signerName`.
-- Re-signing the same message regenerates and overwrites the PDF.
+- After generating, the message metadata is updated with `quote.pdfKey`,
+  `quote.estimateNumber`, `quote.pdfGeneratedAt` and `quote.suggestedCustomerEmail`.
+  When loading history, treat a quote as "PDF ready" when `metadata.quote.pdfKey` is set
+  (quotes signed under the old flow already have it).
+- Calling it again regenerates and overwrites the PDF.
 
-Errors: `400` invalid/empty signature · `404` message not found · `409` the message
-isn't a quote turn (nothing to sign).
+Errors: `404` message not found · `409` the message isn't an estimate quote turn ·
+`500` anything else.
+
+> **Deprecated:** `POST …/estimate/:messageId/sign` still exists as an alias of
+> `generate` for older clients. It ignores any signature in the body and returns the same
+> data plus `signedAt` (= `generatedAt`). Move to `/generate`; the alias will be removed.
 
 ### Link lifetime & re-download
 
-The `url` from `sign` is our own endpoint that **streams the PDF straight from S3**, so
+The `url` from `generate` is our own endpoint that **streams the PDF straight from S3**, so
 it **never expires** — store it, email it, reuse it forever, no CloudFront needed:
 
 ```
@@ -284,22 +282,22 @@ GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
 ```
 
 Use the AI message's `id` as `:messageId`. Point a `<a download>` / "Download PDF"
-button at it. Returns `409` if the estimate isn't signed yet (no PDF), `404` if the
+button at it. Returns `409` if the PDF hasn't been generated yet, `404` if the
 message (or stored PDF) doesn't exist.
 
-> The presigned `directUrl` from `sign` still works but expires within 7 days (a hard
+> The presigned `directUrl` from `generate` still works but expires within 7 days (a hard
 > AWS limit on presigned URLs) — use `url` for anything you need to persist.
 
 ---
 
 ## Emailing the estimate to the customer
 
-After the estimate is **signed** (PDF generated), the technician can email it to the
-customer. The signed PDF is attached automatically; the body is a structured quote
+After the PDF is **generated**, the technician can email it to the customer. The PDF is
+attached automatically; the body is a structured quote
 summary.
 
 **Getting the customer's address — two cases:**
-1. **Suggested from the DB:** the `sign` response returns `suggestedCustomerEmail`
+1. **Suggested from the DB:** the `generate` response returns `suggestedCustomerEmail`
    (pulled from the job). If it's non-null, show a **confirm box pre-filled** with it —
    "Send the estimate to `jane@acme.com`?" — with an **editable** field so the tech can
    correct it, then a **Send** button.
@@ -316,7 +314,7 @@ Content-Type: application/json
 { "to": "customer@example.com" }
 ```
 
-`:messageId` is the AI message's `id` (same one you signed).
+`:messageId` is the AI message's `id` (same one you generated the PDF for).
 
 Response:
 
@@ -338,7 +336,7 @@ Response:
 - After a successful send the message metadata gets `quote.emailedTo` + `quote.emailedAt`.
 
 Errors: `400` invalid/missing email · `404` message not found · `409` not a quote turn
-or **not signed yet** (sign before emailing) · `503` email not configured on the server
+or **no PDF yet** (generate it before emailing) · `503` email not configured on the server
 (`SENDGRID_API_KEY` missing).
 
 ---
@@ -403,7 +401,6 @@ export interface EstimateEvent {
   node?: string;         // node: "identify" | "build_quote" | "ask_questions"
   phase?: "start" | "end"; // node: lifecycle phase
   responseKind?: "quote" | "questions" | "message"; // on `done`
-  requiresSignature?: boolean; // on `done` — true on a quote turn (collect signature, then POST …/sign)
   error?: string;
 }
 
@@ -425,7 +422,7 @@ export async function streamEstimate(
     onMessage?: (text: string) => void;
     onQuote?: (quote: any) => void;
     onQuestions?: (questions: any[]) => void;
-    onDone?: (message: any, responseKind: string, requiresSignature: boolean) => void;
+    onDone?: (message: any, responseKind: string) => void;
     onError?: (msg: string) => void;
   },
   signal?: AbortSignal
@@ -467,43 +464,41 @@ export async function streamEstimate(
         case "message":      handlers.onMessage?.(ev.content ?? ""); break;
         case "quote":        handlers.onQuote?.(ev.data); break;
         case "questions":    handlers.onQuestions?.(ev.data?.questions ?? []); break;
-        case "done":         handlers.onDone?.(ev.data, ev.responseKind ?? "message", ev.requiresSignature ?? false); break;
+        case "done":         handlers.onDone?.(ev.data, ev.responseKind ?? "message"); break;
         case "error":        handlers.onError?.(ev.error ?? "Unknown error"); break;
       }
     }
   }
 }
 
-// Confirm the estimate with the customer's signature → returns the signed PDF URL.
-export async function signEstimate(
+// Generate the final quotation PDF → returns the PDF URL.
+export async function generateEstimatePdf(
   baseUrl: string,
   conversationId: string,
-  messageId: string,                 // the AI message id from the `done` frame (done.data.id)
-  signatureDataUrl: string,          // canvas.toDataURL("image/png")
-  signerName?: string
+  messageId: string                  // the AI message id from the `done` frame (done.data.id)
 ): Promise<{
   url: string;            // permanent streaming link (never expires)
   directUrl: string;      // presigned direct-to-S3 link (≤7 days)
   key: string;
   filename: string;
   estimateNumber: string;
-  signedAt: string;
+  generatedAt: string;
   suggestedCustomerEmail: string | null;
 }> {
   const res = await fetch(
-    `${baseUrl}/api/v1/copilot/${conversationId}/estimate/${messageId}/sign`,
+    `${baseUrl}/api/v1/copilot/${conversationId}/estimate/${messageId}/generate`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ signatureBase64: signatureDataUrl, signatureMimeType: "image/png", signerName }),
+      body: JSON.stringify({}),
     }
   );
   const json = await res.json();
-  if (!res.ok || !json.success) throw new Error(json?.error?.message ?? `Sign failed: ${res.status}`);
-  return json.data; // { url, directUrl, key, filename, estimateNumber, signedAt, suggestedCustomerEmail }
+  if (!res.ok || !json.success) throw new Error(json?.error?.message ?? `Generate PDF failed: ${res.status}`);
+  return json.data; // { url, directUrl, key, filename, estimateNumber, generatedAt, suggestedCustomerEmail }
 }
 
-// Email the signed estimate PDF to the customer (call after signing + confirming the address).
+// Email the estimate PDF to the customer (call after generating it + confirming the address).
 export async function sendEstimateEmail(
   baseUrl: string,
   conversationId: string,

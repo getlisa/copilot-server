@@ -2,7 +2,7 @@ import { Router } from "express";
 import { EstimateController } from "../controllers/estimate.controller";
 import { CopilotController } from "../controllers/copilot.controller";
 import { validate } from "../middlewares/validate";
-import { estimateStreamSchema, estimateSignSchema, estimateEmailSchema } from "../schemas/estimate.schema";
+import { estimateStreamSchema, estimateGenerateSchema, estimateEmailSchema } from "../schemas/estimate.schema";
 
 const estimateRoute = Router();
 
@@ -39,20 +39,32 @@ estimateRoute.post(
 );
 
 /**
+ * @route   POST /api/v1/copilot/:conversationId/estimate/:messageId/generate
+ * @desc    Generate the final quotation PDF (stored in S3). Body: {}. Returns a
+ *          permanent download URL. Calling again regenerates and overwrites it.
+ * @access  Public (for demo)
+ */
+estimateRoute.post(
+  "/:conversationId/estimate/:messageId/generate",
+  validate(estimateGenerateSchema),
+  EstimateController.generate
+);
+
+/**
  * @route   POST /api/v1/copilot/:conversationId/estimate/:messageId/sign
- * @desc    Confirm an estimate with the customer's digital signature and generate the
- *          final signed quotation PDF (stored in S3). Returns a downloadable URL.
+ * @desc    DEPRECATED alias of `/generate`, kept until the web client migrates. Any
+ *          signature in the body is ignored.
  * @access  Public (for demo)
  */
 estimateRoute.post(
   "/:conversationId/estimate/:messageId/sign",
-  validate(estimateSignSchema),
+  validate(estimateGenerateSchema),
   EstimateController.sign
 );
 
 /**
  * @route   POST /api/v1/copilot/:conversationId/estimate/:messageId/email
- * @desc    Email the signed quotation PDF to the customer (SendGrid). Body: { to }.
+ * @desc    Email the generated quotation PDF to the customer (SendGrid). Body: { to }.
  * @access  Public (for demo)
  */
 estimateRoute.post(
@@ -63,8 +75,8 @@ estimateRoute.post(
 
 /**
  * @route   GET /api/v1/copilot/:conversationId/estimate/:messageId/preview
- * @desc    Stream an UNSIGNED draft of the quotation PDF (inline) so the customer can
- *          preview the estimate before signing. Generated on the fly; no signature.
+ * @desc    Stream a draft of the quotation PDF (inline) so the customer can preview
+ *          the estimate before generating the PDF. Generated on the fly; never stored.
  * @access  Public (for demo)
  */
 estimateRoute.get(
@@ -74,7 +86,7 @@ estimateRoute.get(
 
 /**
  * @route   GET /api/v1/copilot/:conversationId/estimate/:messageId/pdf
- * @desc    Re-presign + 302-redirect to the downloadable signed quotation PDF.
+ * @desc    Stream the stored quotation PDF from S3 (`?inline=1` to view in-browser).
  * @access  Public (for demo)
  */
 estimateRoute.get(

@@ -48,7 +48,7 @@ export interface FollowUpChip {
 /** Operational CTA that calls an endpoint — NOT a chat message. */
 export type CopilotActionType =
   | "preview_estimate"
-  | "sign_estimate"
+  | "generate_pdf"
   | "email_estimate"
   | "download_pdf";
 export interface ActionItem {
@@ -60,10 +60,10 @@ export interface ActionItem {
   style?: "primary" | "secondary";
 }
 
-/** A quote plus the persisted-turn extras the UI card shows (number, signed state). */
+/** A quote plus the persisted-turn extras the UI card shows (number, PDF state). */
 export type QuoteBlockData = EstimateQuote & {
   estimateNumber?: string | null;
-  signed?: boolean;
+  pdfGeneratedAt?: string;
   pdfKey?: string | null;
 };
 

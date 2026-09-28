@@ -6,7 +6,7 @@ import type { QuoteHeader } from "./quoteHeader";
 /**
  * Render an estimate quotation as a PDF (Buffer), laid out like docs/Estimate.pdf:
  * Clara logo + company block, billing/service addresses, a line-item table, totals,
- * signature, Service Summary and Terms. When a `thumbnail` is supplied it is drawn on
+ * Service Summary and Terms. When a `thumbnail` is supplied it is drawn on
  * the line item flagged `isIdentifiedEquipment` (the photographed equipment).
  */
 
@@ -16,8 +16,6 @@ export interface QuotePdfInput {
   estimateNumber: string;
   date: Date;
   thumbnail?: { buffer: Buffer; mimeType?: string };
-  /** Customer's digital autograph; when present it is drawn in the signature block. */
-  signature?: { buffer: Buffer; mimeType?: string; signerName?: string; signedAt?: Date };
   /** Job photos appended after Terms (the proposal flow's chat-attached photos). */
   photos?: { data: Buffer; width: number; height: number }[];
 }
@@ -56,7 +54,7 @@ function formatDate(d: Date): string {
 }
 
 export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
-  const { quote, header, estimateNumber, date, thumbnail, signature } = input;
+  const { quote, header, estimateNumber, date, thumbnail } = input;
 
   return new Promise<Buffer>((resolve, reject) => {
     try {
@@ -161,7 +159,7 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
       }
 
       // ---- Totals (right-aligned key/value) ----
-      // Gap below the last line item so the totals + signature block don't crowd it.
+      // Gap below the last line item so the totals block doesn't crowd it.
       const subtotal = (quote.materialsServicesSubtotal || 0) + (quote.laborSubtotal || 0);
       y += 28;
       const totalsX = 330;
@@ -180,26 +178,6 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
       else if (quote.taxOther) totalRow("Tax / Other", money(quote.taxOther, quote.currency), true);
       totalRow("Total", money(quote.total, quote.currency), true);
       totalRow("Net Amount", money(quote.total, quote.currency), true);
-
-      // ---- Signature (left, beside totals) ----
-      const sigY = y - 64;
-      const SIG_W = 180;
-      if (signature) {
-        // Draw the customer's autograph just above the signature line.
-        try {
-          doc.image(signature.buffer, MARGIN, sigY - 2, { fit: [SIG_W, 30], align: "center", valign: "bottom" });
-        } catch {
-          /* bad signature image — fall through to the blank line */
-        }
-      }
-      doc.font("Helvetica").fontSize(9).fillColor(MUTED);
-      doc.moveTo(MARGIN, sigY + 30).lineTo(MARGIN + SIG_W, sigY + 30).strokeColor(LINE).lineWidth(1).stroke();
-      doc.text("Customer Signature", MARGIN, sigY + 36, { width: SIG_W, align: "center" });
-      if (signature) {
-        const who = signature.signerName ? signature.signerName : "Signed";
-        const when = signature.signedAt ? ` · ${formatDate(signature.signedAt)}` : "";
-        doc.font("Helvetica").fontSize(7.5).fillColor(MUTED).text(`${who}${when}`, MARGIN, sigY + 48, { width: SIG_W, align: "center" });
-      }
 
       // ---- Service Summary ----
       y += 18;

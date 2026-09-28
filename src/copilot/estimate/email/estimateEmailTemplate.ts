@@ -2,8 +2,8 @@ import type { EstimateQuote } from "../estimateQuoteSchema";
 import type { QuoteHeader } from "../pdf/quoteHeader";
 
 /**
- * Build the customer-facing estimate email (subject + HTML + plain-text) for the signed
- * quotation. The full signed quotation PDF is attached separately by the caller; this
+ * Build the customer-facing estimate email (subject + HTML + plain-text) for the
+ * quotation. The full quotation PDF is attached separately by the caller; this
  * body is a structured summary so the email reads well even before opening the PDF.
  */
 
@@ -86,7 +86,7 @@ export function buildEstimateEmail(input: EstimateEmailInput): BuiltEmail {
     <p style="font-size:14px;">Hi ${esc(customer)},</p>
     <p style="font-size:14px;">
       Thank you — please find your estimate <strong>${esc(estimateNumber)}</strong> for
-      <strong>${esc(quote.title || "the requested work")}</strong> below. The full signed
+      <strong>${esc(quote.title || "the requested work")}</strong> below. The full
       quotation is attached as a PDF.
     </p>
 
@@ -124,7 +124,7 @@ export function buildEstimateEmail(input: EstimateEmailInput): BuiltEmail {
     `Estimate ${estimateNumber} from ${company}`,
     "",
     `Hi ${customer},`,
-    `Thank you. Please find your estimate for "${quote.title || "the requested work"}" below. The full signed quotation is attached as a PDF.`,
+    `Thank you. Please find your estimate for "${quote.title || "the requested work"}" below. The full quotation is attached as a PDF.`,
     "",
     ...quote.lineItems.map((li) => `- ${li.code} ${li.description}: ${money(li.lineTotal, currency)}`),
     "",
