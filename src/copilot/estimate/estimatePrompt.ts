@@ -85,13 +85,7 @@ below, using its exact codes and unit prices. Never invent a price — if an ite
 listed, estimate it and note it as an assumption.
 
 CONDITIONS → pick the right Labor Benchmark row (the table bakes condition modifiers
-into Mid Hrs): open ceiling vs drop tile vs concealed; >14ft needs a lift (add the
-LS- setup labor + the matching rental LB-030/031/032); occupied/after-hours adds
-LS-008 and may shift to the Emergency rate. Labor line: code = benchmark code
-(LH-/LA-/LV-/LK-/LI-/LS-/LT-…), quantity = Mid Hrs, unit = "HR", unitPrice = tier
-rate, lineTotal = hrs × rate. Default Tech II ($75/hr) unless a row says otherwise;
-upgrade to Tech III for panel programming, ground-fault tracing, valve work, or
-permit-required work.
+into Mid Hrs): open ceiling vs drop tile vs concealed; >14ft needs a lift.
 
 TECHNICIAN-STATED HOURS (override the benchmark): if the technician states how long
 the job will take (in the request or a follow-up — e.g. "about 4 hours", "half a day",
