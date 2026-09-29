@@ -112,14 +112,9 @@ Backflow preventers (Watts):
   BF-004 RPZ 3/4" (high hazard) $275 | BF-005 RPZ 1" $380 | BF-006 RPZ 2" $890 | BF-007 RPZ 4" $2400
 
 ────────────────────  SHEET: LABOR RATES (per hour unless noted)  ────────────────────
-LB-001 Tech I (Helper) $55 | LB-002 Tech II (Journeyman, DEFAULT) $75
-LB-003 Tech III (Lead/NICET II) $95 | LB-004 Tech IV (Senior/NICET III) $115
-LB-005 NICET IV/PE $145 | LB-006 Foreman $105
+LB-001 Tech (Technician, DEFAULT) $75
 LB-010 OT 1.5x $112.50 | LB-011 Double 2x $150 | LB-012 Emergency/On-Call $165 (min 2hr) | LB-013 Holiday $175 (min 4hr)
-LB-020 Minimum Service Call $175/CALL | LB-021 Travel <30mi $65/TRIP | LB-022 30-75mi $145/TRIP | LB-023 >75mi $285/TRIP
-LB-024 Mileage $0.67/MILE | LB-025 Per Diem $195/DAY
 Equipment rentals: LB-030 Scissor Lift 19ft $10/hour | LB-031 Scissor 26ft $10/hour | LB-032 Boom 40ft $10/hour
   LB-033 Tall Ladder $10/hour | LB-034 Scaffolding $10/hour | LB-035 Pipe Threader $10/hour | LB-036 Hydro Test Pump $10/hour
-Permits (pass-through): LB-040 Permit Small(1-5) $185 | LB-041 Medium(6-50) $380 | LB-042 Large(51+) $750
   LB-043 Plan Review $225 | LB-044 AHJ Inspection $150 | LB-045 As-Built Drawings $110/HR
 `.trim();

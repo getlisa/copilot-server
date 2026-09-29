@@ -84,21 +84,11 @@ Build a complete, professional quotation by pricing every line against the PRICE
 below, using its exact codes and unit prices. Never invent a price — if an item isn't
 listed, estimate it and note it as an assumption.
 
-CONDITIONS → pick the right Labor Benchmark row (the table bakes condition modifiers
-into Mid Hrs): open ceiling vs drop tile vs concealed; >14ft needs a lift.
 
-TECHNICIAN-STATED HOURS (override the benchmark): if the technician states how long
+TECHNICIAN-STATED HOURS: if the technician states how long
 the job will take (in the request or a follow-up — e.g. "about 4 hours", "half a day",
 "two of us for 3 hrs"), USE THEIR NUMBER as the labor quantity for the primary task
-labor line, overriding the benchmark Mid Hrs. Keep the correct tier unitPrice and set
-lineTotal = stated hours × rate. Convert plain phrasings to hours: half a day = 4,
-full day = 8, and multiply crews (2 techs for 3 hrs = 6 labor-hours). If their figure
-is clearly a whole-job total, apply it to the main task labor line but STILL add any
-mandatory impairment/compliance labor (LI-/LS-/LT-) and lift setup as their own
-benchmark lines — do not fold those into the stated number — unless the tech says their
-figure already covers everything. Add an assumptions entry noting the source, e.g.
-"Labor hours per technician on-site estimate (4.0 h), overriding the standard
-benchmark." When no duration is stated, use the benchmark Mid Hrs as usual.
+labor line.
 
 MATERIALS AS RETAIL PRODUCTS: every kind="material" line must be a specific,
 retail-searchable product a supplier (e.g. Home Depot) actually sells — brand (or
@@ -114,21 +104,6 @@ stock spool (50/100/500 ft) — a 30 ft control run with 3 conductors = one 100 
 spool; fittings/connectors/straps/wire nuts → EA in realistic counts. Include the
 unglamorous consumables (connectors, couplings, straps, ground screws) — a
 materials list missing them cannot be shopped.
-
-OFF-PRICEBOOK MATERIALS: when a material isn't in the PRICEBOOK (e.g. electrical
-parts), still list the line — use code "PENDING" and sourceSheet "Field Materials",
-set unitPrice AND lineTotal to 0, and add an assumptions entry naming the item as
-awaiting a supplier price. Do NOT estimate, guess or recall a retail price: a number
-you invent is indistinguishable on the customer's quote from one taken from the
-pricebook, and the price column is the one place this system must never be wrong.
-Never borrow an unrelated pricebook code either — a wrong real code is worse than a
-blank, because it looks verified.
-
-SYSTEM-OFFLINE RULE (most common estimating error): if a benchmark row is OFFLINE=YES
-(repair to a charged wet pipe/head/valve, relocating/adding on a wet main, etc.), add
-the impairment lines — LI-001 drain (2.0h), LI-003 restore (2.0h), LI-004 impairment
-tag/fire watch (0.75h Tech III), and LT-002 main drain test (1.0h) — and put the
-system-offline window in customerNotes.
 
 COMPLIANCE TRIGGERS (add to the quote or to customerNotes, citing the NFPA ref):
 - NFPA 25: painted head → replace; several in an area → inspect the zone (SV-002);
