@@ -1,7 +1,7 @@
 import PDFDocument from "pdfkit";
 import type { EstimateQuote } from "../estimateQuoteSchema";
-import { CLARA_LOGO_PNG_BASE64 } from "./claraLogo";
 import type { QuoteHeader } from "./quoteHeader";
+import { loadLogo } from "../../estimating/proposalDocx";
 
 /**
  * Render an estimate quotation as a PDF (Buffer), laid out like docs/Estimate.pdf:
@@ -53,8 +53,10 @@ function formatDate(d: Date): string {
   return `${date} ${time}`;
 }
 
-export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
+export async function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
   const { quote, header, estimateNumber, date, thumbnail } = input;
+  // Company logo when one is uploaded; the Clara mark only when none is configured.
+  const logo = await loadLogo(header.logoUrl);
 
   return new Promise<Buffer>((resolve, reject) => {
     try {
@@ -66,7 +68,7 @@ export function buildQuotePdf(input: QuotePdfInput): Promise<Buffer> {
 
       // ---- Header: logo (left) + company block (right) ----
       try {
-        doc.image(Buffer.from(CLARA_LOGO_PNG_BASE64, "base64"), MARGIN, 36, { width: 180 });
+        doc.image(logo.data, MARGIN, 36, { fit: [180, 72] });
       } catch {
         doc.fontSize(20).fillColor(RED).font("Helvetica-Bold").text("CLARA AI", MARGIN, 44);
       }

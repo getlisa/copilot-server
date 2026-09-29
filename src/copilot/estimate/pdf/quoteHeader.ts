@@ -4,7 +4,7 @@ import logger from "../../../lib/logger";
 /**
  * Header fields for the quotation PDF, assembled best-effort from the job / company /
  * technician behind the conversation. Falls back to Clara-branded defaults so the PDF
- * always renders even when the records are sparse. (The logo is always the Clara logo.)
+ * always renders even when the records are sparse. (Logo: the company upload, else the Clara mark.)
  */
 export interface QuoteHeader {
   companyName: string;
