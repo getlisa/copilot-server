@@ -12,10 +12,9 @@ import {
   VerticalAlign,
   WidthType,
 } from "docx";
-import { CLARA_LOGO_PNG_BASE64 } from "../estimate/pdf/claraLogo";
 import type { EstimateQuote } from "../estimate/estimateQuoteSchema";
 import { buildQuotePdf } from "../estimate/pdf/quotePdf";
-import { imageDims, loadPhotos, type ProposalInput } from "./proposalDocx";
+import { imageDims, loadLogo, loadPhotos, type ProposalInput } from "./proposalDocx";
 import { validateProposalBlocks } from "./proposalTemplate";
 import { renderHtmlTemplate } from "./html/htmlTemplate";
 import { htmlTemplateData, loadHtmlTemplate } from "./html/htmlProposal";
@@ -151,10 +150,13 @@ export async function buildEstimateStyleDocx(input: ProposalInput): Promise<Buff
   const { header } = input;
   const estimateNumber = newEstimateNumber();
 
-  const logoBuf = Buffer.from(CLARA_LOGO_PNG_BASE64, "base64");
-  const dims = imageDims(logoBuf, "png");
-  const logoW = 180;
-  const logoH = dims ? Math.round((dims.height / dims.width) * logoW) : 54;
+  // Company logo when one is uploaded; the Clara mark only when none is configured.
+  const logo = await loadLogo(header.logoUrl);
+  const dims = imageDims(logo.data, logo.type);
+  // Fit inside 180x72 so a tall company logo does not blow out the letterhead row.
+  const scale = dims ? Math.min(180 / dims.width, 72 / dims.height) : 180 / 600;
+  const logoW = dims ? Math.round(dims.width * scale) : 180;
+  const logoH = dims ? Math.round(dims.height * scale) : 54;
 
   // Header: logo left, company block right.
   const headerTable = new Table({
@@ -167,7 +169,7 @@ export async function buildEstimateStyleDocx(input: ProposalInput): Promise<Buff
             [
               new Paragraph({
                 children: [
-                  new ImageRun({ data: logoBuf, type: "png", transformation: { width: logoW, height: logoH } }),
+                  new ImageRun({ data: logo.data, type: logo.type, transformation: { width: logoW, height: logoH } }),
                 ],
               }),
             ],
