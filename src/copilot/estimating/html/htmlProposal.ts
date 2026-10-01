@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "fs";
 import path from "path";
 import logger from "../../../lib/logger";
 import { payable, taxRowAmount, taxRowLabel } from "../proposalTotals";
-import { amountInWords, loadCompanyLogo, type ProposalInput } from "../proposalDocx";
+import { amountInWords, loadLogo, type ProposalInput } from "../proposalDocx";
 import { renderHtmlTemplate, type HtmlTemplateData } from "./htmlTemplate";
 
 /**
@@ -41,9 +41,9 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
   // The logo has to be INLINED, not linked. companies.logo_url is usually a bare S3 key
   // (company registration stores one when no CDN is configured), so putting it straight in
   // a src= yields a relative URL that resolves to nothing and prints a broken image. Every
-  // other renderer already resolves it through loadCompanyLogo; this does the same and
+  // other renderer already resolves it through loadLogo; this does the same and
   // embeds the bytes, which also means the page needs no network access to show a logo.
-  const logo = await loadCompanyLogo(header.logoUrl ?? null);
+  const logo = await loadLogo(header.logoUrl ?? null);
   const logoUrl = logo
     ? `data:image/${logo.type === "jpg" ? "jpeg" : "png"};base64,${logo.data.toString("base64")}`
     : "";

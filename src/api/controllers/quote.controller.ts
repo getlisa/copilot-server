@@ -43,6 +43,9 @@ import { resolveProposalTemplate } from "../../lib/proposalTemplates";
 import { seedQuoteFromZtTicket, ztWelcomeMessage } from "../../lib/ztIngest";
 import { ztConnectionFor, ztConnected } from "../../lib/zt";
 import { syncQuoteToZt } from "../../lib/ztEstimate";
+import { seedQuoteFromUptickTask, uptickWelcomeMessage } from "../../lib/uptickIngest";
+import { uptickConnectionFor, uptickConnected } from "../../lib/uptick";
+import { syncQuoteToUptick } from "../../lib/uptickEstimate";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
 import { EstimateTurn } from "../../copilot/estimate/estimateService";
@@ -463,6 +466,19 @@ export class QuoteController {
         success: false,
         error: { status: 404, message: "That ZenTrades job is not synced for this company" },
       });
+    // Uptick: the same seed contract (customer adopted by Uptick client id; no tax snapshot, so
+    // the company default applies; no template match, so the agent asks). One CRM per quote.
+    const uptickTaskId =
+      !ztTicketId && typeof req.body?.uptickTaskId === "string" && req.body.uptickTaskId.trim()
+        ? req.body.uptickTaskId.trim()
+        : null;
+    const uptickSeed = uptickTaskId ? await seedQuoteFromUptickTask(user.companyId, uptickTaskId) : null;
+    if (uptickTaskId && !uptickSeed)
+      return res.status(404).json({
+        success: false,
+        error: { status: 404, message: "That Uptick job is not synced for this company" },
+      });
+    const crmSeed = ztSeed ?? uptickSeed;
     const quote = await prisma.quote.create({
       data: {
         conversationId: conversation.id,
@@ -470,21 +486,22 @@ export class QuoteController {
         companyId: user.companyId,
         templateId: activeTemplate?.id ?? null,
         markupPercent: config?.default_markup_percent ?? 0,
-        salesTaxId: ztSeed?.salesTaxId ?? tax?.id ?? null,
-        taxRatePercent: ztSeed?.taxRatePercent ?? tax?.ratePercent ?? null,
-        ...(ztSeed
+        salesTaxId: crmSeed?.salesTaxId ?? tax?.id ?? null,
+        taxRatePercent: crmSeed?.taxRatePercent ?? tax?.ratePercent ?? null,
+        ...(crmSeed
           ? {
-              ztTicketId,
-              customerId: ztSeed.customerId,
-              customerName: ztSeed.customerName,
-              customerAddress: ztSeed.customerAddress,
-              customerPhone: ztSeed.customerPhone,
+              ztTicketId: ztSeed ? ztTicketId : null,
+              uptickTaskId: uptickSeed ? uptickTaskId : null,
+              customerId: crmSeed.customerId,
+              customerName: crmSeed.customerName,
+              customerAddress: crmSeed.customerAddress,
+              customerPhone: crmSeed.customerPhone,
               // Template auto-picked from the ticket's jobType. templateAsked latches ONLY on
               // a match (asking again would second-guess a stated choice); with no confident
               // match the latch stays open so the agent asks on its first turn through the
               // normal question UI — tappable template names, like every other ask.
-              ...(ztSeed.proposalTemplateId != null
-                ? { proposalTemplateId: ztSeed.proposalTemplateId, templateAsked: true }
+              ...(crmSeed.proposalTemplateId != null
+                ? { proposalTemplateId: crmSeed.proposalTemplateId, templateAsked: true }
                 : {}),
             }
           : {}),
@@ -494,19 +511,22 @@ export class QuoteController {
     // A ZT-seeded chat opens already talking: the job + open deficiencies as the first AI
     // message, so the technician reacts instead of dictating. Best-effort — a failed welcome
     // must not fail the creation.
-    if (ztSeed && ztTicketId) {
-      let welcome = await ztWelcomeMessage(user.companyId, ztTicketId).catch(() => null);
+    if (crmSeed) {
+      let welcome = await (ztTicketId
+        ? ztWelcomeMessage(user.companyId, ztTicketId)
+        : uptickWelcomeMessage(user.companyId, uptickTaskId!)
+      ).catch(() => null);
       // An auto-picked template is stated, never silent — with the alternatives listed so
       // switching is one sentence. With no confident match, the welcome says nothing about
       // templates: the agent asks on its first turn through the question UI (TEMPLATE_PROMPT),
       // with the template names as tappable options — the same way it asks everything else.
-      if (welcome && ztSeed.proposalTemplateName) {
-        const others = ztSeed.templateChoices
-          .filter((t) => t.id !== ztSeed.proposalTemplateId)
+      if (welcome && crmSeed.proposalTemplateName) {
+        const others = crmSeed.templateChoices
+          .filter((t) => t.id !== crmSeed.proposalTemplateId)
           .map((t) => `“${t.name}”`);
         welcome +=
-          `\n\n_Using your “${ztSeed.proposalTemplateName}” proposal template` +
-          (ztSeed.jobType ? ` (matched to job type “${ztSeed.jobType}”)` : "") +
+          `\n\n_Using your “${crmSeed.proposalTemplateName}” proposal template` +
+          (crmSeed.jobType ? ` (matched to job type “${crmSeed.jobType}”)` : "") +
           (others.length ? `. Also available: ${others.join(", ")} — just say the word to switch._` : `._`);
       }
       if (welcome) {
@@ -515,7 +535,7 @@ export class QuoteController {
             data: { conversationId: conversation.id, senderType: "AI", content: welcome },
           })
           .catch((err) =>
-            logger.warn("ZT welcome message failed", {
+            logger.warn("CRM welcome message failed", {
               quoteId: quote.id,
               error: err instanceof Error ? err.message : String(err),
             })
@@ -1388,6 +1408,7 @@ export class QuoteController {
     }
     QuoteController.postToQboInBackground(updated);
     QuoteController.postToZtInBackground(updated);
+    QuoteController.postToUptickInBackground(updated);
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });
   }
 
@@ -1504,6 +1525,89 @@ export class QuoteController {
           })
         );
     });
+  }
+
+  /** Fire-and-forget Uptick post after completion — the ZenTrades sibling, same rules. */
+  private static postToUptickInBackground(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
+    void (async () => {
+      if (!quote.uptickTaskId) return;
+      const conn = await uptickConnectionFor(quote.companyId);
+      if (!uptickConnected(conn)) return;
+      const dto = await quoteDtoWithProducts(quote);
+      const pdf = await QuoteController.proposalPdfFor(quote);
+      const result = await syncQuoteToUptick(conn, quote, dto, pdf);
+      await prisma.quote.update({
+        where: { id: quote.id },
+        data: {
+          uptickQuoteId: result.uptickQuoteId,
+          ...(result.uptickQuoteRef ? { uptickQuoteRef: result.uptickQuoteRef } : {}),
+          uptickSyncedAt: new Date(),
+          uptickSyncError: null,
+        },
+      });
+    })().catch(async (e) => {
+      const message = e instanceof Error ? e.message : String(e);
+      logger.error("Uptick quote sync failed", { quoteId: quote.id, error: message });
+      await prisma.quote
+        .update({ where: { id: quote.id }, data: { uptickSyncError: message.slice(0, 500) } })
+        .catch((err) =>
+          logger.error("Could not record the Uptick sync failure on the quote", {
+            quoteId: quote.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        );
+    });
+  }
+
+  /** The proposal PDF for a CRM post, best-effort: a render failure posts without it. */
+  private static async proposalPdfFor(
+    quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>
+  ): Promise<{ fileName: string; buffer: Buffer } | null> {
+    try {
+      const { input, proposalTemplate } = await buildProposalParts(quote);
+      const buffer = await renderProposalPdf(input, proposalTemplate);
+      return { fileName: `proposal-${quote.id.slice(0, 8)}.pdf`, buffer };
+    } catch (e) {
+      logger.warn("CRM post: proposal PDF render failed; posting without attachment", {
+        quoteId: quote.id,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return null;
+    }
+  }
+
+  /** POST /api/v1/quotes/:quoteId/uptick — retry / push a completed estimate to Uptick. */
+  static async postQuoteToUptick(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    if (quote.status !== "COMPLETED") return fail(res, 409, "Only a completed quote can be sent");
+    if (!quote.uptickTaskId) return fail(res, 409, "This quote is not linked to an Uptick job");
+    const conn = await uptickConnectionFor(user.companyId);
+    if (!uptickConnected(conn)) return fail(res, 409, "Uptick is not connected");
+    try {
+      const dto = await quoteDtoWithProducts(quote);
+      const pdf = await QuoteController.proposalPdfFor(quote);
+      const result = await syncQuoteToUptick(conn, quote, dto, pdf);
+      const updated = await prisma.quote.update({
+        where: { id: quote.id },
+        data: {
+          uptickQuoteId: result.uptickQuoteId,
+          ...(result.uptickQuoteRef ? { uptickQuoteRef: result.uptickQuoteRef } : {}),
+          uptickSyncedAt: new Date(),
+          uptickSyncError: null,
+        },
+        include: quoteDtoInclude,
+      });
+      res.json({ success: true, data: await quoteDtoWithProducts(updated) });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      await prisma.quote
+        .update({ where: { id: quote.id }, data: { uptickSyncError: message.slice(0, 500) } })
+        .catch(() => undefined);
+      return fail(res, 502, message);
+    }
   }
 
   /**

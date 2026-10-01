@@ -61,6 +61,27 @@ companyRoute.delete(
   CompanyController.disconnectZtForCompany
 );
 
+// Uptick — same shape as ZenTrades (login-based, no OAuth redirect: their password grant).
+companyRoute.post(
+  "/connections/uptick/connect",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.connectUptickForCompany
+);
+companyRoute.post(
+  "/connections/uptick/sync",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.syncUptickForCompany
+);
+companyRoute.get("/connections/uptick/jobs", authMiddleware, CompanyController.listUptickJobsForCompany);
+companyRoute.delete(
+  "/connections/uptick",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.disconnectUptickForCompany
+);
+
 // Reference data. The sync is a settings write, so admin-only. The reads a technician's estimate
 // screen needs — the customer picker — are open to every role, for the same reason the item list
 // is: gating them empties the picker with no error anywhere.

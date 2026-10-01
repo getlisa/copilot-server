@@ -25,6 +25,7 @@ quoteRoute.post("/:quoteId/images", imageUpload.array("images"), QuoteController
 quoteRoute.delete("/:quoteId/images/:imageId", QuoteController.removeImage);
 quoteRoute.post("/:quoteId/complete", QuoteController.complete);
 quoteRoute.post("/:quoteId/zt", QuoteController.postQuoteToZt);
+quoteRoute.post("/:quoteId/uptick", QuoteController.postQuoteToUptick);
 quoteRoute.post("/:quoteId/reopen", QuoteController.reopen);
 quoteRoute.get("/:quoteId/docx", QuoteController.downloadDocx);
 quoteRoute.get("/:quoteId/proposal-docx", QuoteController.downloadProposalDocx);

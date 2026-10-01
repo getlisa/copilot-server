@@ -446,6 +446,7 @@ model Customer {
   quotes Quote[]
   qb     CustomerQb[]
   zt     CustomerZt[]
+  uptick CustomerUptick[]
 
   /// Names are unique per company **and parent**, mirroring QuickBooks' actual DisplayName rule.
   ///
@@ -835,6 +836,89 @@ model ZtConnection {
   @@schema("public")
 }
 
+/// One Uptick connection per company — the zt_connections pattern. Uptick is OAuth2 password
+/// grant against the client's own workspace (<tenant>.onuptick.com/api/oauth2/token/) with an
+/// app Client ID/secret the client mints in Control Panel > Uptick API, so the sealed blob keeps
+/// {clientId, clientSecret, username, password, accessToken, refreshToken}. Tokens live ~10h;
+/// refresh_token first, password re-grant as the fallback.
+model UptickConnection {
+  id                   Int       @id @default(autoincrement())
+  companyId            Int       @unique @map("company_id")
+  /// https://<tenant>.onuptick.com — host only, per company (every client has their own).
+  baseUrl              String    @map("base_url") @db.VarChar(200)
+  /// AES-256-GCM blob, sealed under UPTICK_TOKEN_KEY (uptick.ts).
+  encryptedAuth        String?   @map("encrypted_auth")
+  accessTokenExpiresAt DateTime? @map("access_token_expires_at")
+  lastSyncAt           DateTime? @map("last_sync_at")
+  lastSyncError        String?   @map("last_sync_error")
+  syncStartedAt        DateTime? @map("sync_started_at")
+  refreshLockUntil     DateTime? @map("refresh_lock_until")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@map("uptick_connections")
+  @@schema("public")
+}
+
+/// Raw Uptick tasks (jobs) — the read store for the picker and the chat seeding, exactly like
+/// zt_jobs_raw. rawPayload is the flattened JSON:API resource (id + attributes + relationships)
+/// with the included property/client flattened in as `property` / `client`.
+model UptickTaskRaw {
+  id              Int       @id @default(autoincrement())
+  companyId       Int       @map("company_id")
+  uptickTaskId    String    @map("uptick_task_id") @db.VarChar(64)
+  ref             String?   @db.VarChar(64)
+  status          String?   @db.VarChar(64)
+  uptickUpdatedAt DateTime? @map("uptick_updated_at")
+  rawPayload      Json      @map("raw_payload")
+  contentHash     String    @map("content_hash") @db.VarChar(64)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@unique([companyId, uptickTaskId])
+  @@index([companyId, uptickUpdatedAt(sort: Desc)])
+  @@map("uptick_tasks_raw")
+  @@schema("public")
+}
+
+/// Raw Uptick remarks (defects). A remark hangs off a task and/or a property (defect quotes are
+/// per property in Uptick), so both ids are projected out for the open-remark lookup.
+model UptickRemarkRaw {
+  id               Int      @id @default(autoincrement())
+  companyId        Int      @map("company_id")
+  uptickRemarkId   String   @map("uptick_remark_id") @db.VarChar(64)
+  uptickTaskId     String?  @map("uptick_task_id") @db.VarChar(64)
+  uptickPropertyId String?  @map("uptick_property_id") @db.VarChar(64)
+  status           String?  @db.VarChar(64)
+  rawPayload       Json     @map("raw_payload")
+  contentHash      String   @map("content_hash") @db.VarChar(64)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@unique([companyId, uptickRemarkId])
+  @@index([companyId, uptickTaskId])
+  @@index([companyId, uptickPropertyId])
+  @@map("uptick_remarks_raw")
+  @@schema("public")
+}
+
+/// CLARA customer ↔ Uptick client id (the customer_zt pattern).
+model CustomerUptick {
+  id             Int      @id @default(autoincrement())
+  customerId     Int      @map("customer_id")
+  companyId      Int      @map("company_id")
+  uptickClientId String   @map("uptick_client_id") @db.VarChar(64)
+  raw            Json?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, uptickClientId])
+  @@index([customerId])
+  @@map("customer_uptick")
+  @@schema("public")
+}
+
 model QboConnection {
   id                   Int       @id @default(autoincrement())
   companyId            Int       @unique @map("company_id")
@@ -993,6 +1077,13 @@ model Quote {
   ztBillingMetaDataId String?       @map("zt_billing_meta_data_id") @db.VarChar(64)
   ztSyncedAt          DateTime?     @map("zt_synced_at")
   ztSyncError         String?       @map("zt_sync_error")
+  /// Uptick linkage (Estimates-tab flow, the zt_* pattern): the originating task, and the
+  /// defect quote it posted as. uptickQuoteRef is Uptick's human-facing quote number.
+  uptickTaskId        String?       @map("uptick_task_id") @db.VarChar(64)
+  uptickQuoteId       String?       @map("uptick_quote_id") @db.VarChar(64)
+  uptickQuoteRef      String?       @map("uptick_quote_ref") @db.VarChar(64)
+  uptickSyncedAt      DateTime?     @map("uptick_synced_at")
+  uptickSyncError     String?       @map("uptick_sync_error")
   /// QBO Estimate id once posted (companies with a QboConnection). Posted at completion;
   /// re-completing after a reopen UPDATES this same estimate in place (QBO PRD US6).
   qboEstimateId     String?         @map("qbo_estimate_id")
@@ -1261,6 +1352,7 @@ enum PricebookSource {
   MANUAL
   HOME_DEPOT
   ZENTRADES
+  UPTICK
 
   @@map("pricebook_source")
   @@schema("public")
