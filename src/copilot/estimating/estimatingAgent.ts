@@ -8,6 +8,7 @@ import { quoteIsDraft, updateDraftLineItem, updateDraftQuote } from "./draftWrit
 import { loadCompanyPricing } from "./companyPricing";
 import { listProposalTemplateChoices } from "../../lib/proposalTemplates";
 import { ztChatContext } from "../../lib/ztIngest";
+import { uptickChatContext } from "../../lib/uptickIngest";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
 
 /**
@@ -427,15 +428,18 @@ export async function runEstimatingTurn(opts: {
     prisma.laborRate.findMany({ where: { companyId: opts.companyId } }),
     prisma.quote.findUnique({
       where: { id: opts.quoteId },
-      select: { laborAsked: true, templateAsked: true, ztTicketId: true },
+      select: { laborAsked: true, templateAsked: true, ztTicketId: true, uptickTaskId: true },
     }),
     listProposalTemplateChoices(opts.companyId),
   ]);
   // ZT-seeded quotes carry their job's description + open deficiencies into every turn, so the
   // agent's first reply reflects the actual scope instead of asking what the job is.
+  // Uptick-seeded quotes ride the same slot: one CRM job per quote, same prompt contract.
   const ztContext = quoteRow?.ztTicketId
     ? await ztChatContext(opts.companyId, quoteRow.ztTicketId)
-    : null;
+    : quoteRow?.uptickTaskId
+      ? await uptickChatContext(opts.companyId, quoteRow.uptickTaskId)
+      : null;
   const laborRatesLite: LaborRateLite[] = laborRates.map((r) => ({
     id: r.id,
     name: r.name,

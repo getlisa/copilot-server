@@ -199,6 +199,12 @@ export interface QuoteDto {
   ztEstimateId: string | null;
   ztSyncedAt: string | null;
   ztSyncError: string | null;
+  /** Uptick linkage + sync state — same semantics again. */
+  uptickTaskId: string | null;
+  uptickQuoteId: string | null;
+  uptickQuoteRef: string | null;
+  uptickSyncedAt: string | null;
+  uptickSyncError: string | null;
   blockingFlagCount: number;
 }
 
@@ -405,6 +411,11 @@ export type QuoteInput = {
   ztEstimateId?: string | null;
   ztSyncedAt?: Date | null;
   ztSyncError?: string | null;
+  uptickTaskId?: string | null;
+  uptickQuoteId?: string | null;
+  uptickQuoteRef?: string | null;
+  uptickSyncedAt?: Date | null;
+  uptickSyncError?: string | null;
   lineItems: LineItemInput[];
 };
 
@@ -523,6 +534,11 @@ export function toQuoteDto(
     ztEstimateId: quote.ztEstimateId ?? null,
     ztSyncedAt: quote.ztSyncedAt?.toISOString() ?? null,
     ztSyncError: quote.ztSyncError ?? null,
+    uptickTaskId: quote.uptickTaskId ?? null,
+    uptickQuoteId: quote.uptickQuoteId ?? null,
+    uptickQuoteRef: quote.uptickQuoteRef ?? null,
+    uptickSyncedAt: quote.uptickSyncedAt?.toISOString() ?? null,
+    uptickSyncError: quote.uptickSyncError ?? null,
     blockingFlagCount: dtos.filter((d) =>
       d.flags.some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
     ).length,
