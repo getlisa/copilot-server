@@ -133,6 +133,23 @@ few hundred MB of RAM briefly, so check the ECS task's memory reservation before
 Without Chromium the server still runs: `htmlPdfAvailable()` is false and HTML templates fall
 back to the block renderer.
 
+## Pending migration: Uptick integration — phase13 (2026-10-02)
+
+`docs/sql/phase13.sql` — four new tables (`uptick_connections`, `uptick_tasks_raw`,
+`uptick_remarks_raw`, `customer_uptick`), five additive `quotes` columns (`uptick_*`), and
+`ALTER TYPE pricebook_source ADD VALUE 'UPTICK'`. The zt_* shapes, split by provider. Ownership
+and grants hand over to `app_user` inside a `DO` block that is a no-op where the role does not
+exist (dev Supabase). Applied to dev Supabase 2026-09-29; run on PROD Aurora in CloudShell per
+docs/CLOUDSHELL_PROD_SQL.md BEFORE copilot-server PR #48 deploys. Verify:
+
+```sql
+SELECT table_name FROM information_schema.tables
+WHERE table_name IN ('uptick_connections','uptick_tasks_raw','uptick_remarks_raw','customer_uptick');  -- 4 rows
+SELECT column_name FROM information_schema.columns WHERE table_name='quotes' AND column_name LIKE 'uptick%';  -- 5 rows
+SELECT enumlabel FROM pg_enum e JOIN pg_type t ON t.oid=e.enumtypid WHERE t.typname='pricebook_source';  -- includes UPTICK
+SELECT tableowner FROM pg_tables WHERE tablename LIKE 'uptick%';  -- app_user
+```
+
 ## Pending migration: uploaded HTML documents — phase11 (2026-09-17)
 
 `docs/sql/phase11.sql` — one additive column, `proposal_templates.html`, holding a document

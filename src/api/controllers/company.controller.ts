@@ -27,6 +27,13 @@ import {
   ZtSyncRunningError,
   ZT_SYNC_CLAIM_STALE_MS,
 } from "../../lib/ztIngest";
+import { isUptickConfigured, uptickConnected, uptickConnectionFor, connectUptick, disconnectUptick } from "../../lib/uptick";
+import {
+  syncUptickData,
+  listUptickJobs,
+  UptickSyncRunningError,
+  UPTICK_SYNC_CLAIM_STALE_MS,
+} from "../../lib/uptickIngest";
 import {
   syncQboReferenceData,
   QboSyncBusyError,
@@ -200,9 +207,10 @@ export class CompanyController {
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const [conn, ztConn] = await Promise.all([
+    const [conn, ztConn, upConn] = await Promise.all([
       qboConnectionFor(companyId),
       ztConnectionFor(companyId),
+      uptickConnectionFor(companyId),
     ]);
     res.json({
       success: true,
@@ -246,6 +254,17 @@ export class CompanyController {
           syncRunning:
             !!ztConn?.syncStartedAt &&
             Date.now() - ztConn.syncStartedAt.getTime() < ZT_SYNC_CLAIM_STALE_MS,
+        },
+        uptick: {
+          configured: isUptickConfigured(),
+          connected: uptickConnected(upConn),
+          /** The workspace bound (https://<tenant>.onuptick.com) — WHICH account, not just that one is. */
+          baseUrl: upConn?.baseUrl ?? null,
+          lastSyncAt: upConn?.lastSyncAt?.toISOString() ?? null,
+          lastSyncError: upConn?.lastSyncError ?? null,
+          syncRunning:
+            !!upConn?.syncStartedAt &&
+            Date.now() - upConn.syncStartedAt.getTime() < UPTICK_SYNC_CLAIM_STALE_MS,
         },
       },
     });
@@ -343,6 +362,86 @@ export class CompanyController {
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
     res.json({ success: true, data: { progress: ztSyncProgressFor(companyId) } });
+  }
+
+  /**
+   * POST /api/v1/companies/connections/uptick/connect — connect Uptick with the workspace URL,
+   * the OAuth app keys (Control Panel > Uptick API) and a user login. Validated by an actual
+   * token grant before anything is stored; a rejected grant stores nothing.
+   */
+  static async connectUptickForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    if (!isUptickConfigured())
+      return res.status(503).json({
+        success: false,
+        error: { status: 503, message: "Uptick is not configured on this server" },
+      });
+    const field = (k: string) => (typeof req.body?.[k] === "string" ? (req.body[k] as string).trim() : "");
+    const input = {
+      baseUrl: field("baseUrl"),
+      clientId: field("clientId"),
+      clientSecret: typeof req.body?.clientSecret === "string" ? req.body.clientSecret : "",
+      username: field("username"),
+      password: typeof req.body?.password === "string" ? req.body.password : "",
+    };
+    if (!input.baseUrl || !input.clientId || !input.clientSecret || !input.username || !input.password)
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "Workspace URL, Client ID, Client secret, username and password are all required" },
+      });
+    try {
+      const conn = await connectUptick(companyId, input);
+      res.json({ success: true, data: { connected: true, baseUrl: conn.baseUrl } });
+    } catch (err) {
+      logger.warn("Uptick connect failed", { companyId, error: err instanceof Error ? err.message : String(err) });
+      return res.status(502).json({
+        success: false,
+        error: { status: 502, message: err instanceof Error ? err.message : "Uptick login failed" },
+      });
+    }
+  }
+
+  /** POST /api/v1/companies/connections/uptick/sync — pull tasks and remarks. Admin-only. */
+  static async syncUptickForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    try {
+      res.json({ success: true, data: await syncUptickData(companyId) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Uptick sync failed";
+      const status = err instanceof UptickSyncRunningError ? 409 : 502;
+      return res.status(status).json({ success: false, error: { status, message } });
+    }
+  }
+
+  /** GET /api/v1/companies/connections/uptick/jobs?q= — the picker's rows, any role. */
+  static async listUptickJobsForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const q = typeof req.query.q === "string" ? req.query.q : undefined;
+    res.json({ success: true, data: await listUptickJobs(companyId, q) });
+  }
+
+  /** DELETE /api/v1/companies/connections/uptick */
+  static async disconnectUptickForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    await disconnectUptick(companyId);
+    logger.info("Uptick disconnected", { companyId });
+    res.json({ success: true });
   }
 
   /** DELETE /api/v1/companies/connections/zt — self-serve disconnect, same shape as QBO. */

@@ -184,6 +184,11 @@ export function validateDocxTemplate(templateBuffer: Buffer): string | null {
     ztEstimateId: null,
     ztSyncedAt: null,
     ztSyncError: null,
+    uptickTaskId: null,
+    uptickQuoteId: null,
+    uptickQuoteRef: null,
+    uptickSyncedAt: null,
+    uptickSyncError: null,
     blockingFlagCount: 0,
   };
   const branding: InvoiceBranding = {
