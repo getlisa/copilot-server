@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from "fs";
 import path from "path";
 import logger from "../../../lib/logger";
-import { payable, taxRowAmount, taxRowLabel } from "../proposalTotals";
+import { optionPayable, payable, taxRowAmount, taxRowLabel } from "../proposalTotals";
 import { amountInWords, loadLogo, type ProposalInput } from "../proposalDocx";
 import { renderHtmlTemplate, type HtmlTemplateData } from "./htmlTemplate";
 
@@ -113,7 +113,7 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
     ? `data:image/${logo.type === "jpg" ? "jpeg" : "png"};base64,${logo.data.toString("base64")}`
     : "";
   const taxLabel = taxRowLabel(input);
-  const lineItems = (input.lineItems ?? []).map((l) => ({
+  const row = (l: NonNullable<ProposalInput["lineItems"]>[number]) => ({
     activity: l.code ?? l.description,
     description: l.code ? l.description : "",
     /**
@@ -134,8 +134,30 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
     // The "T" a QuickBooks estimate prints beside a taxable amount.
     taxFlag: taxLabel && l.taxable !== false ? "T" : "",
     isLabor: l.isLabor === true,
+  });
+  const all = input.lineItems ?? [];
+  // `lineItems` stays every line (existing templates list them flat). Templates that print
+  // mutually-exclusive options as their own priced sections use baseLineItems + options:
+  // each option carries its own lines and a combined (base + option) payable, never summed.
+  const lineItems = all.map(row);
+  const options = (input.optionTotals ?? []).map((opt) => ({
+    name: opt.name,
+    lineItems: all.filter((l) => l.optionGroup === opt.name).map(row),
+    subtotal: money(opt.combinedTotal),
+    // Repeated per option: a section nested inside {{#options}} only sees its own item and the
+    // list's scope, so a top-level {{taxLabel}} would not resolve from inside {{#taxed}} here.
+    taxed: !!taxLabel,
+    taxLabel: taxLabel ?? "",
+    taxAmount: money(opt.taxAmount),
+    total: money(optionPayable(input, opt)),
   }));
+  const baseLineItems = all.filter((l) => !l.optionGroup).map(row);
   return {
+    hasOptions: options.length > 0,
+    options,
+    baseLineItems,
+    // A quote made only of options has no base table to print and nothing to add to each one.
+    hasBase: baseLineItems.length > 0,
     companyName: header.companyName ?? "",
     companyAddress: header.companyAddress ?? "",
     companyCityStateZip: "",
