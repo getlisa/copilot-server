@@ -168,6 +168,7 @@ const SCOPED = new Set([
   ".", "text", "title", "bullets",
   "activity", "description", "item", "qty", "hours", "rate", "amount", "taxFlag", "isLabor",
   "n", "label", "percent",
+  "name", // {{#options}}: the option group name
   "location", "deficiency", "severity", "action",
 ]);
 
