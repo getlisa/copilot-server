@@ -1,0 +1,402 @@
+<!doctype html>
+<!--
+  Pierce Electric — estimate, authored from their own Housecall-style document
+  (pierce electric estimate.pdf, #841). Theirs to change: the sans face, the grey header bar,
+  the boxed estimate panel, the trailing quality / warranty / exclusions copy.
+
+  Print-first: US Letter, half-inch margins, so browser PDF and server print agree.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Estimate {{proposalNumber}}</title>
+    <style>
+      /* Page foot in the print margin (Chromium 131+ page-margin boxes), so it never
+         overlaps body text and carries "1 of N" the way the source document does. */
+      @page {
+        size: letter;
+        margin: 0.5in 0.5in 0.7in;
+        @bottom-left {
+          content: "{{companyName}} | {{licenseNumber}}";
+          font-family: Helvetica, Arial, sans-serif;
+          font-size: 7.5pt;
+          color: #777;
+        }
+        @bottom-center {
+          content: "{{website}}";
+          font-family: Helvetica, Arial, sans-serif;
+          font-size: 7.5pt;
+          color: #777;
+        }
+        @bottom-right {
+          content: counter(page) " of " counter(pages);
+          font-family: Helvetica, Arial, sans-serif;
+          font-size: 7.5pt;
+          color: #777;
+        }
+      }
+      html {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      body {
+        margin: 0;
+        font-family: Helvetica, Arial, "Liberation Sans", sans-serif;
+        font-size: 9.5pt;
+        line-height: 1.4;
+        color: #222;
+      }
+      .sheet {
+        width: 7.5in;
+        margin: 0 auto;
+      }
+      .muted {
+        color: #777;
+      }
+
+      /* ---------- letterhead ----------
+         Logo + company on the left; the boxed estimate panel, service address and
+         contact block stacked on the right. */
+      .head {
+        display: grid;
+        grid-template-columns: 1fr 3.3in;
+        column-gap: 40px;
+        margin-bottom: 28px;
+      }
+      .logo img {
+        max-width: 1.6in;
+        max-height: 1.1in;
+        display: block;
+      }
+      .company {
+        margin-top: 10px;
+      }
+      .company .name {
+        font-weight: bold;
+        font-size: 12pt;
+        margin-bottom: 8px;
+      }
+      .company .contact {
+        margin-top: 24px;
+        color: #777;
+      }
+      .customer {
+        margin-top: 10px;
+      }
+
+      .estbox {
+        border: 1px solid #999;
+        padding: 2px 8px;
+        margin-bottom: 26px;
+      }
+      .estbox .row {
+        display: flex;
+        justify-content: space-between;
+        padding: 2px 0;
+        font-size: 8.5pt;
+      }
+      .estbox .row + .row {
+        border-top: 1px solid #ddd;
+      }
+      .side .label {
+        font-size: 7.5pt;
+        letter-spacing: 0.04em;
+        color: #777;
+        text-transform: uppercase;
+        border-bottom: 1px solid #ddd;
+        padding-bottom: 4px;
+        margin: 14px 0 6px;
+      }
+      .side .label:first-child {
+        margin-top: 0;
+      }
+      .notes {
+        white-space: pre-line;
+      }
+
+      /* ---------- estimate ---------- */
+      h1 {
+        font-size: 10.5pt;
+        font-weight: normal;
+        margin: 0 0 14px;
+      }
+      h2 {
+        font-size: 12pt;
+        margin: 0 0 14px;
+      }
+      table.items {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      table.items thead th {
+        background: #b5b5b5;
+        color: #fff;
+        font-weight: normal;
+        text-align: left;
+        padding: 6px 8px;
+        font-size: 9pt;
+      }
+      table.items thead th.num,
+      table.items tbody td.num {
+        text-align: right;
+        white-space: nowrap;
+      }
+      table.items tbody td {
+        padding: 8px 8px 4px;
+        vertical-align: top;
+      }
+      table.items tbody td.num {
+        color: #777;
+      }
+      table.items tbody td.num.amount {
+        color: #222;
+      }
+      table.items tbody td.desc {
+        font-size: 8.5pt;
+        padding-top: 0;
+        text-align: justify;
+      }
+      table.items tbody tr.last td {
+        border-bottom: 1px solid #ccc;
+        padding-bottom: 10px;
+      }
+
+      /* ---------- scope ---------- */
+      .scope {
+        padding: 8px 8px 0;
+        font-size: 8.5pt;
+      }
+      .scope .section {
+        margin-top: 6px;
+      }
+      .scope .section .title {
+        font-weight: bold;
+      }
+      .scope ul {
+        margin: 2px 0 0;
+        padding-left: 16px;
+      }
+      .scope .end {
+        border-bottom: 1px solid #ccc;
+        margin-top: 10px;
+      }
+
+      /* ---------- totals ---------- */
+      .subtotal {
+        text-align: right;
+        margin: 10px 0 0;
+        font-size: 9pt;
+      }
+      .tax {
+        text-align: right;
+        margin: 4px 0 0;
+        font-size: 9pt;
+      }
+      .total {
+        display: flex;
+        justify-content: flex-end;
+        gap: 2.2in;
+        font-size: 14pt;
+        font-weight: bold;
+        margin: 44px 0 36px;
+      }
+
+      /* ---------- trailing copy ---------- */
+      .copy {
+        font-size: 8.5pt;
+        padding: 0 8px;
+      }
+      .copy h3 {
+        font-size: 8.5pt;
+        margin: 14px 0 6px;
+      }
+      .copy p {
+        margin: 0 0 8px;
+      }
+      .copy ul {
+        margin: 0 0 8px;
+        padding-left: 0;
+        list-style: none;
+      }
+      .copy .thanks {
+        margin-top: 24px;
+      }
+
+    </style>
+  </head>
+  <body>
+    <div class="sheet">
+      <div class="head">
+        <div>
+          <div class="logo"><img src="{{logoUrl}}" alt="{{companyName}}" /></div>
+          <div class="company">
+            <div class="name">{{companyName}}</div>
+            <div class="customer">
+              <div>{{customerName}}</div>
+              <div class="notes">{{customerAddress}}</div>
+            </div>
+            <div class="contact">
+              <div>{{customerPhone}}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="side">
+          <div class="estbox">
+            <div class="row"><span>ESTIMATE</span><span>#{{proposalNumber}}</span></div>
+            <div class="row"><span>ESTIMATE DATE</span><span>{{date}}</span></div>
+          </div>
+          <div class="label">Service address</div>
+          <div class="notes">{{facility}}</div>
+          <div class="label">Contact us</div>
+          <div class="notes">{{companyAddress}}</div>
+          <div>{{companyCityStateZip}}</div>
+          <div class="muted" style="margin-top: 10px">{{companyPhone}}</div>
+          <div class="muted">{{companyEmail}}</div>
+        </div>
+      </div>
+
+      <h1>ESTIMATE</h1>
+      <h2>Professional Electrical Services - {{projectTitle}}</h2>
+
+      {{#hasBase}}
+      <table class="items">
+        <thead>
+          <tr>
+            <th>Services</th>
+            <th class="num">qty</th>
+            <th class="num">unit price</th>
+            <th class="num">amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{#baseLineItems}}
+          <tr>
+            <td>{{activity}}</td>
+            <td class="num">{{qty}}</td>
+            <td class="num">{{rate}}</td>
+            <td class="num amount">{{amount}}{{taxFlag}}</td>
+          </tr>
+          <tr class="last">
+            <td class="desc" colspan="4">{{description}}</td>
+          </tr>
+          {{/baseLineItems}}
+        </tbody>
+      </table>
+      {{#hasOptions}}
+      <div class="subtotal">Base scope subtotal: {{subtotal}}</div>
+      {{/hasOptions}}
+      {{/hasBase}}
+
+      {{#hasOptions}}
+      <!-- Mutually-exclusive options, each priced as its own section the way the source
+           document prints "Option 1 / Option 2": lines, then the total the customer pays
+           when choosing it (base scope + that option). Options are never added together. -->
+      {{#options}}
+      <h2 class="option">{{name}}</h2>
+      <table class="items">
+        <thead>
+          <tr>
+            <th>Services</th>
+            <th class="num">qty</th>
+            <th class="num">unit price</th>
+            <th class="num">amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{#lineItems}}
+          <tr>
+            <td>{{activity}}</td>
+            <td class="num">{{qty}}</td>
+            <td class="num">{{rate}}</td>
+            <td class="num amount">{{amount}}{{taxFlag}}</td>
+          </tr>
+          <tr class="last">
+            <td class="desc" colspan="4">{{description}}</td>
+          </tr>
+          {{/lineItems}}
+        </tbody>
+      </table>
+      <div class="subtotal">{{#hasBase}}Base scope + {{name}} subtotal{{/hasBase}}{{^hasBase}}Services subtotal{{/hasBase}}: {{subtotal}}</div>
+      {{#taxed}}
+      <div class="tax">{{taxLabel}}: {{taxAmount}}</div>
+      {{/taxed}}
+      <div class="total"><span>Total</span><span>{{total}}</span></div>
+      {{/options}}
+      <p class="muted" style="font-size: 8.5pt; margin: -20px 0 24px">
+        Only one option will be selected and performed; option totals are alternatives and are
+        never combined with each other.
+      </p>
+      {{/hasOptions}}
+
+      <div class="scope">
+        {{#scopeSections}}
+        <div class="section">
+          <div class="title">{{title}}</div>
+          <ul>
+            {{#bullets}}
+            <li>{{text}}</li>
+            {{/bullets}}
+          </ul>
+        </div>
+        {{/scopeSections}}
+        <div class="notes">{{notes}}</div>
+        <div class="end"></div>
+      </div>
+
+      {{^hasOptions}}
+      <div class="subtotal">Services subtotal: {{subtotal}}</div>
+      {{#taxed}}
+      <div class="tax">{{taxLabel}}: {{taxAmount}}</div>
+      {{/taxed}}
+      <div class="total"><span>Total</span><span>{{total}}</span></div>
+      {{/hasOptions}}
+
+      <div class="copy">
+        <h3>The Pierce Electric Difference</h3>
+        <p>Every project includes our quality assurance process:</p>
+        <ul>
+          <li>Professional installation by licensed, background-checked electricians.</li>
+          <li>Premium materials from trusted manufacturers.</li>
+          <li>All electrical terminations torqued to manufacturer specifications.</li>
+          <li>Circuits clearly identified and labeled for future servicing.</li>
+          <li>Functional testing of the completed installation.</li>
+          <li>Jobsite cleaned upon completion.</li>
+          <li>
+            A final walkthrough with the homeowner to review the completed work, answer
+            questions, and ensure complete satisfaction before the project is considered
+            complete.
+          </li>
+        </ul>
+
+        <h3>Warranty</h3>
+        <p>Pierce Electric stands behind the quality of our workmanship.</p>
+        <ul>
+          <li>Lifetime Warranty on Labor</li>
+          <li>Manufacturer's Warranty on all materials and equipment furnished by Pierce Electric</li>
+        </ul>
+        <p>Should a workmanship-related issue arise, we will return to correct it at no additional labor cost.</p>
+
+        <h3>Exclusions</h3>
+        <ul>
+          <li>No costs are included for engineering, design, construction drawings, permits, permit fees, or inspections unless specifically identified.</li>
+          <li>No costs are included for upgrades or repairs to existing branch circuit wiring unless specifically identified.</li>
+          <li>No costs are included for concealed conditions or additional repairs discovered after work begins.</li>
+          <li>No costs are included for blocking, framing, drywall repair, patching, texture, or painting.</li>
+          <li>No costs are included for relocation of owner's furniture or personal property required to access the work area.</li>
+          <li>No costs are included for overtime or shift labor. All work will be performed during normal working hours.</li>
+        </ul>
+        <p>Note: Visa and Master cards are acceptable for payment, 3.5% service fee added for processing.</p>
+
+        <p class="thanks">
+          We would be so grateful for your google review, please help us show up at the top of
+          the search results, here's the link:
+        </p>
+        <p>https://g.page/r/CYWecKtUVDozEAI/review</p>
+        <p><b>THANK YOU SO MUCH!!</b></p>
+        <p class="notes">{{legalFooter}}</p>
+      </div>
+
+    </div>
+  </body>
+</html>
