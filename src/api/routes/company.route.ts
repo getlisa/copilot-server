@@ -82,6 +82,27 @@ companyRoute.delete(
   CompanyController.disconnectUptickForCompany
 );
 
+// ServiceTrade — login-based like ZenTrades (session token, no OAuth redirect).
+companyRoute.post(
+  "/connections/servicetrade/connect",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.connectServicetradeForCompany
+);
+companyRoute.post(
+  "/connections/servicetrade/sync",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.syncServicetradeForCompany
+);
+companyRoute.get("/connections/servicetrade/jobs", authMiddleware, CompanyController.listServicetradeJobsForCompany);
+companyRoute.delete(
+  "/connections/servicetrade",
+  authMiddleware,
+  requireAdmin,
+  CompanyController.disconnectServicetradeForCompany
+);
+
 // Reference data. The sync is a settings write, so admin-only. The reads a technician's estimate
 // screen needs — the customer picker — are open to every role, for the same reason the item list
 // is: gating them empties the picker with no error anywhere.

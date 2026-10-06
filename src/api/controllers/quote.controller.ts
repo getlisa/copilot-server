@@ -44,6 +44,9 @@ import { syncQuoteToZt } from "../../lib/ztEstimate";
 import { seedQuoteFromUptickTask, uptickWelcomeMessage } from "../../lib/uptickIngest";
 import { uptickConnectionFor, uptickConnected } from "../../lib/uptick";
 import { syncQuoteToUptick } from "../../lib/uptickEstimate";
+import { seedQuoteFromServicetradeJob, servicetradeWelcomeMessage } from "../../lib/servicetradeIngest";
+import { servicetradeConnectionFor, servicetradeConnected } from "../../lib/servicetrade";
+import { syncQuoteToServicetrade } from "../../lib/servicetradeEstimate";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
 import { EstimateTurn } from "../../copilot/estimate/estimateService";
@@ -476,7 +479,19 @@ export class QuoteController {
         success: false,
         error: { status: 404, message: "That Uptick job is not synced for this company" },
       });
-    const crmSeed = ztSeed ?? uptickSeed;
+    // ServiceTrade: same seed contract again (customer by ServiceTrade customer id; tax from the
+    // job location's tax group; template matched to the job type). One CRM per quote.
+    const stJobId =
+      !ztTicketId && !uptickTaskId && typeof req.body?.stJobId === "string" && req.body.stJobId.trim()
+        ? req.body.stJobId.trim()
+        : null;
+    const stSeed = stJobId ? await seedQuoteFromServicetradeJob(user.companyId, stJobId) : null;
+    if (stJobId && !stSeed)
+      return res.status(404).json({
+        success: false,
+        error: { status: 404, message: "That ServiceTrade job is not synced for this company" },
+      });
+    const crmSeed = ztSeed ?? uptickSeed ?? stSeed;
     const quote = await prisma.quote.create({
       data: {
         conversationId: conversation.id,
@@ -490,6 +505,7 @@ export class QuoteController {
           ? {
               ztTicketId: ztSeed ? ztTicketId : null,
               uptickTaskId: uptickSeed ? uptickTaskId : null,
+              stJobId: stSeed ? stJobId : null,
               customerId: crmSeed.customerId,
               customerName: crmSeed.customerName,
               customerAddress: crmSeed.customerAddress,
@@ -512,7 +528,9 @@ export class QuoteController {
     if (crmSeed) {
       let welcome = await (ztTicketId
         ? ztWelcomeMessage(user.companyId, ztTicketId)
-        : uptickWelcomeMessage(user.companyId, uptickTaskId!)
+        : uptickTaskId
+          ? uptickWelcomeMessage(user.companyId, uptickTaskId)
+          : servicetradeWelcomeMessage(user.companyId, stJobId!)
       ).catch(() => null);
       // An auto-picked template is stated, never silent — with the alternatives listed so
       // switching is one sentence. With no confident match, the welcome says nothing about
@@ -1383,6 +1401,7 @@ export class QuoteController {
     QuoteController.postToQboInBackground(updated);
     QuoteController.postToZtInBackground(updated);
     QuoteController.postToUptickInBackground(updated);
+    QuoteController.postToServicetradeInBackground(updated);
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });
   }
 
@@ -1531,6 +1550,72 @@ export class QuoteController {
           })
         );
     });
+  }
+
+  /** Fire-and-forget ServiceTrade post after completion — the Uptick sibling, same rules. */
+  private static postToServicetradeInBackground(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
+    void (async () => {
+      if (!quote.stJobId) return;
+      const conn = await servicetradeConnectionFor(quote.companyId);
+      if (!servicetradeConnected(conn)) return;
+      const dto = await quoteDtoWithProducts(quote);
+      const pdf = await QuoteController.proposalPdfFor(quote);
+      const result = await syncQuoteToServicetrade(conn, quote, dto, pdf);
+      await prisma.quote.update({
+        where: { id: quote.id },
+        data: {
+          stQuoteId: result.stQuoteId,
+          ...(result.stQuoteRef ? { stQuoteRef: result.stQuoteRef } : {}),
+          stSyncedAt: new Date(),
+          stSyncError: null,
+        },
+      });
+    })().catch(async (e) => {
+      const message = e instanceof Error ? e.message : String(e);
+      logger.error("ServiceTrade quote sync failed", { quoteId: quote.id, error: message });
+      await prisma.quote
+        .update({ where: { id: quote.id }, data: { stSyncError: message.slice(0, 500) } })
+        .catch((err) =>
+          logger.error("Could not record the ServiceTrade sync failure on the quote", {
+            quoteId: quote.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        );
+    });
+  }
+
+  /** POST /api/v1/quotes/:quoteId/servicetrade — retry / push a completed estimate to ServiceTrade. */
+  static async postQuoteToServicetrade(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    if (quote.status !== "COMPLETED") return fail(res, 409, "Only a completed quote can be sent");
+    if (!quote.stJobId) return fail(res, 409, "This quote is not linked to a ServiceTrade job");
+    const conn = await servicetradeConnectionFor(user.companyId);
+    if (!servicetradeConnected(conn)) return fail(res, 409, "ServiceTrade is not connected");
+    try {
+      const dto = await quoteDtoWithProducts(quote);
+      const pdf = await QuoteController.proposalPdfFor(quote);
+      const result = await syncQuoteToServicetrade(conn, quote, dto, pdf);
+      const updated = await prisma.quote.update({
+        where: { id: quote.id },
+        data: {
+          stQuoteId: result.stQuoteId,
+          ...(result.stQuoteRef ? { stQuoteRef: result.stQuoteRef } : {}),
+          stSyncedAt: new Date(),
+          stSyncError: null,
+        },
+        include: quoteDtoInclude,
+      });
+      res.json({ success: true, data: await quoteDtoWithProducts(updated) });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      await prisma.quote
+        .update({ where: { id: quote.id }, data: { stSyncError: message.slice(0, 500) } })
+        .catch(() => undefined);
+      return fail(res, 502, message);
+    }
   }
 
   /** The proposal PDF for a CRM post, best-effort: a render failure posts without it. */

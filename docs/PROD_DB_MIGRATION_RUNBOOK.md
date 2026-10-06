@@ -133,6 +133,22 @@ few hundred MB of RAM briefly, so check the ECS task's memory reservation before
 Without Chromium the server still runs: `htmlPdfAvailable()` is false and HTML templates fall
 back to the block renderer.
 
+## Pending migration: ServiceTrade integration — phase14 (2026-10-06)
+
+`docs/sql/phase14.sql` — five new tables (`servicetrade_connections`, `servicetrade_jobs_raw`,
+`servicetrade_deficiencies_raw`, `customer_servicetrade`, `sales_tax_servicetrade`), five additive
+`quotes` columns (`st_*`), and `ALTER TYPE pricebook_source ADD VALUE 'SERVICETRADE'`. The phase13
+shapes, split by provider. Run via `bash docs/sql/apply-phase14.sh` (the phase13 ECS runner, same
+caveats) BEFORE the ServiceTrade image deploys. Verify:
+
+```sql
+SELECT table_name FROM information_schema.tables
+WHERE table_name IN ('servicetrade_connections','servicetrade_jobs_raw','servicetrade_deficiencies_raw','customer_servicetrade','sales_tax_servicetrade');  -- 5 rows
+SELECT column_name FROM information_schema.columns WHERE table_name='quotes' AND column_name LIKE 'st\_%';  -- 5 rows
+SELECT enumlabel FROM pg_enum e JOIN pg_type t ON t.oid=e.enumtypid WHERE t.typname='pricebook_source';  -- includes SERVICETRADE
+SELECT tableowner FROM pg_tables WHERE tablename LIKE 'servicetrade%';  -- app_user
+```
+
 ## Pending migration: Uptick integration — phase13 (2026-10-02)
 
 `docs/sql/phase13.sql` — four new tables (`uptick_connections`, `uptick_tasks_raw`,

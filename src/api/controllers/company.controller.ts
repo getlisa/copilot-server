@@ -29,6 +29,19 @@ import {
 } from "../../lib/ztIngest";
 import { isUptickConfigured, uptickConnected, uptickConnectionFor, connectUptick, disconnectUptick } from "../../lib/uptick";
 import {
+  isServicetradeConfigured,
+  servicetradeConnected,
+  servicetradeConnectionFor,
+  connectServicetrade,
+  disconnectServicetrade,
+} from "../../lib/servicetrade";
+import {
+  syncServicetradeData,
+  listServicetradeJobs,
+  ServicetradeSyncRunningError,
+  SERVICETRADE_SYNC_CLAIM_STALE_MS,
+} from "../../lib/servicetradeIngest";
+import {
   syncUptickData,
   listUptickJobs,
   UptickSyncRunningError,
@@ -207,10 +220,11 @@ export class CompanyController {
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    const [conn, ztConn, upConn] = await Promise.all([
+    const [conn, ztConn, upConn, stConn] = await Promise.all([
       qboConnectionFor(companyId),
       ztConnectionFor(companyId),
       uptickConnectionFor(companyId),
+      servicetradeConnectionFor(companyId),
     ]);
     res.json({
       success: true,
@@ -265,6 +279,17 @@ export class CompanyController {
           syncRunning:
             !!upConn?.syncStartedAt &&
             Date.now() - upConn.syncStartedAt.getTime() < UPTICK_SYNC_CLAIM_STALE_MS,
+        },
+        servicetrade: {
+          configured: isServicetradeConfigured(),
+          connected: servicetradeConnected(stConn),
+          /** The ServiceTrade company (vendor) NAME — which account is bound. */
+          stCompanyName: stConn?.stCompanyName ?? null,
+          lastSyncAt: stConn?.lastSyncAt?.toISOString() ?? null,
+          lastSyncError: stConn?.lastSyncError ?? null,
+          syncRunning:
+            !!stConn?.syncStartedAt &&
+            Date.now() - stConn.syncStartedAt.getTime() < SERVICETRADE_SYNC_CLAIM_STALE_MS,
         },
       },
     });
@@ -441,6 +466,80 @@ export class CompanyController {
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
     await disconnectUptick(companyId);
     logger.info("Uptick disconnected", { companyId });
+    res.json({ success: true });
+  }
+
+  /**
+   * POST /api/v1/companies/connections/servicetrade/connect — connect ServiceTrade with a login
+   * (username + password; their API is session-based, no OAuth). Validated by an actual login
+   * before anything is stored; a rejected login stores nothing.
+   */
+  static async connectServicetradeForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    if (!isServicetradeConfigured())
+      return res.status(503).json({
+        success: false,
+        error: { status: 503, message: "ServiceTrade is not configured on this server" },
+      });
+    const username = typeof req.body?.username === "string" ? req.body.username.trim() : "";
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    if (!username || !password)
+      return res.status(400).json({
+        success: false,
+        error: { status: 400, message: "Username and password are required" },
+      });
+    try {
+      const conn = await connectServicetrade(companyId, username, password);
+      res.json({ success: true, data: { connected: true, stCompanyName: conn.stCompanyName } });
+    } catch (err) {
+      logger.warn("ServiceTrade connect failed", { companyId, error: err instanceof Error ? err.message : String(err) });
+      return res.status(502).json({
+        success: false,
+        error: { status: 502, message: err instanceof Error ? err.message : "ServiceTrade login failed" },
+      });
+    }
+  }
+
+  /** POST /api/v1/companies/connections/servicetrade/sync — jobs, deficiencies, items, tax. Admin-only. */
+  static async syncServicetradeForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    try {
+      res.json({ success: true, data: await syncServicetradeData(companyId) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "ServiceTrade sync failed";
+      const status = err instanceof ServicetradeSyncRunningError ? 409 : 502;
+      return res.status(status).json({ success: false, error: { status, message } });
+    }
+  }
+
+  /** GET /api/v1/companies/connections/servicetrade/jobs?q= — the picker's rows, any role. */
+  static async listServicetradeJobsForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const q = typeof req.query.q === "string" ? req.query.q : undefined;
+    res.json({ success: true, data: await listServicetradeJobs(companyId, q) });
+  }
+
+  /** DELETE /api/v1/companies/connections/servicetrade */
+  static async disconnectServicetradeForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    await disconnectServicetrade(companyId);
+    logger.info("ServiceTrade disconnected", { companyId });
     res.json({ success: true });
   }
 
