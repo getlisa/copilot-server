@@ -247,7 +247,7 @@
             <div class="row"><span>ESTIMATE DATE</span><span>{{date}}</span></div>
           </div>
           <div class="label">Service address</div>
-          <div class="notes">{{facility}}</div>
+          <div class="notes">{{serviceAddress}}{{^serviceAddress}}{{customerAddress}}{{/serviceAddress}}</div>
           <div class="label">Contact us</div>
           <div class="notes">{{companyAddress}}</div>
           <div>{{companyCityStateZip}}</div>
