@@ -447,6 +447,7 @@ model Customer {
   qb     CustomerQb[]
   zt     CustomerZt[]
   uptick CustomerUptick[]
+  servicetrade CustomerServicetrade[]
 
   /// Names are unique per company **and parent**, mirroring QuickBooks' actual DisplayName rule.
   ///
@@ -548,6 +549,7 @@ model SalesTax {
 
   qb     SalesTaxQb[]
   zt     SalesTaxZt[]
+  servicetrade SalesTaxServicetrade[]
   quotes Quote[]
 
   @@unique([companyId, name])
@@ -919,6 +921,109 @@ model CustomerUptick {
   @@schema("public")
 }
 
+/// One ServiceTrade connection per company — the zt_connections pattern. ServiceTrade auth is
+/// a username/password login (POST /auth) that returns a long-lived session token sent back as
+/// the PHPSESSID cookie; no OAuth, no refresh token. The sealed blob keeps the login so an
+/// expired session re-logs in on its own.
+model ServicetradeConnection {
+  id                   Int       @id @default(autoincrement())
+  companyId            Int       @unique @map("company_id")
+  /// AES-256-GCM blob of { username, password, authToken }, sealed under SERVICETRADE_TOKEN_KEY.
+  encryptedAuth        String?   @map("encrypted_auth")
+  /// The ServiceTrade company (vendor) id from the login — what every quote posts as vendorId.
+  stCompanyId          String?   @map("st_company_id")
+  stCompanyName        String?   @map("st_company_name") @db.VarChar(200)
+  stUserId             String?   @map("st_user_id")
+  /// Null = assumed valid (ServiceTrade sessions are long-lived); epoch 0 = forced re-login.
+  accessTokenExpiresAt DateTime? @map("access_token_expires_at")
+  lastSyncAt           DateTime? @map("last_sync_at")
+  lastSyncError        String?   @map("last_sync_error")
+  syncStartedAt        DateTime? @map("sync_started_at")
+  refreshLockUntil     DateTime? @map("refresh_lock_until")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@map("servicetrade_connections")
+  @@schema("public")
+}
+
+/// Raw ServiceTrade jobs — the picker/seed read store, exactly like zt_jobs_raw. The complete
+/// job object (customer, location + address + taxable, vendor, serviceRequests, type) lives in
+/// rawPayload; the write-back builds its quote from it.
+model ServicetradeJobRaw {
+  id          Int       @id @default(autoincrement())
+  companyId   Int       @map("company_id")
+  stJobId     String    @map("st_job_id") @db.VarChar(64)
+  number      String?   @db.VarChar(64)
+  status      String?   @db.VarChar(64)
+  stUpdatedAt DateTime? @map("st_updated_at")
+  rawPayload  Json      @map("raw_payload")
+  contentHash String    @map("content_hash") @db.VarChar(64)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@unique([companyId, stJobId])
+  @@index([companyId, stUpdatedAt(sort: Desc)])
+  @@map("servicetrade_jobs_raw")
+  @@schema("public")
+}
+
+/// Raw ServiceTrade deficiencies. A deficiency belongs to a location and names the most recent
+/// job that reported it, so both ids are projected out for the open-deficiency lookup.
+model ServicetradeDeficiencyRaw {
+  id             Int      @id @default(autoincrement())
+  companyId      Int      @map("company_id")
+  stDeficiencyId String   @map("st_deficiency_id") @db.VarChar(64)
+  stJobId        String?  @map("st_job_id") @db.VarChar(64)
+  stLocationId   String?  @map("st_location_id") @db.VarChar(64)
+  status         String?  @db.VarChar(32)
+  resolution     String?  @db.VarChar(32)
+  rawPayload     Json     @map("raw_payload")
+  contentHash    String   @map("content_hash") @db.VarChar(64)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([companyId, stDeficiencyId])
+  @@index([companyId, stJobId])
+  @@index([companyId, stLocationId])
+  @@map("servicetrade_deficiencies_raw")
+  @@schema("public")
+}
+
+/// CLARA customer ↔ ServiceTrade customer company id (the customer_zt pattern).
+model CustomerServicetrade {
+  id           Int      @id @default(autoincrement())
+  customerId   Int      @map("customer_id")
+  companyId    Int      @map("company_id")
+  stCustomerId String   @map("st_customer_id") @db.VarChar(64)
+  raw          Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, stCustomerId])
+  @@index([customerId])
+  @@map("customer_servicetrade")
+  @@schema("public")
+}
+
+/// sales_tax row ↔ ServiceTrade tax group id (the sales_tax_zt pattern). The group's
+/// combinedRate (a decimal, 0.085) is stored on sales_tax as a percent (8.5).
+model SalesTaxServicetrade {
+  id           Int      @id @default(autoincrement())
+  salesTaxId   Int      @map("sales_tax_id")
+  companyId    Int      @map("company_id")
+  stTaxGroupId String   @map("st_tax_group_id") @db.VarChar(64)
+  raw          Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+  salesTax     SalesTax @relation(fields: [salesTaxId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, stTaxGroupId])
+  @@index([salesTaxId])
+  @@map("sales_tax_servicetrade")
+  @@schema("public")
+}
+
 model QboConnection {
   id                   Int       @id @default(autoincrement())
   companyId            Int       @unique @map("company_id")
@@ -1084,6 +1189,13 @@ model Quote {
   uptickQuoteRef      String?       @map("uptick_quote_ref") @db.VarChar(64)
   uptickSyncedAt      DateTime?     @map("uptick_synced_at")
   uptickSyncError     String?       @map("uptick_sync_error")
+  /// ServiceTrade linkage (Estimates-tab flow, the zt_* pattern): the originating job, and the
+  /// quote it posted as. stQuoteRef is ServiceTrade's human-facing refNumber.
+  stJobId             String?       @map("st_job_id") @db.VarChar(64)
+  stQuoteId           String?       @map("st_quote_id") @db.VarChar(64)
+  stQuoteRef          String?       @map("st_quote_ref") @db.VarChar(64)
+  stSyncedAt          DateTime?     @map("st_synced_at")
+  stSyncError         String?       @map("st_sync_error")
   /// QBO Estimate id once posted (companies with a QboConnection). Posted at completion;
   /// re-completing after a reopen UPDATES this same estimate in place (QBO PRD US6).
   qboEstimateId     String?         @map("qbo_estimate_id")
@@ -1353,6 +1465,7 @@ enum PricebookSource {
   HOME_DEPOT
   ZENTRADES
   UPTICK
+  SERVICETRADE
 
   @@map("pricebook_source")
   @@schema("public")

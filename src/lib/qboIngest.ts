@@ -4,6 +4,7 @@ import prisma from "./prisma";
 import logger from "./logger";
 import { queryAll, qboFetch, qboConnectionFor, qboConnected } from "./qbo";
 import { ztConnectionFor, ztConnected } from "./zt";
+import { servicetradeConnectionFor, servicetradeConnected } from "./servicetrade";
 import { parseAddress, toBillAddr, fromBillAddr } from "./addressParse";
 import { UserFacingError } from "./clientError";
 
@@ -881,16 +882,19 @@ export function qboIncomeAccounts(companyId: number) {
  */
 export async function taxSourceIsExternal(companyId: number): Promise<{
   external: boolean;
-  via: "quickbooks" | "zentrades" | null;
+  via: "quickbooks" | "zentrades" | "servicetrade" | null;
 }> {
-  const [conn, ztConn] = await Promise.all([
+  const [conn, ztConn, stConn] = await Promise.all([
     qboConnectionFor(companyId),
     ztConnectionFor(companyId),
+    servicetradeConnectionFor(companyId),
   ]);
   if (qboConnected(conn)) return { external: true, via: "quickbooks" };
   // A ZenTrades connection is an external tax source the same way: its zone rates (source
   // ZENTRADES, ingested at quote seeding) are usable and MANUAL rates stop applying.
   if (ztConnected(ztConn)) return { external: true, via: "zentrades" };
+  // ServiceTrade likewise: its tax groups land as SERVICETRADE rates.
+  if (servicetradeConnected(stConn)) return { external: true, via: "servicetrade" };
   return { external: false, via: null };
 }
 
@@ -923,7 +927,7 @@ export async function taxEnabledFor(companyId: number): Promise<{
   enabled: boolean;
   stored: boolean;
   enforced: boolean;
-  enforcedBy: "quickbooks" | "zentrades" | "crm" | null;
+  enforcedBy: "quickbooks" | "zentrades" | "servicetrade" | "crm" | null;
 }> {
   const [config, { external, via }, crm] = await Promise.all([
     prisma.company_configs.findUnique({

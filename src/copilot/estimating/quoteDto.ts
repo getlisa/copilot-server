@@ -205,6 +205,12 @@ export interface QuoteDto {
   uptickQuoteRef: string | null;
   uptickSyncedAt: string | null;
   uptickSyncError: string | null;
+  /** ServiceTrade linkage + sync state — same semantics again. */
+  stJobId: string | null;
+  stQuoteId: string | null;
+  stQuoteRef: string | null;
+  stSyncedAt: string | null;
+  stSyncError: string | null;
   blockingFlagCount: number;
 }
 
@@ -416,6 +422,11 @@ export type QuoteInput = {
   uptickQuoteRef?: string | null;
   uptickSyncedAt?: Date | null;
   uptickSyncError?: string | null;
+  stJobId?: string | null;
+  stQuoteId?: string | null;
+  stQuoteRef?: string | null;
+  stSyncedAt?: Date | null;
+  stSyncError?: string | null;
   lineItems: LineItemInput[];
 };
 
@@ -539,6 +550,11 @@ export function toQuoteDto(
     uptickQuoteRef: quote.uptickQuoteRef ?? null,
     uptickSyncedAt: quote.uptickSyncedAt?.toISOString() ?? null,
     uptickSyncError: quote.uptickSyncError ?? null,
+    stJobId: quote.stJobId ?? null,
+    stQuoteId: quote.stQuoteId ?? null,
+    stQuoteRef: quote.stQuoteRef ?? null,
+    stSyncedAt: quote.stSyncedAt?.toISOString() ?? null,
+    stSyncError: quote.stSyncError ?? null,
     blockingFlagCount: dtos.filter((d) =>
       d.flags.some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
     ).length,
