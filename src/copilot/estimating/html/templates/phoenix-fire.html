@@ -1,0 +1,306 @@
+<!doctype html>
+<!--
+  Phoenix Fire Protection — estimate, authored from their QuickBooks Desktop documents
+  (State Foods Sanger_Fire Sprinkler.pdf, King Buffet_Detection line replacement.pdf).
+
+  The item-table header repeats on every printed page (a <thead>: Chromium reprints it at each
+  page break); the letterhead prints once — their QuickBooks form repeats it, but a nested
+  <thead> does not repaginate in Chromium, and the alternative (position: fixed) overlaps body
+  text on middle pages. Serif body, sans headings, full-rule table, totals stacked bottom-right,
+  disclaimer bottom-left, "Page N" centred in the margin.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Estimate {{proposalNumber}}</title>
+    <style>
+      @page {
+        size: letter;
+        margin: 0.5in 0.6in 0.6in;
+        @bottom-center {
+          content: "Page " counter(page);
+          font-family: Arial, Helvetica, sans-serif;
+          font-size: 8pt;
+          color: #000;
+        }
+      }
+      html {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      body {
+        margin: 0;
+        font-family: "Times New Roman", Times, serif;
+        font-size: 9pt;
+        line-height: 1.3;
+        color: #000;
+      }
+      .sans {
+        font-family: Arial, Helvetica, sans-serif;
+      }
+      table {
+        border-collapse: collapse;
+      }
+      /* The page is one table so its <thead> (the letterhead) repeats on every page. */
+      table.page {
+        width: 100%;
+      }
+      table.page > thead {
+        display: table-header-group;
+      }
+      table.page > thead td,
+      table.page > tbody > tr > td {
+        padding: 0;
+        vertical-align: top;
+      }
+
+      /* ---------- letterhead ---------- */
+      .head {
+        display: grid;
+        grid-template-columns: 1fr 2.3in;
+        column-gap: 20px;
+        padding: 0 0 0.45in 1in;
+      }
+      .company {
+        font-size: 11pt;
+        padding-top: 4px;
+      }
+      .company .name {
+        margin-bottom: 10px;
+      }
+      .company .notes {
+        white-space: pre-line;
+      }
+      .estimate {
+        text-align: right;
+      }
+      .estimate .word {
+        font-size: 24pt;
+        font-weight: bold;
+        line-height: 1;
+        margin-bottom: 8px;
+      }
+      table.meta {
+        width: 100%;
+        font-size: 8pt;
+        text-align: center;
+      }
+      table.meta th,
+      table.meta td {
+        border: 1px solid #000;
+        padding: 5px 4px;
+      }
+      table.meta th {
+        font-weight: normal;
+        font-family: Arial, Helvetica, sans-serif;
+      }
+      .address {
+        margin-top: 24px;
+        width: 3.9in;
+        border: 1px solid #000;
+        min-height: 1.6in;
+        font-size: 8.5pt;
+      }
+      .address .label {
+        font-family: Arial, Helvetica, sans-serif;
+        padding: 6px 12px;
+        border-bottom: 1px solid #000;
+      }
+      .address .body {
+        padding: 4px;
+        white-space: pre-line;
+      }
+      .logo {
+        margin-top: 16px;
+        text-align: center;
+      }
+      .logo img {
+        max-width: 1.9in;
+        max-height: 2in;
+      }
+
+      /* ---------- items ---------- */
+      table.items {
+        width: 100%;
+        border: 1px solid #000;
+        font-size: 8.5pt;
+      }
+      table.items thead {
+        display: table-header-group;
+      }
+      table.items th {
+        font-family: Arial, Helvetica, sans-serif;
+        font-weight: normal;
+        border: 1px solid #000;
+        padding: 7px 4px;
+        text-align: center;
+      }
+      table.items td {
+        border-left: 1px solid #000;
+        border-right: 1px solid #000;
+        padding: 1px 4px;
+        vertical-align: top;
+      }
+      table.items td.num {
+        text-align: right;
+        white-space: nowrap;
+      }
+      table.items tr.first td {
+        padding-top: 6px;
+      }
+      table.items tr.last td {
+        padding-bottom: 14px;
+      }
+      table.items .scope {
+        white-space: pre-line;
+      }
+      table.items .scope .title {
+        font-weight: bold;
+      }
+
+      /* ---------- foot: disclaimer + totals ---------- */
+      table.foot {
+        width: 100%;
+        border: 1px solid #000;
+        border-top: 0;
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+      table.foot td {
+        vertical-align: top;
+      }
+      td.disclaimer {
+        padding: 6px 4px 4px;
+        font-size: 8pt;
+        line-height: 1.3;
+        border-top: 1px solid #000;
+      }
+      td.totals {
+        width: 3.1in;
+        padding: 0;
+        border-left: 1px solid #000;
+      }
+      .totals .row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        border-bottom: 1px solid #000;
+        padding: 8px 12px 6px;
+        font-family: Arial, Helvetica, sans-serif;
+        font-weight: bold;
+        font-size: 11pt;
+      }
+      .totals .row:last-child {
+        border-bottom: 0;
+        font-size: 15pt;
+      }
+      .totals .row .v {
+        font-family: "Times New Roman", Times, serif;
+        font-weight: normal;
+        font-size: 9pt;
+      }
+    </style>
+  </head>
+  <body>
+    <table class="page">
+      <thead>
+        <tr>
+          <td>
+            <div class="head">
+              <div>
+                <div class="company">
+                  <div class="name">{{companyName}}</div>
+                  <div class="notes">{{companyAddress}}</div>
+                  <div>{{companyCityStateZip}}</div>
+                </div>
+                <div class="address">
+                  <div class="label">Name / Address</div>
+                  <div class="body">{{customerName}}
+{{customerAddress}}</div>
+                </div>
+              </div>
+              <div>
+                <div class="estimate">
+                  <div class="word sans">Estimate</div>
+                  <table class="meta">
+                    <tr><th>Date</th><th>Estimate #</th></tr>
+                    <tr><td>{{date}}</td><td>{{proposalNumber}}</td></tr>
+                  </table>
+                </div>
+                <div class="logo"><img src="{{logoUrl}}" alt="{{companyName}}" /></div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <table class="items">
+              <thead>
+                <tr>
+                  <th style="width: 1.25in">Item</th>
+                  <th>Description</th>
+                  <th style="width: 0.9in">Qty</th>
+                  <th style="width: 1.1in">Rate</th>
+                  <th style="width: 1.1in">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="first"><td></td><td></td><td></td><td></td><td></td></tr>
+                {{#scopeSections}}
+                <tr>
+                  <td>SCOPE OF WORK</td>
+                  <td class="scope"><span class="title">{{title}}</span>
+{{#bullets}}{{text}}
+{{/bullets}}</td>
+                  <td></td>
+                  <td class="num">0.00</td>
+                  <td class="num">0.00</td>
+                </tr>
+                {{/scopeSections}}
+                {{#lineItems}}
+                <tr>
+                  <td>{{activity}}</td>
+                  <td>{{description}}</td>
+                  <td class="num">{{qty}}</td>
+                  <td class="num">{{rate}}</td>
+                  <td class="num">{{amount}}{{taxFlag}}</td>
+                </tr>
+                {{/lineItems}}
+                {{#notes}}
+                <tr>
+                  <td></td>
+                  <td class="scope" style="padding-top: 10px">{{notes}}</td>
+                  <td></td><td></td><td></td>
+                </tr>
+                {{/notes}}
+                <tr class="last"><td></td><td></td><td></td><td></td><td></td></tr>
+              </tbody>
+            </table>
+
+            <table class="foot">
+              <tr>
+                <td class="disclaimer">
+                  This estimate is provided based on the information available at the time of
+                  preparation. It is intended for budgeting purposes only and is not a final
+                  invoice. Actual costs may vary due to unforeseen conditions, changes in scope,
+                  additional work required, or material price fluctuations. Any additional charges
+                  will be discussed and approved prior to proceeding whenever possible. Final
+                  billing will reflect actual labor, materials, and services provided.
+                </td>
+                <td class="totals">
+                  <div class="row"><span>Subtotal</span><span class="v">{{subtotal}}</span></div>
+                  {{#taxed}}
+                  <div class="row"><span>{{taxLabel}}</span><span class="v">{{taxAmount}}</span></div>
+                  {{/taxed}}
+                  <div class="row"><span>Total</span><span class="v">{{total}}</span></div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </body>
+</html>
