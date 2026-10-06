@@ -124,17 +124,6 @@
         font-size: 12pt;
         margin: 0 0 14px;
       }
-      /* The lender's "See your financing options" panel their document prints under every
-         option heading. Static copy: the monthly figure came from the lender's widget. */
-      .financing {
-        background: #e8f3fb;
-        border: 1px solid #c9e0f0;
-        border-radius: 3px;
-        padding: 12px 16px;
-        margin: 0 0 16px;
-        font-size: 9pt;
-        line-height: 1.7;
-      }
       table.items {
         width: 100%;
         border-collapse: collapse;
@@ -271,10 +260,6 @@
       <h2>Professional Electrical Services - {{projectTitle}}</h2>
 
       {{#hasBase}}
-      <div class="financing">
-        <div>See your financing options</div>
-        <div>Prequalify to find out how much you can borrow within minutes and see your monthly payment*. Your credit score will not be affected.</div>
-      </div>
       <table class="items">
         <thead>
           <tr>
@@ -309,10 +294,6 @@
            when choosing it (base scope + that option). Options are never added together. -->
       {{#options}}
       <h2 class="option">{{name}}</h2>
-      <div class="financing">
-        <div>See your financing options</div>
-        <div>Prequalify to find out how much you can borrow within minutes and see your monthly payment*. Your credit score will not be affected.</div>
-      </div>
       <table class="items">
         <thead>
           <tr>
