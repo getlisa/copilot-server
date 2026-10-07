@@ -47,6 +47,9 @@ import { syncQuoteToUptick } from "../../lib/uptickEstimate";
 import { seedQuoteFromServicetradeJob, servicetradeWelcomeMessage } from "../../lib/servicetradeIngest";
 import { servicetradeConnectionFor, servicetradeConnected } from "../../lib/servicetrade";
 import { syncQuoteToServicetrade } from "../../lib/servicetradeEstimate";
+import { seedQuoteFromHcpJob, hcpWelcomeMessage } from "../../lib/hcpIngest";
+import { hcpConnectionFor, hcpConnected } from "../../lib/hcp";
+import { syncQuoteToHcp } from "../../lib/hcpEstimate";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
 import { EstimateTurn } from "../../copilot/estimate/estimateService";
@@ -491,7 +494,19 @@ export class QuoteController {
         success: false,
         error: { status: 404, message: "That ServiceTrade job is not synced for this company" },
       });
-    const crmSeed = ztSeed ?? uptickSeed ?? stSeed;
+    // Housecall Pro: same seed contract (customer by HCP customer id; no tax snapshot — HCP has
+    // no rate API, so the company default applies; template matched to the job type).
+    const hcpJobId =
+      !ztTicketId && !uptickTaskId && !stJobId && typeof req.body?.hcpJobId === "string" && req.body.hcpJobId.trim()
+        ? req.body.hcpJobId.trim()
+        : null;
+    const hcpSeed = hcpJobId ? await seedQuoteFromHcpJob(user.companyId, hcpJobId) : null;
+    if (hcpJobId && !hcpSeed)
+      return res.status(404).json({
+        success: false,
+        error: { status: 404, message: "That Housecall Pro job is not synced for this company" },
+      });
+    const crmSeed = ztSeed ?? uptickSeed ?? stSeed ?? hcpSeed;
     const quote = await prisma.quote.create({
       data: {
         conversationId: conversation.id,
@@ -506,6 +521,7 @@ export class QuoteController {
               ztTicketId: ztSeed ? ztTicketId : null,
               uptickTaskId: uptickSeed ? uptickTaskId : null,
               stJobId: stSeed ? stJobId : null,
+              hcpJobId: hcpSeed ? hcpJobId : null,
               customerId: crmSeed.customerId,
               customerName: crmSeed.customerName,
               customerAddress: crmSeed.customerAddress,
@@ -530,7 +546,9 @@ export class QuoteController {
         ? ztWelcomeMessage(user.companyId, ztTicketId)
         : uptickTaskId
           ? uptickWelcomeMessage(user.companyId, uptickTaskId)
-          : servicetradeWelcomeMessage(user.companyId, stJobId!)
+          : stJobId
+            ? servicetradeWelcomeMessage(user.companyId, stJobId)
+            : hcpWelcomeMessage(user.companyId, hcpJobId!)
       ).catch(() => null);
       // An auto-picked template is stated, never silent — with the alternatives listed so
       // switching is one sentence. With no confident match, the welcome says nothing about
@@ -1402,6 +1420,7 @@ export class QuoteController {
     QuoteController.postToZtInBackground(updated);
     QuoteController.postToUptickInBackground(updated);
     QuoteController.postToServicetradeInBackground(updated);
+    QuoteController.postToHcpInBackground(updated);
     res.json({ success: true, data: await quoteDtoWithProducts(updated) });
   }
 
@@ -1614,6 +1633,57 @@ export class QuoteController {
       await prisma.quote
         .update({ where: { id: quote.id }, data: { stSyncError: message.slice(0, 500) } })
         .catch(() => undefined);
+      return fail(res, 502, message);
+    }
+  }
+
+  /** Fire-and-forget Housecall Pro post after completion — the ServiceTrade sibling, same rules. */
+  private static postToHcpInBackground(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
+    void (async () => {
+      if (!quote.hcpJobId) return;
+      const conn = await hcpConnectionFor(quote.companyId);
+      if (!hcpConnected(conn)) return;
+      const dto = await quoteDtoWithProducts(quote);
+      const pdf = await QuoteController.proposalPdfFor(quote);
+      await syncQuoteToHcp(conn, quote, dto, pdf);
+      await prisma.quote.update({ where: { id: quote.id }, data: { hcpSyncedAt: new Date(), hcpSyncError: null } });
+    })().catch(async (e) => {
+      const message = e instanceof Error ? e.message : String(e);
+      logger.error("Housecall Pro quote sync failed", { quoteId: quote.id, error: message });
+      await prisma.quote
+        .update({ where: { id: quote.id }, data: { hcpSyncError: message.slice(0, 500) } })
+        .catch((err) =>
+          logger.error("Could not record the Housecall Pro sync failure on the quote", {
+            quoteId: quote.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        );
+    });
+  }
+
+  /** POST /api/v1/quotes/:quoteId/hcp — retry / push a completed estimate onto its Housecall Pro job. */
+  static async postQuoteToHcp(req: RequestWithUser, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
+    if (!quote) return fail(res, 404, "Quote not found");
+    if (quote.status !== "COMPLETED") return fail(res, 409, "Only a completed quote can be sent");
+    if (!quote.hcpJobId) return fail(res, 409, "This quote is not linked to a Housecall Pro job");
+    const conn = await hcpConnectionFor(user.companyId);
+    if (!hcpConnected(conn)) return fail(res, 409, "Housecall Pro is not connected");
+    try {
+      const dto = await quoteDtoWithProducts(quote);
+      const pdf = await QuoteController.proposalPdfFor(quote);
+      await syncQuoteToHcp(conn, quote, dto, pdf);
+      const updated = await prisma.quote.update({
+        where: { id: quote.id },
+        data: { hcpSyncedAt: new Date(), hcpSyncError: null },
+        include: quoteDtoInclude,
+      });
+      res.json({ success: true, data: await quoteDtoWithProducts(updated) });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      await prisma.quote.update({ where: { id: quote.id }, data: { hcpSyncError: message.slice(0, 500) } }).catch(() => undefined);
       return fail(res, 502, message);
     }
   }

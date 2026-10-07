@@ -133,6 +133,22 @@ few hundred MB of RAM briefly, so check the ECS task's memory reservation before
 Without Chromium the server still runs: `htmlPdfAvailable()` is false and HTML templates fall
 back to the block renderer.
 
+## Pending migration: Housecall Pro integration — phase15 (2026-10-07)
+
+`docs/sql/phase15.sql` — three new tables (`hcp_connections`, `hcp_jobs_raw`, `customer_hcp`),
+three additive `quotes` columns (`hcp_*`), and `ALTER TYPE pricebook_source ADD VALUE
+'HOUSECALL_PRO'`. No tax table: Housecall Pro has no tax-rate API. Run via
+`bash docs/sql/apply-phase15.sh` (the phase13 ECS runner, same caveats) BEFORE the Housecall Pro
+image deploys. Applied to dev Supabase 2026-10-07; prod Aurora pending. Verify:
+
+```sql
+SELECT table_name FROM information_schema.tables
+WHERE table_name IN ('hcp_connections','hcp_jobs_raw','customer_hcp');  -- 3 rows
+SELECT column_name FROM information_schema.columns WHERE table_name='quotes' AND column_name LIKE 'hcp\_%';  -- 3 rows
+SELECT enumlabel FROM pg_enum e JOIN pg_type t ON t.oid=e.enumtypid WHERE t.typname='pricebook_source';  -- includes HOUSECALL_PRO
+SELECT tableowner FROM pg_tables WHERE tablename LIKE 'hcp%';  -- app_user
+```
+
 ## APPLIED 2026-10-06: ServiceTrade integration — phase14
 
 `docs/sql/phase14.sql` — five new tables (`servicetrade_connections`, `servicetrade_jobs_raw`,

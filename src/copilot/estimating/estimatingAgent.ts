@@ -11,6 +11,7 @@ import { listProposalTemplateChoices } from "../../lib/proposalTemplates";
 import { ztChatContext } from "../../lib/ztIngest";
 import { uptickChatContext } from "../../lib/uptickIngest";
 import { servicetradeChatContext } from "../../lib/servicetradeIngest";
+import { hcpChatContext } from "../../lib/hcpIngest";
 import { QuoteLineItem, PricebookItem } from "@prisma/client";
 
 /**
@@ -460,7 +461,7 @@ export async function runEstimatingTurn(opts: {
     prisma.laborRate.findMany({ where: { companyId: opts.companyId } }),
     prisma.quote.findUnique({
       where: { id: opts.quoteId },
-      select: { laborAsked: true, templateAsked: true, ztTicketId: true, uptickTaskId: true, stJobId: true },
+      select: { laborAsked: true, templateAsked: true, ztTicketId: true, uptickTaskId: true, stJobId: true, hcpJobId: true },
     }),
     listProposalTemplateChoices(opts.companyId),
   ]);
@@ -473,7 +474,9 @@ export async function runEstimatingTurn(opts: {
       ? await uptickChatContext(opts.companyId, quoteRow.uptickTaskId)
       : quoteRow?.stJobId
         ? await servicetradeChatContext(opts.companyId, quoteRow.stJobId)
-        : null;
+        : quoteRow?.hcpJobId
+          ? await hcpChatContext(opts.companyId, quoteRow.hcpJobId)
+          : null;
   const laborRatesLite: LaborRateLite[] = laborRates.map((r) => ({
     id: r.id,
     name: r.name,

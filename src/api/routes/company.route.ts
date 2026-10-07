@@ -103,6 +103,12 @@ companyRoute.delete(
   CompanyController.disconnectServicetradeForCompany
 );
 
+// Housecall Pro — a static API key pasted by the admin (no OAuth for non-partner integrations).
+companyRoute.post("/connections/hcp/connect", authMiddleware, requireAdmin, CompanyController.connectHcpForCompany);
+companyRoute.post("/connections/hcp/sync", authMiddleware, requireAdmin, CompanyController.syncHcpForCompany);
+companyRoute.get("/connections/hcp/jobs", authMiddleware, CompanyController.listHcpJobsForCompany);
+companyRoute.delete("/connections/hcp", authMiddleware, requireAdmin, CompanyController.disconnectHcpForCompany);
+
 // Reference data. The sync is a settings write, so admin-only. The reads a technician's estimate
 // screen needs — the customer picker — are open to every role, for the same reason the item list
 // is: gating them empties the picker with no error anywhere.
