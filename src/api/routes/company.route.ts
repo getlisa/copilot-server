@@ -53,7 +53,8 @@ companyRoute.post(
 );
 // The job picker read stays open to every role — technicians start estimates from it.
 companyRoute.get("/connections/zt/jobs", authMiddleware, CompanyController.listZtJobsForCompany);
-companyRoute.get("/connections/zt/sync/progress", authMiddleware, CompanyController.ztSyncProgress);
+// Live sync caption for every CRM row (zt | uptick | servicetrade | hcp); any role can read it.
+companyRoute.get("/connections/:provider/sync/progress", authMiddleware, CompanyController.syncProgress);
 companyRoute.delete(
   "/connections/zt",
   authMiddleware,

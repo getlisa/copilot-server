@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { Prisma, UptickConnection } from "@prisma/client";
 import prisma from "./prisma";
 import logger from "./logger";
+import { setSyncProgress, clearSyncProgress } from "./syncProgress";
 import {
   uptickConnectionFor,
   uptickConnected,
@@ -120,6 +121,7 @@ export async function syncUptickData(
       data: errors.length === 0 ? { lastSyncAt: new Date(), lastSyncError: null } : { lastSyncError: errors.join(" | ") },
     });
   } finally {
+    clearSyncProgress("uptick", companyId);
     await prisma.uptickConnection.updateMany({ where: { companyId }, data: { syncStartedAt: null } });
   }
   logger.info("Uptick sync finished", { companyId, tasks, remarks, products, errors });
@@ -147,6 +149,8 @@ async function pageAll(
 
 async function ingestTasks(conn: UptickConnection, companyId: number, since: string | null): Promise<number> {
   let synced = 0;
+  const setProgress = (msg: string) => setSyncProgress("uptick", companyId, "tasks", msg);
+  setProgress("Jobs: fetching…");
   const base = `tasks/?page[limit]=${PAGE_SIZE}&ordering=-updated${since ? `&updatedsince=${encodeURIComponent(since)}` : ""}`;
   const upsertPage = async (body: JaBody) => {
     const included = jaIncluded(body);
@@ -188,6 +192,7 @@ async function ingestTasks(conn: UptickConnection, companyId: number, since: str
         updated_at        = now()
     `;
     synced += changed.length;
+    setProgress(`Jobs: ${synced} updated…`);
   };
   try {
     // VERIFY: `include=property,client` — both are Task relationships in the v2.15 field list.
@@ -202,6 +207,7 @@ async function ingestTasks(conn: UptickConnection, companyId: number, since: str
     });
     await pageAll(conn, base, upsertPage);
   }
+  setProgress(`Jobs: done (${synced} updated)`);
   return synced;
 }
 
@@ -209,6 +215,8 @@ async function ingestTasks(conn: UptickConnection, companyId: number, since: str
 
 async function ingestRemarks(conn: UptickConnection, companyId: number, since: string | null): Promise<number> {
   let synced = 0;
+  const setProgress = (msg: string) => setSyncProgress("uptick", companyId, "remarks", msg);
+  setProgress("Defects: fetching…");
   const path = `remarks/?page[limit]=${PAGE_SIZE}&ordering=-updated${since ? `&updatedsince=${encodeURIComponent(since)}` : ""}`;
   await pageAll(conn, path, async (body) => {
     const rows = jaRows(body).map((r) => ({
@@ -250,7 +258,9 @@ async function ingestRemarks(conn: UptickConnection, companyId: number, since: s
         updated_at         = now()
     `;
     synced += changed.length;
+    setProgress(`Defects: ${synced} updated…`);
   });
+  setProgress(`Defects: done (${synced} updated)`);
   return synced;
 }
 
@@ -286,6 +296,8 @@ async function ingestProducts(conn: UptickConnection, companyId: number, since: 
     create: { companyId, name: UPTICK_PRICEBOOK_NAME, priority: 9999, source: "UPTICK" },
   });
   let projected = 0;
+  const setProgress = (msg: string) => setSyncProgress("uptick", companyId, "products", msg);
+  setProgress("Products: fetching…");
   await pageAll(
     conn,
     `products/?page[limit]=${PAGE_SIZE}&ordering=-updated${since ? `&updatedsince=${encodeURIComponent(since)}` : ""}`,
@@ -307,8 +319,10 @@ async function ingestProducts(conn: UptickConnection, companyId: number, since: 
         });
         projected++;
       }
+      setProgress(`Products: ${projected} imported…`);
     }
   );
+  setProgress(`Products: done (${projected})`);
   return projected;
 }
 

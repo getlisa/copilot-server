@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { Prisma, ServicetradeConnection } from "@prisma/client";
 import prisma from "./prisma";
 import logger from "./logger";
+import { setSyncProgress, clearSyncProgress } from "./syncProgress";
 import {
   servicetradeConnectionFor,
   servicetradeConnected,
@@ -94,6 +95,7 @@ export async function syncServicetradeData(
       data: errors.length === 0 ? { lastSyncAt: new Date(), lastSyncError: null } : { lastSyncError: errors.join(" | ") },
     });
   } finally {
+    clearSyncProgress("servicetrade", companyId);
     await prisma.servicetradeConnection.updateMany({ where: { companyId }, data: { syncStartedAt: null } });
   }
   logger.info("ServiceTrade sync finished", { companyId, ...counts, errors });
@@ -101,15 +103,19 @@ export async function syncServicetradeData(
 }
 
 const sinceParam = (since: number | null) => (since ? `&updatedAfter=${since}` : "");
+const progress = (companyId: number, stage: string) => (msg: string) => setSyncProgress("servicetrade", companyId, stage, msg);
 
 // ---------- jobs ----------
 
 async function ingestJobs(conn: ServicetradeConnection, companyId: number, since: number | null): Promise<number> {
   let synced = 0;
-  await servicetradePageAll<{ jobs?: Record<string, unknown>[] }>(
+  const setProgress = progress(companyId, "jobs");
+  setProgress("Jobs: fetching…");
+  await servicetradePageAll<{ jobs?: Record<string, unknown>[]; page?: number; totalPages?: number }>(
     conn,
     `job?status=all&limit=500${sinceParam(since)}`,
     async (data) => {
+      setProgress(`Jobs: page ${data.page ?? "?"}/${data.totalPages ?? "?"} — ${synced} updated…`);
       const rows = arr(data.jobs).map((row) => ({ id: String(row.id), row, contentHash: hash(row) }));
       if (rows.length === 0) return;
       const existing = await prisma.servicetradeJobRaw.findMany({
@@ -141,6 +147,7 @@ async function ingestJobs(conn: ServicetradeConnection, companyId: number, since
       synced += changed.length;
     }
   );
+  setProgress(`Jobs: done (${synced} updated)`);
   return synced;
 }
 
@@ -148,10 +155,13 @@ async function ingestJobs(conn: ServicetradeConnection, companyId: number, since
 
 async function ingestDeficiencies(conn: ServicetradeConnection, companyId: number, since: number | null): Promise<number> {
   let synced = 0;
-  await servicetradePageAll<{ deficiencies?: Record<string, unknown>[] }>(
+  const setProgress = progress(companyId, "deficiencies");
+  setProgress("Deficiencies: fetching…");
+  await servicetradePageAll<{ deficiencies?: Record<string, unknown>[]; page?: number; totalPages?: number }>(
     conn,
     `deficiency${since ? `?updatedAfter=${since}` : ""}`,
     async (data) => {
+      setProgress(`Deficiencies: page ${data.page ?? "?"}/${data.totalPages ?? "?"} — ${synced} updated…`);
       const rows = arr(data.deficiencies).map((row) => ({ id: String(row.id), row, contentHash: hash(row) }));
       if (rows.length === 0) return;
       const existing = await prisma.servicetradeDeficiencyRaw.findMany({
@@ -184,6 +194,7 @@ async function ingestDeficiencies(conn: ServicetradeConnection, companyId: numbe
       synced += changed.length;
     }
   );
+  setProgress(`Deficiencies: done (${synced} updated)`);
   return synced;
 }
 
@@ -230,6 +241,8 @@ async function ingestLibItems(conn: ServicetradeConnection, companyId: number, s
     update: {},
     create: { companyId, name: SERVICETRADE_PRICEBOOK_NAME, priority: 9999, source: "SERVICETRADE" },
   });
+  const setProgress = progress(companyId, "items");
+  setProgress("Items: fetching…");
   const contractId = await defaultContractId(conn);
   let projected = 0;
   await servicetradePageAll<{ libItems?: Record<string, unknown>[] }>(
@@ -256,8 +269,10 @@ async function ingestLibItems(conn: ServicetradeConnection, companyId: number, s
         });
         projected++;
       }
+      setProgress(`Items: ${projected} imported…`);
     }
   );
+  setProgress(`Items: done (${projected})`);
   return projected;
 }
 
@@ -336,9 +351,13 @@ async function upsertTaxGroup(companyId: number, row: Record<string, unknown>): 
 
 async function ingestTaxGroups(conn: ServicetradeConnection, companyId: number): Promise<number> {
   let synced = 0;
+  const setProgress = progress(companyId, "tax");
+  setProgress("Tax groups: fetching…");
   await servicetradePageAll<{ taxGroups?: Record<string, unknown>[] }>(conn, "taxgroup", async (data) => {
     for (const row of arr(data.taxGroups)) if (await upsertTaxGroup(companyId, row)) synced++;
+    setProgress(`Tax groups: ${synced} imported…`);
   });
+  setProgress(`Tax groups: done (${synced})`);
   return synced;
 }
 
