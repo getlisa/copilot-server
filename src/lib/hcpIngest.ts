@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { Prisma, HcpConnection } from "@prisma/client";
 import prisma from "./prisma";
 import logger from "./logger";
+import { setSyncProgress, clearSyncProgress } from "./syncProgress";
 import { hcpConnectionFor, hcpConnected, hcpFetch, hcpPageAll } from "./hcp";
 import { listProposalTemplateChoices, matchTemplateToJobType } from "./proposalTemplates";
 import type { ZtQuoteSeed } from "./ztIngest";
@@ -88,6 +89,7 @@ export async function syncHcpData(companyId: number): Promise<{ jobs: number; it
       data: errors.length === 0 ? { lastSyncAt: new Date(), lastSyncError: null } : { lastSyncError: errors.join(" | ") },
     });
   } finally {
+    clearSyncProgress("hcp", companyId);
     await prisma.hcpConnection.updateMany({ where: { companyId }, data: { syncStartedAt: null } });
   }
   logger.info("Housecall Pro sync finished", { companyId, ...counts, errors });
@@ -98,10 +100,13 @@ export async function syncHcpData(companyId: number): Promise<{ jobs: number; it
 
 async function ingestJobs(conn: HcpConnection, companyId: number, since: Date | null): Promise<number> {
   let synced = 0;
-  await hcpPageAll<{ jobs?: Record<string, unknown>[]; total_pages?: number }>(
+  const setProgress = (msg: string) => setSyncProgress("hcp", companyId, "jobs", msg);
+  setProgress("Jobs: fetching…");
+  await hcpPageAll<{ jobs?: Record<string, unknown>[]; page?: number; total_pages?: number }>(
     conn,
     "jobs?sort_by=updated_at&sort_direction=desc&page_size=100",
     async (data) => {
+      setProgress(`Jobs: page ${data.page ?? "?"}/${data.total_pages ?? "?"} — ${synced} updated…`);
       const all = arr(data.jobs);
       // Newest first: once a page holds nothing newer than `since`, every later page is older too.
       const fresh = since ? all.filter((row) => (ts(row.updated_at)?.getTime() ?? Infinity) >= since.getTime()) : all;
@@ -139,6 +144,7 @@ async function ingestJobs(conn: HcpConnection, companyId: number, since: Date | 
       return fresh.length === all.length; // a trimmed page = the incremental boundary; stop.
     }
   );
+  setProgress(`Jobs: done (${synced} updated)`);
   return synced;
 }
 
@@ -204,6 +210,8 @@ async function ingestPricebook(conn: HcpConnection, companyId: number): Promise<
     create: { companyId, name: HCP_PRICEBOOK_NAME, priority: 9999, source: "HOUSECALL_PRO" },
   });
   let projected = 0;
+  const setProgress = (msg: string) => setSyncProgress("hcp", companyId, "pricebook", msg);
+  setProgress("Price book: listing categories…");
   const upsertPage = async (rows: Record<string, unknown>[], kind: HcpItemKind) => {
     const mapped = rows.map((r) => mapHcpCatalogItem(r, kind)).filter((m): m is NonNullable<typeof m> => m != null);
     if (mapped.length === 0) return;
@@ -224,7 +232,10 @@ async function ingestPricebook(conn: HcpConnection, companyId: number): Promise<
       projected++;
     }
   };
-  for (const categoryId of await materialCategoryIds(conn)) {
+  const categories = await materialCategoryIds(conn);
+  let categoriesDone = 0;
+  for (const categoryId of categories) {
+    setProgress(`Price book: materials, category ${++categoriesDone}/${categories.length} — ${projected} imported…`);
     await hcpPageAll<{ data?: Record<string, unknown>[]; total_pages_count?: number }>(
       conn,
       `api/price_book/materials?material_category_uuid=${encodeURIComponent(categoryId)}&page_size=100`,
@@ -234,8 +245,12 @@ async function ingestPricebook(conn: HcpConnection, companyId: number): Promise<
   await hcpPageAll<{ data?: Record<string, unknown>[]; total_pages_count?: number; total_pages?: number }>(
     conn,
     "api/price_book/services?page_size=100",
-    async (data) => upsertPage(arr(data.data), "organizational")
+    async (data) => {
+      setProgress(`Price book: services — ${projected} imported…`);
+      await upsertPage(arr(data.data), "organizational");
+    }
   );
+  setProgress(`Price book: done (${projected} items)`);
   return projected;
 }
 

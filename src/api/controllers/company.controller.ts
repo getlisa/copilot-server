@@ -23,7 +23,6 @@ import { isZtConfigured, ztConnected, ztConnectionFor, connectZt, disconnectZt }
 import {
   syncZtData,
   listZtJobs,
-  ztSyncProgressFor,
   ZtSyncRunningError,
   ZT_SYNC_CLAIM_STALE_MS,
 } from "../../lib/ztIngest";
@@ -43,6 +42,7 @@ import {
 } from "../../lib/servicetradeIngest";
 import { isHcpConfigured, hcpConnected, hcpConnectionFor, connectHcp, disconnectHcp } from "../../lib/hcp";
 import { syncHcpData, listHcpJobs, HcpSyncRunningError, HCP_SYNC_CLAIM_STALE_MS } from "../../lib/hcpIngest";
+import { syncProgressFor, SYNC_PROVIDERS, type SyncProvider } from "../../lib/syncProgress";
 import {
   syncUptickData,
   listUptickJobs,
@@ -390,16 +390,20 @@ export class CompanyController {
   }
 
   /**
-   * GET /api/v1/companies/connections/zt/sync/progress — what the running sync is doing,
-   * for the Connections card's live caption. Null when no sync is running.
+   * GET /api/v1/companies/connections/:provider/sync/progress — what the running sync of that
+   * CRM (zt | uptick | servicetrade | hcp) is doing, for the Connections card's live caption.
+   * Null when no sync is running.
    */
-  static async ztSyncProgress(req: RequestWithUser, res: Response) {
+  static async syncProgress(req: RequestWithUser, res: Response) {
     const companyId = req.user?.companyId;
     if (companyId == null)
       return res
         .status(400)
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
-    res.json({ success: true, data: { progress: ztSyncProgressFor(companyId) } });
+    const provider = req.params.provider as SyncProvider;
+    if (!SYNC_PROVIDERS.includes(provider))
+      return res.status(404).json({ success: false, error: { status: 404, message: "Unknown integration" } });
+    res.json({ success: true, data: { progress: syncProgressFor(provider, companyId) } });
   }
 
   /**

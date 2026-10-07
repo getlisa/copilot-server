@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { Prisma, ZtConnection } from "@prisma/client";
 import prisma from "./prisma";
 import logger from "./logger";
+import { setSyncProgress, clearSyncProgress } from "./syncProgress";
 import { ztConnectionFor, ztConnected, ztFetch } from "./zt";
 import { listProposalTemplateChoices, matchTemplateToJobType } from "./proposalTemplates";
 
@@ -28,23 +29,8 @@ const MAX_PAGES = 200; // backstop, not a target: 20k rows of anything means som
 const hash = (value: unknown): string =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-// Live progress for the Connections card, keyed by company then by stage (stages run
-// concurrently, so each keeps its own line; the card shows them joined). In-memory on
-// purpose: one server process serves this (single ECS task / local dev), and a lost progress
-// line on restart costs nothing. ponytail: move to the connection row if we ever scale out.
-const syncProgress = new Map<number, Map<string, string>>();
-export const ztSyncProgressFor = (companyId: number): string | null => {
-  const stages = syncProgress.get(companyId);
-  return stages && stages.size > 0 ? [...stages.values()].join(" · ") : null;
-};
-const setProgress = (companyId: number, stage: string, msg: string) => {
-  let stages = syncProgress.get(companyId);
-  if (!stages) {
-    stages = new Map();
-    syncProgress.set(companyId, stages);
-  }
-  stages.set(stage, msg);
-};
+// Live progress for the Connections card — the shared store in syncProgress.ts.
+const setProgress = (companyId: number, stage: string, msg: string) => setSyncProgress("zt", companyId, stage, msg);
 
 /** Tiny bounded-concurrency pool (single-threaded JS: the shared index is race-free). */
 async function inPool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
@@ -140,7 +126,7 @@ export async function syncZtData(companyId: number): Promise<{
           : { lastSyncError: errors.join(" | ") },
     });
   } finally {
-    syncProgress.delete(companyId);
+    clearSyncProgress("zt", companyId);
     // Whatever happened, release the claim: a failed sync must not block the retry.
     await prisma.ztConnection.updateMany({
       where: { companyId },
