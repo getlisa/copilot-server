@@ -111,6 +111,9 @@ async function main() {
     stQuoteRef: null,
     stSyncedAt: null,
     stSyncError: null,
+    hcpJobId: null,
+    hcpSyncedAt: null,
+    hcpSyncError: null,
     blockingFlagCount: 0,
   };
   const branding: InvoiceBranding = {

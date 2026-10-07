@@ -211,6 +211,10 @@ export interface QuoteDto {
   stQuoteRef: string | null;
   stSyncedAt: string | null;
   stSyncError: string | null;
+  /** Housecall Pro linkage + sync state. No quote id: the lines live on the job itself. */
+  hcpJobId: string | null;
+  hcpSyncedAt: string | null;
+  hcpSyncError: string | null;
   blockingFlagCount: number;
 }
 
@@ -427,6 +431,9 @@ export type QuoteInput = {
   stQuoteRef?: string | null;
   stSyncedAt?: Date | null;
   stSyncError?: string | null;
+  hcpJobId?: string | null;
+  hcpSyncedAt?: Date | null;
+  hcpSyncError?: string | null;
   lineItems: LineItemInput[];
 };
 
@@ -555,6 +562,9 @@ export function toQuoteDto(
     stQuoteRef: quote.stQuoteRef ?? null,
     stSyncedAt: quote.stSyncedAt?.toISOString() ?? null,
     stSyncError: quote.stSyncError ?? null,
+    hcpJobId: quote.hcpJobId ?? null,
+    hcpSyncedAt: quote.hcpSyncedAt?.toISOString() ?? null,
+    hcpSyncError: quote.hcpSyncError ?? null,
     blockingFlagCount: dtos.filter((d) =>
       d.flags.some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
     ).length,

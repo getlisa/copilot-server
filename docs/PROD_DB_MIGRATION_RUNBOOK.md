@@ -133,13 +133,29 @@ few hundred MB of RAM briefly, so check the ECS task's memory reservation before
 Without Chromium the server still runs: `htmlPdfAvailable()` is false and HTML templates fall
 back to the block renderer.
 
-## Pending migration: ServiceTrade integration — phase14 (2026-10-06)
+## Pending migration: Housecall Pro integration — phase15 (2026-10-07)
+
+`docs/sql/phase15.sql` — three new tables (`hcp_connections`, `hcp_jobs_raw`, `customer_hcp`),
+three additive `quotes` columns (`hcp_*`), and `ALTER TYPE pricebook_source ADD VALUE
+'HOUSECALL_PRO'`. No tax table: Housecall Pro has no tax-rate API. Run via
+`bash docs/sql/apply-phase15.sh` (the phase13 ECS runner, same caveats) BEFORE the Housecall Pro
+image deploys. Applied to dev Supabase 2026-10-07; prod Aurora pending. Verify:
+
+```sql
+SELECT table_name FROM information_schema.tables
+WHERE table_name IN ('hcp_connections','hcp_jobs_raw','customer_hcp');  -- 3 rows
+SELECT column_name FROM information_schema.columns WHERE table_name='quotes' AND column_name LIKE 'hcp\_%';  -- 3 rows
+SELECT enumlabel FROM pg_enum e JOIN pg_type t ON t.oid=e.enumtypid WHERE t.typname='pricebook_source';  -- includes HOUSECALL_PRO
+SELECT tableowner FROM pg_tables WHERE tablename LIKE 'hcp%';  -- app_user
+```
+
+## APPLIED 2026-10-06: ServiceTrade integration — phase14
 
 `docs/sql/phase14.sql` — five new tables (`servicetrade_connections`, `servicetrade_jobs_raw`,
 `servicetrade_deficiencies_raw`, `customer_servicetrade`, `sales_tax_servicetrade`), five additive
 `quotes` columns (`st_*`), and `ALTER TYPE pricebook_source ADD VALUE 'SERVICETRADE'`. The phase13
 shapes, split by provider. Run via `bash docs/sql/apply-phase14.sh` (the phase13 ECS runner, same
-caveats) BEFORE the ServiceTrade image deploys. Verify:
+caveats). Applied to dev Supabase and PROD Aurora on 2026-10-06 (CloudShell → ECS runner), before any deploy. Verify:
 
 ```sql
 SELECT table_name FROM information_schema.tables
@@ -149,14 +165,14 @@ SELECT enumlabel FROM pg_enum e JOIN pg_type t ON t.oid=e.enumtypid WHERE t.typn
 SELECT tableowner FROM pg_tables WHERE tablename LIKE 'servicetrade%';  -- app_user
 ```
 
-## Pending migration: Uptick integration — phase13 (2026-10-02)
+## APPLIED 2026-10-06: Uptick integration — phase13
 
 `docs/sql/phase13.sql` — four new tables (`uptick_connections`, `uptick_tasks_raw`,
 `uptick_remarks_raw`, `customer_uptick`), five additive `quotes` columns (`uptick_*`), and
 `ALTER TYPE pricebook_source ADD VALUE 'UPTICK'`. The zt_* shapes, split by provider. Ownership
 and grants hand over to `app_user` inside a `DO` block that is a no-op where the role does not
 exist (dev Supabase). Applied to dev Supabase 2026-09-29; run on PROD Aurora in CloudShell per
-docs/CLOUDSHELL_PROD_SQL.md BEFORE copilot-server PR #48 deploys. Verify:
+docs/CLOUDSHELL_PROD_SQL.md; applied to PROD Aurora 2026-10-06 (CloudShell → ECS runner), before PR #48 deployed. Verify:
 
 ```sql
 SELECT table_name FROM information_schema.tables

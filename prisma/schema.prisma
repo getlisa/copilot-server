@@ -448,6 +448,7 @@ model Customer {
   zt     CustomerZt[]
   uptick CustomerUptick[]
   servicetrade CustomerServicetrade[]
+  hcp    CustomerHcp[]
 
   /// Names are unique per company **and parent**, mirroring QuickBooks' actual DisplayName rule.
   ///
@@ -904,6 +905,64 @@ model UptickRemarkRaw {
   @@schema("public")
 }
 
+/// One Housecall Pro connection per company. Housecall Pro's public API is a static API key an
+/// admin generates in the app (Authorization: Token <key>); no OAuth for non-partners, no
+/// expiry, no refresh. The sealed blob holds { apiKey }.
+model HcpConnection {
+  id             Int       @id @default(autoincrement())
+  companyId      Int       @unique @map("company_id")
+  /// AES-256-GCM blob of { apiKey }, sealed under HCP_TOKEN_KEY (hcp.ts).
+  encryptedAuth  String?   @map("encrypted_auth")
+  /// The Housecall Pro company the key belongs to (GET /company at connect time).
+  hcpCompanyId   String?   @map("hcp_company_id")
+  hcpCompanyName String?   @map("hcp_company_name") @db.VarChar(200)
+  lastSyncAt     DateTime? @map("last_sync_at")
+  lastSyncError  String?   @map("last_sync_error")
+  syncStartedAt  DateTime? @map("sync_started_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@map("hcp_connections")
+  @@schema("public")
+}
+
+/// Raw Housecall Pro jobs — the picker/seed read store, exactly like zt_jobs_raw. The whole job
+/// (customer, service address, notes, job_fields.job_type, schedule) lives in rawPayload.
+model HcpJobRaw {
+  id            Int       @id @default(autoincrement())
+  companyId     Int       @map("company_id")
+  hcpJobId      String    @map("hcp_job_id") @db.VarChar(64)
+  invoiceNumber String?   @map("invoice_number") @db.VarChar(64)
+  workStatus    String?   @map("work_status") @db.VarChar(32)
+  hcpUpdatedAt  DateTime? @map("hcp_updated_at")
+  rawPayload    Json      @map("raw_payload")
+  contentHash   String    @map("content_hash") @db.VarChar(64)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@unique([companyId, hcpJobId])
+  @@index([companyId, hcpUpdatedAt(sort: Desc)])
+  @@map("hcp_jobs_raw")
+  @@schema("public")
+}
+
+/// CLARA customer ↔ Housecall Pro customer id (the customer_zt pattern).
+model CustomerHcp {
+  id            Int      @id @default(autoincrement())
+  customerId    Int      @map("customer_id")
+  companyId     Int      @map("company_id")
+  hcpCustomerId String   @map("hcp_customer_id") @db.VarChar(64)
+  raw           Json?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, hcpCustomerId])
+  @@index([customerId])
+  @@map("customer_hcp")
+  @@schema("public")
+}
+
 /// CLARA customer ↔ Uptick client id (the customer_zt pattern).
 model CustomerUptick {
   id             Int      @id @default(autoincrement())
@@ -1196,6 +1255,11 @@ model Quote {
   stQuoteRef          String?       @map("st_quote_ref") @db.VarChar(64)
   stSyncedAt          DateTime?     @map("st_synced_at")
   stSyncError         String?       @map("st_sync_error")
+  /// Housecall Pro linkage: the originating job. There is no separate quote id — the estimate's
+  /// lines are written onto that job's own line items (replace-all), so the job IS the ledger.
+  hcpJobId            String?       @map("hcp_job_id") @db.VarChar(64)
+  hcpSyncedAt         DateTime?     @map("hcp_synced_at")
+  hcpSyncError        String?       @map("hcp_sync_error")
   /// QBO Estimate id once posted (companies with a QboConnection). Posted at completion;
   /// re-completing after a reopen UPDATES this same estimate in place (QBO PRD US6).
   qboEstimateId     String?         @map("qbo_estimate_id")
@@ -1466,6 +1530,7 @@ enum PricebookSource {
   ZENTRADES
   UPTICK
   SERVICETRADE
+  HOUSECALL_PRO
 
   @@map("pricebook_source")
   @@schema("public")
