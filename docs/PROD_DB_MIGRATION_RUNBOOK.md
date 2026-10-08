@@ -133,6 +133,19 @@ few hundred MB of RAM briefly, so check the ECS task's memory reservation before
 Without Chromium the server still runs: `htmlPdfAvailable()` is false and HTML templates fall
 back to the block renderer.
 
+## Pending migration: Home Depot fallback OFF for new accounts — phase16 (2026-10-08)
+
+`docs/sql/phase16.sql` — backfills a `company_configs` row (`hd_fallback_enabled = true`) for every
+existing company that has none, then `ALTER COLUMN hd_fallback_enabled SET DEFAULT false`. Existing
+accounts keep today's behavior; only companies created afterwards start with the fallback off.
+Run via `bash docs/sql/apply-phase16.sh` BEFORE the image that reads a missing row as OFF deploys.
+Verify:
+
+```sql
+SELECT count(*) FROM companies c WHERE NOT EXISTS (SELECT 1 FROM company_configs cc WHERE cc.company_id = c.id);  -- 0
+SELECT column_default FROM information_schema.columns WHERE table_name='company_configs' AND column_name='hd_fallback_enabled';  -- false
+```
+
 ## Pending migration: Housecall Pro integration — phase15 (2026-10-07)
 
 `docs/sql/phase15.sql` — three new tables (`hcp_connections`, `hcp_jobs_raw`, `customer_hcp`),

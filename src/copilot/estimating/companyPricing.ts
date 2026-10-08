@@ -66,9 +66,10 @@ export async function hdFallbackEnabledFor(companyId: number): Promise<boolean> 
     where: { company_id: companyId },
     select: { hd_fallback_enabled: true },
   });
-  // Default ON (PM decision 2026-08-21): the fallback is pre-existing behavior for every
-  // client, so a company with no config row at all gets it — the switch opts a client OUT.
-  return config ? config.hd_fallback_enabled : true;
+  // Default OFF (product, 2026-10-08): a company with no config row is a NEW account — every
+  // pre-existing one got a row (hd_fallback_enabled = true) from the phase16 backfill, so the
+  // 2026-08-21 "fallback ON for everyone" behavior survives for them unchanged.
+  return config ? config.hd_fallback_enabled : false;
 }
 
 export async function loadCompanyPricing(companyId: number): Promise<CompanyPricing> {
