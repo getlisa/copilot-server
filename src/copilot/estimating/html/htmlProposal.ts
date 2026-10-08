@@ -169,6 +169,8 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
     technicianName: header.technicianName ?? "",
     customerName: header.customerName ?? "",
     customerAddress: header.billingAddress ?? "",
+    /** Where the work happens, for documents with a separate SERVICE ADDRESS block. */
+    serviceAddress: header.serviceAddress ?? "",
     customerPhone: header.customerPhone ?? "",
     proposalNumber: input.proposalNumber ?? "",
     date: input.date.toLocaleDateString("en-US"),
