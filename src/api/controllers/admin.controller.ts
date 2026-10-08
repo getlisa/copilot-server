@@ -125,8 +125,8 @@ export class AdminController {
         city: company.city,
         state: company.state,
         postalCode: company.postal_code,
-        // Mirrors hdFallbackEnabledFor: no config row = fallback ON (the default).
-        hdFallbackEnabled: config ? config.hd_fallback_enabled : true,
+        // Mirrors hdFallbackEnabledFor: no config row = a new account = fallback OFF (phase16).
+        hdFallbackEnabled: config ? config.hd_fallback_enabled : false,
         pricebookCount,
         laborRateCount,
       },
