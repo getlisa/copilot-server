@@ -11,6 +11,7 @@ import { companyRoute } from "./api/routes/company.route";
 import { adminRoute } from "./api/routes/admin.route";
 import webhookRoute from "./api/routes/webhook.route";
 import { startQboWebhookDrain, qboWebhookDrainStatus } from "./lib/qboWebhookProcessor";
+import { startDailySyncScheduler, dailySyncStatus } from "./lib/syncScheduler";
 import logger from "./lib/logger";
 
 dotenv.config();
@@ -114,6 +115,7 @@ app.get("/health", (req, res) => {
     status: "ok",
     timestamp: new Date().toISOString(),
     qboWebhookDrain: qboWebhookDrainStatus(),
+    dailySync: dailySyncStatus(),
   });
 });
 
@@ -191,4 +193,6 @@ app.listen(PORT, () => {
   // Acting on a webhook always costs a QuickBooks API read (the event's `data` is empty), so the
   // receiver only records and this drains. The timer is unref'd — it never holds the process open.
   startQboWebhookDrain();
+  // Every connected CRM + QuickBooks, every company, sequentially, 11:00 IST daily.
+  startDailySyncScheduler();
 });
