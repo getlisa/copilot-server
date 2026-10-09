@@ -211,8 +211,10 @@ export interface QuoteDto {
   stQuoteRef: string | null;
   stSyncedAt: string | null;
   stSyncError: string | null;
-  /** Housecall Pro linkage + sync state. No quote id: the lines live on the job itself. */
+  /** Housecall Pro linkage + sync state — same semantics again. hcpEstimateRef is HCP's estimate number. */
   hcpJobId: string | null;
+  hcpEstimateId: string | null;
+  hcpEstimateRef: string | null;
   hcpSyncedAt: string | null;
   hcpSyncError: string | null;
   blockingFlagCount: number;
@@ -432,6 +434,8 @@ export type QuoteInput = {
   stSyncedAt?: Date | null;
   stSyncError?: string | null;
   hcpJobId?: string | null;
+  hcpEstimateId?: string | null;
+  hcpEstimateRef?: string | null;
   hcpSyncedAt?: Date | null;
   hcpSyncError?: string | null;
   lineItems: LineItemInput[];
@@ -563,6 +567,8 @@ export function toQuoteDto(
     stSyncedAt: quote.stSyncedAt?.toISOString() ?? null,
     stSyncError: quote.stSyncError ?? null,
     hcpJobId: quote.hcpJobId ?? null,
+    hcpEstimateId: quote.hcpEstimateId ?? null,
+    hcpEstimateRef: quote.hcpEstimateRef ?? null,
     hcpSyncedAt: quote.hcpSyncedAt?.toISOString() ?? null,
     hcpSyncError: quote.hcpSyncError ?? null,
     blockingFlagCount: dtos.filter((d) =>

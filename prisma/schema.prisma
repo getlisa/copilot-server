@@ -1256,9 +1256,13 @@ model Quote {
   stQuoteRef          String?       @map("st_quote_ref") @db.VarChar(64)
   stSyncedAt          DateTime?     @map("st_synced_at")
   stSyncError         String?       @map("st_sync_error")
-  /// Housecall Pro linkage: the originating job. There is no separate quote id — the estimate's
-  /// lines are written onto that job's own line items (replace-all), so the job IS the ledger.
+  /// Housecall Pro linkage (Estimates-tab flow, the zt_* pattern): the originating job, and the
+  /// HCP Estimate (+ its single option) it posted as. hcpEstimateRef is HCP's estimate_number.
+  /// Re-completing after a reopen rewrites that option's lines in place.
   hcpJobId            String?       @map("hcp_job_id") @db.VarChar(64)
+  hcpEstimateId       String?       @map("hcp_estimate_id") @db.VarChar(64)
+  hcpOptionId         String?       @map("hcp_option_id") @db.VarChar(64)
+  hcpEstimateRef      String?       @map("hcp_estimate_ref") @db.VarChar(64)
   hcpSyncedAt         DateTime?     @map("hcp_synced_at")
   hcpSyncError        String?       @map("hcp_sync_error")
   /// QBO Estimate id once posted (companies with a QboConnection). Posted at completion;

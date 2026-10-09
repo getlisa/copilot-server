@@ -112,6 +112,8 @@ async function main() {
     stSyncedAt: null,
     stSyncError: null,
     hcpJobId: null,
+    hcpEstimateId: null,
+    hcpEstimateRef: null,
     hcpSyncedAt: null,
     hcpSyncError: null,
     blockingFlagCount: 0,

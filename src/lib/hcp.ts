@@ -182,13 +182,16 @@ export async function connectHcp(companyId: number, apiKey: string): Promise<Hcp
   return conn;
 }
 
-/** POST /jobs/{job_id}/attachments — multipart, field `file` (their documented name). 202 on accept. */
-export async function uploadHcpJobAttachment(
+/**
+ * POST {path}/attachments — multipart, field `file` (their documented name). 202 on accept.
+ * `path` is the owner: "jobs/{id}" or "estimates/{id}/options/{id}".
+ */
+export async function uploadHcpAttachment(
   conn: HcpConnection,
-  hcpJobId: string,
+  path: string,
   file: { fileName: string; buffer: Buffer; contentType: string }
 ): Promise<void> {
   const form = new FormData();
   form.append("file", new Blob([new Uint8Array(file.buffer)], { type: file.contentType }), file.fileName);
-  await hcpFetch(conn, `jobs/${encodeURIComponent(hcpJobId)}/attachments`, { method: "POST", form });
+  await hcpFetch(conn, `${path}/attachments`, { method: "POST", form });
 }

@@ -133,6 +133,18 @@ few hundred MB of RAM briefly, so check the ECS task's memory reservation before
 Without Chromium the server still runs: `htmlPdfAvailable()` is false and HTML templates fall
 back to the block renderer.
 
+## Pending migration: Housecall Pro estimate linkage — phase17 (2026-10-09)
+
+`docs/sql/phase17.sql` — three additive nullable `quotes` columns (`hcp_estimate_id`,
+`hcp_option_id`, `hcp_estimate_ref`). A completed estimate now posts as a Housecall Pro
+**Estimate** (Estimates tab) instead of rewriting the job's own line items; these columns make a
+re-completion update that estimate in place. Run via `bash docs/sql/apply-phase17.sh` BEFORE the
+image deploys (every HCP post writes them). Requires phase15. Verify:
+
+```sql
+SELECT column_name FROM information_schema.columns WHERE table_name='quotes' AND column_name LIKE 'hcp\_%';  -- 6 rows
+```
+
 ## Pending migration: Home Depot fallback OFF for new accounts — phase16 (2026-10-08)
 
 `docs/sql/phase16.sql` — backfills a `company_configs` row (`hd_fallback_enabled = true`) for every

@@ -49,7 +49,7 @@ import { servicetradeConnectionFor, servicetradeConnected } from "../../lib/serv
 import { syncQuoteToServicetrade } from "../../lib/servicetradeEstimate";
 import { seedQuoteFromHcpJob, hcpWelcomeMessage } from "../../lib/hcpIngest";
 import { hcpConnectionFor, hcpConnected } from "../../lib/hcp";
-import { syncQuoteToHcp } from "../../lib/hcpEstimate";
+import { syncQuoteToHcp, hcpSyncedData } from "../../lib/hcpEstimate";
 import { randomUUID } from "crypto";
 import sharp from "sharp";
 import { EstimateTurn } from "../../copilot/estimate/estimateService";
@@ -1645,8 +1645,8 @@ export class QuoteController {
       if (!hcpConnected(conn)) return;
       const dto = await quoteDtoWithProducts(quote);
       const pdf = await QuoteController.proposalPdfFor(quote);
-      await syncQuoteToHcp(conn, quote, dto, pdf);
-      await prisma.quote.update({ where: { id: quote.id }, data: { hcpSyncedAt: new Date(), hcpSyncError: null } });
+      const r = await syncQuoteToHcp(conn, quote, dto, pdf);
+      await prisma.quote.update({ where: { id: quote.id }, data: hcpSyncedData(r) });
     })().catch(async (e) => {
       const message = e instanceof Error ? e.message : String(e);
       logger.error("Housecall Pro quote sync failed", { quoteId: quote.id, error: message });
@@ -1661,7 +1661,7 @@ export class QuoteController {
     });
   }
 
-  /** POST /api/v1/quotes/:quoteId/hcp — retry / push a completed estimate onto its Housecall Pro job. */
+  /** POST /api/v1/quotes/:quoteId/hcp — retry / push a completed estimate to Housecall Pro as an Estimate. */
   static async postQuoteToHcp(req: RequestWithUser, res: Response) {
     const user = requireUser(req, res);
     if (!user) return;
@@ -1674,10 +1674,10 @@ export class QuoteController {
     try {
       const dto = await quoteDtoWithProducts(quote);
       const pdf = await QuoteController.proposalPdfFor(quote);
-      await syncQuoteToHcp(conn, quote, dto, pdf);
+      const r = await syncQuoteToHcp(conn, quote, dto, pdf);
       const updated = await prisma.quote.update({
         where: { id: quote.id },
-        data: { hcpSyncedAt: new Date(), hcpSyncError: null },
+        data: hcpSyncedData(r),
         include: quoteDtoInclude,
       });
       res.json({ success: true, data: await quoteDtoWithProducts(updated) });
