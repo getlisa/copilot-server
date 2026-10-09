@@ -1,12 +1,12 @@
 import assert from "assert";
 import { addrText, jobBits, mapHcpCatalogItem, hcpExternalId } from "../src/lib/hcpIngest";
-import { hcpLineItemsPayload } from "../src/lib/hcpEstimate";
+import { hcpLineItemsPayload, mergeHcpLineIds, hcpOptionTax } from "../src/lib/hcpEstimate";
 import type { LineItemDto } from "../src/copilot/estimating/quoteDto";
 
 /**
  * Pins the Housecall Pro payload handling: job → picker/seed bits, material/service → pricebook
- * row, quote → job line items. Pure: no network, no database. Shapes follow
- * docs.housecallpro.com (Job, Material, PricebookService, BulkLineItemUpdate).
+ * row, quote → estimate option line items. Pure: no network, no database. Shapes follow
+ * docs.housecallpro.com (Job, Material, PricebookService, Estimate, BulkLineItemUpdate).
  *
  *   npx tsx scripts/check-hcp.ts
  */
@@ -90,4 +90,13 @@ assert.deepStrictEqual(items, [
 // Tax-exempt quote → every line untaxable.
 assert.ok(hcpLineItemsPayload({ chosenOptionGroup: null, taxExempt: true }, { lineItems: [line({})] }).every((i) => i.taxable === false));
 
-console.log("ok   check-hcp: job bits, catalog item map, job line items");
+// Re-sync: existing option line ids are reused by position; surplus old lines are zeroed, never left.
+const resynced = mergeHcpLineIds(items.slice(0, 2), ["li-1", "li-2", "li-3"]);
+assert.deepStrictEqual(resynced.map((i) => [i.id, i.name, i.quantity]), [["li-1", "Softener resin 1 cu ft", 2], ["li-2", "Labor — install", 2.5], ["li-3", "(removed)", 0]]);
+assert.strictEqual(mergeHcpLineIds(items, ["li-1"])[1].id, undefined, "new lines beyond the old ids carry no id → appended");
+// Option tax: percent → 0–1 decimal; exempt → untaxable; no rate → omitted (HCP default).
+assert.deepStrictEqual(hcpOptionTax({ taxExempt: false, taxRatePercent: "5.0000" }), { taxable: true, tax_rate: 0.05, tax_name: "Sales Tax" });
+assert.deepStrictEqual(hcpOptionTax({ taxExempt: true, taxRatePercent: 5 }), { taxable: false });
+assert.strictEqual(hcpOptionTax({ taxExempt: false, taxRatePercent: null }), undefined);
+
+console.log("ok   check-hcp: job bits, catalog item map, estimate option line items, re-sync merge, option tax");

@@ -195,6 +195,8 @@ export function validateDocxTemplate(templateBuffer: Buffer): string | null {
     stSyncedAt: null,
     stSyncError: null,
     hcpJobId: null,
+    hcpEstimateId: null,
+    hcpEstimateRef: null,
     hcpSyncedAt: null,
     hcpSyncError: null,
     blockingFlagCount: 0,

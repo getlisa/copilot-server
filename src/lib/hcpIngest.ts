@@ -438,7 +438,7 @@ export async function hcpWelcomeMessage(companyId: number, hcpJobId: string): Pr
     lines.push("", "Job notes:");
     for (const n of b.notes) lines.push(`- ${n}`);
   }
-  lines.push("", "Describe the work (or confirm the scope above) and I'll build the estimate. When you complete it, the line items are written onto this job in Housecall Pro.");
+  lines.push("", "Describe the work (or confirm the scope above) and I'll build the estimate. When you complete it, it is created as an estimate in Housecall Pro for this job's customer.");
   return lines.join("\n");
 }
 
@@ -451,5 +451,5 @@ export async function hcpChatContext(companyId: number, hcpJobId: string): Promi
 Job ${jobLabel(raw)}${b.jobType ? ` (${b.jobType})` : ""}${b.workStatus ? ` · status: ${b.workStatus}` : ""}: ${b.description || "(no description)"}
 Customer: ${b.customerName ?? "unknown"} · Service address: ${b.addressLine ?? "unknown"}
 ${b.notes.length > 0 ? `JOB NOTES:\n${b.notes.map((n) => `- ${n}`).join("\n")}` : "No job notes recorded."}
-On completion the estimate's line items replace this job's line items in Housecall Pro.`;
+On completion the estimate is created in Housecall Pro's Estimates tab for this job's customer and service address.`;
 }
