@@ -133,10 +133,10 @@ few hundred MB of RAM briefly, so check the ECS task's memory reservation before
 Without Chromium the server still runs: `htmlPdfAvailable()` is false and HTML templates fall
 back to the block renderer.
 
-## Pending migration: removed-line-item archive — phase19 (2026-10-14)
+## Pending migration: removed-line-item archive — phase20 (2026-10-14)
 
-`docs/sql/phase19.sql` — creates `quote_line_items_deleted`. Run via
-`bash docs/sql/apply-phase19.sh` BEFORE the image deploys: the image removes a line with one
+`docs/sql/phase20.sql` — creates `quote_line_items_deleted`. Run via
+`bash docs/sql/apply-phase20.sh` BEFORE the image deploys: the image removes a line with one
 statement that deletes the row and inserts it here, so without the table a technician cannot
 delete a line at all.
 
@@ -170,9 +170,9 @@ SELECT indexname FROM pg_indexes
  WHERE indexname IN ('quote_line_items_deleted_quote_id_idx','quote_line_items_deleted_deleted_at_idx');  -- 2 rows
 ```
 
-## Pending migration: Estimating Agent metrics columns — phase18 (2026-10-14)
+## Pending migration: Estimating Agent metrics columns — phase19 (2026-10-14)
 
-`docs/sql/phase18.sql` — the facts the metrics page needs and the schema does not keep. Additive
+`docs/sql/phase19.sql` — the facts the metrics page needs and the schema does not keep. Additive
 and nullable throughout, except `quotes.share_count` which is `NOT NULL DEFAULT 0`.
 
 | Table | Columns | Unlocks |
@@ -183,9 +183,9 @@ and nullable throughout, except `quotes.share_count` which is `NOT NULL DEFAULT 
 
 Also one partial index Prisma cannot express, so it lives only in the SQL:
 `quotes_completed_at_idx` (every speed/accuracy/value metric scans that same slice). Removed line
-items are phase19's archive table, not a column here.
+items are phase20's archive table, not a column here.
 
-Run via `bash docs/sql/apply-phase18.sh` BEFORE the image deploys: the image writes these columns
+Run via `bash docs/sql/apply-phase19.sh` BEFORE the image deploys: the image writes these columns
 when a quote is created and when a line is edited, so deployed ahead of this script those writes
 fail with a Prisma error.
 

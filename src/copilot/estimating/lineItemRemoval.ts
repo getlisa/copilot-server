@@ -11,7 +11,7 @@ import logger from "../../lib/logger";
  * a direct reading of how good the first draft was. A plain DELETE destroys the only evidence,
  * so the metric cannot be computed at all.
  *
- * Three designs were weighed (see docs/sql/phase19.sql). The one NOT taken is worth knowing:
+ * Three designs were weighed (see docs/sql/phase20.sql). The one NOT taken is worth knowing:
  * soft delete, where the row stays and carries a `deleted_at`. It fails on the read side. Line
  * items are not internal data — they are what prints on the customer's proposal and what posts
  * into their QuickBooks, ZenTrades, Uptick, ServiceTrade and Housecall Pro. Every one of those

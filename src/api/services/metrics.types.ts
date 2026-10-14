@@ -50,7 +50,7 @@ export const GLOBAL_COMPANY_ID = 0;
 /**
  * Whether each metric source field has ever been written.
  *
- * phase18 adds the columns; the writers land with it. Until a column actually carries data
+ * phase19 adds the columns; the writers land with it. Until a column actually carries data
  * every metric over it would compute a confident zero, which reads exactly like a real
  * measurement — so this decides whether a row shows a number or says what is missing.
  */
@@ -91,7 +91,7 @@ export const METRIC_SECTIONS: Record<string, MetricDef[]> = {
       key: "crm_vs_manual_share",
       requires: ["quote_origin"],
       pendingReason:
-        "quotes.origin exists but no quote carries one yet. Quote creation stamps crm or manual from phase18 onward; rows created before that stay unknown and are counted in neither bucket.",
+        "quotes.origin exists but no quote carries one yet. Quote creation stamps crm or manual from phase19 onward; rows created before that stay unknown and are counted in neither bucket.",
     },
   ],
   speed: [{ key: "time_to_quote_p50_secs", companions: ["time_to_quote_p90_secs"] }],

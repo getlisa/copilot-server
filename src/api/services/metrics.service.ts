@@ -370,7 +370,7 @@ export class MetricsService {
   /**
    * Which metric source fields have ever been written.
    *
-   * phase18 adds the columns and their writers land with it, but historical rows carry
+   * phase19 adds the columns and their writers land with it, but historical rows carry
    * nothing. Until a column holds at least one value every metric over it computes a
    * confident zero that reads exactly like a real measurement — so this check decides whether
    * a row shows a number or says what is still missing.

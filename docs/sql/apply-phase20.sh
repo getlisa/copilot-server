@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Apply docs/sql/phase18.sql to production Aurora — the columns the Estimating Agent metrics
-# need: line-item edit provenance on quote_line_items, origin and share tracking on quotes (all additive, all nullable except share_count which defaults to 0).
+# Apply docs/sql/phase20.sql to production Aurora — the quote_line_items_deleted archive that
+# keeps a copy of every line item removed from a draft quote.
 #
 # Run it from the repo root with prod AWS credentials (or from AWS CloudShell after uploading
-# phase18.sql, apply-phase18.sh and build-runner.py into one folder):
-#     bash docs/sql/apply-phase18.sh
+# phase20.sql, apply-phase20.sh and build-runner.py into one folder):
+#     bash docs/sql/apply-phase20.sh
 #
 # Why a script: Aurora is in a private VPC, so a default CloudShell `psql` times out (seen
 # 2026-10-02). A one-off ECS task on the prod image runs inside the VPC, with the RDS master
 # credentials attached because `quotes` is owned by `postgres`, not `app_user`. The throwaway
 # task-definition revision is DEREGISTERED on exit, including on failure.
 #
-# ORDER: RUN THIS BEFORE DEPLOYING THE IMAGE THAT USES IT. The image writes these columns on
-# quote creation and on line edits, so on an image deployed ahead of this script creating a
-# quote or editing a line gets a Prisma error instead.
+# ORDER: RUN THIS BEFORE DEPLOYING THE IMAGE THAT USES IT. The image removes a line item with a
+# single statement that deletes the row and inserts it into the archive; without the table that
+# statement fails and a technician cannot delete a line at all.
 #
-# Success marker: PHASE18_APPLIED (derived from the SQL filename by build-runner.py).
+# Success marker: PHASE20_APPLIED (derived from the SQL filename by build-runner.py).
 set -euo pipefail
 
 export AWS_DEFAULT_REGION=us-east-1
@@ -25,7 +25,7 @@ FAMILY=techcopilot-prod-assistant
 CONTAINER=assistant
 LOG_GROUP=/ecs/techcopilot-prod-assistant
 MASTER_SECRET="arn:aws:secretsmanager:us-east-1:458799594709:secret:rds!cluster-354ddf05-2500-40c0-a536-ab171d0ac675-HGBVkG"
-SQL_FILE="$(dirname "$0")/phase18.sql"
+SQL_FILE="$(dirname "$0")/phase20.sql"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -98,4 +98,4 @@ EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
               --query "tasks[0].containers[?name=='$CONTAINER'].exitCode | [0]" --output text)
 echo "----- exit code: $EXIT_CODE -----"
 [ "$EXIT_CODE" = "0" ] || exit 1
-echo "Phase 18 applied. Edit provenance, origin and share columns exist; run phase19 next."
+echo "Phase 20 applied. quote_line_items_deleted exists; deploy the image next."
