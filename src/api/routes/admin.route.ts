@@ -40,6 +40,14 @@ adminRoute.post("/companies/:companyId/labor-rates", AdminController.createLabor
 adminRoute.patch("/labor-rates/:id", AdminController.updateLaborRate);
 adminRoute.delete("/labor-rates/:id", AdminController.deleteLaborRate);
 
+// Organization price memory (price-memory PRD): the per-technician learning permission is
+// Clara-staff-only by design (FR-3), so it lives here and not in the app's user management.
+adminRoute.get("/companies/:companyId/users", AdminController.listUsers);
+adminRoute.patch("/users/:userId", AdminController.patchUser);
+adminRoute.get("/companies/:companyId/price-memory", AdminController.listPriceMemory);
+adminRoute.patch("/price-memory/:id", AdminController.updatePriceMemory);
+adminRoute.delete("/price-memory/:id", AdminController.deletePriceMemory);
+
 adminRoute.get("/companies/:companyId/templates", AdminController.listTemplates);
 adminRoute.post(
   "/companies/:companyId/templates",

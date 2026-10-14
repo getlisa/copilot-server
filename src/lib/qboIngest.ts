@@ -2,7 +2,7 @@ import type { QboConnection } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import prisma from "./prisma";
 import logger from "./logger";
-import { queryAll, qboFetch, qboConnectionFor, qboConnected } from "./qbo";
+import { queryAll, qboFetch, qboConnectionFor, qboConnected, QboReconnectError } from "./qbo";
 import { ztConnectionFor, ztConnected } from "./zt";
 import { servicetradeConnectionFor, servicetradeConnected } from "./servicetrade";
 import { parseAddress, toBillAddr, fromBillAddr } from "./addressParse";
@@ -725,6 +725,8 @@ export async function runQboSync(
     } catch (e) {
       failures.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
       logger.error("QBO sync stage failed", { companyId, realmId, stage: name, error: e });
+      // Dead refresh token: every later stage would replay the same token request and fail.
+      if (e instanceof QboReconnectError) throw e;
     }
   };
 
@@ -752,8 +754,15 @@ export async function runQboSync(
   try {
     // Iterated in ALL_QBO_SYNC_STAGES order, not caller order: taxPrefs before salesTax is a real
     // dependency, and a caller listing stages in an arbitrary order must not change the outcome.
-    for (const name of ALL_QBO_SYNC_STAGES)
-      if (stages.includes(name)) await stage(name, runners[name]);
+    try {
+      for (const name of ALL_QBO_SYNC_STAGES)
+        if (stages.includes(name)) await stage(name, runners[name]);
+    } catch (e) {
+      if (!(e instanceof QboReconnectError)) throw e;
+      if (markComplete)
+        await prisma.qboConnection.update({ where: { companyId }, data: { lastSyncError: e.message } });
+      throw e;
+    }
 
     if (failures.length) {
       // Record the failure and keep whatever did land. `lastSyncAt` is deliberately NOT advanced:

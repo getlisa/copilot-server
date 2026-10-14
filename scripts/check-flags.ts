@@ -66,7 +66,7 @@ expect("book price carries no flags", flagsFor(fromBook), []);
 // independently; see toLineItemDto). 0% markup keeps this check about the source label alone.
 expect(
   "book price names its book",
-  toLineItemDto(fromBook, undefined, 0, bookNames).priceSource,
+  toLineItemDto(fromBook, undefined, 0, { bookNames }).priceSource,
   "Supplier A"
 );
 
