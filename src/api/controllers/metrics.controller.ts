@@ -4,10 +4,10 @@ import { RequestWithUser, isAdminRole } from "../middlewares/auth";
 import logger from "../../lib/logger";
 import { metricsService, MetricsService } from "../services/metrics.service";
 import { MetricGrain } from "../services/metrics.types";
-import { getMetricsSchema, listCompaniesSchema } from "../schemas/metrics.schema";
+import { getMetricsSchema } from "../schemas/metrics.schema";
 
 type GetMetricsRequest = ValidatedRequest<typeof getMetricsSchema> & RequestWithUser;
-type ListCompaniesRequest = ValidatedRequest<typeof listCompaniesSchema> & RequestWithUser;
+type ListCompaniesRequest = RequestWithUser;
 
 /**
  * Only an admin may look beyond their own tenant. A service manager reads metrics, but for

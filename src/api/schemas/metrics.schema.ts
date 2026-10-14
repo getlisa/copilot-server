@@ -21,10 +21,3 @@ export const getMetricsSchema = z.object({
     grain: z.enum(["hour", "day", "week"]).optional(),
   }),
 });
-
-/** GET /api/v1/metrics-smolorbig/companies — tenants for the company filter. */
-export const listCompaniesSchema = z.object({
-  params: z.object({}),
-  body: z.object({}).passthrough().optional(),
-  query: z.object({}).passthrough(),
-});

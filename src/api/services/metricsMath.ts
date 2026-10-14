@@ -71,6 +71,35 @@ export const POINT_IN_TIME_METRICS = new Set([
 ]);
 
 /**
+ * Metrics whose headline is computed over the whole window by window.sql, because no
+ * arithmetic over the buckets can produce it. See that file for why.
+ */
+export const WINDOW_METRICS = new Set([
+  "time_to_quote_p50_secs",
+  "time_to_quote_p90_secs",
+  "median_markup_percent",
+]);
+
+/**
+ * Drop a trailing bucket that has not finished yet.
+ *
+ * DAU, WAU and MAU report the most recent bucket, and the most recent bucket of a window
+ * ending now is almost always in progress. At 09:00 that is a partial day being compared
+ * against complete ones — a headline that climbs through the day and reads 0 every morning.
+ * The last COMPLETE bucket is the honest answer; if none has completed, there is none.
+ */
+export function dropInProgressBucket(
+  series: SeriesPoint[],
+  grain: MetricGrain,
+  now = new Date()
+): SeriesPoint[] {
+  if (series.length === 0) return series;
+  const last = series[series.length - 1];
+  const ends = bucketEnd(new Date(last.t), grain);
+  return ends.getTime() > now.getTime() ? series.slice(0, -1) : series;
+}
+
+/**
  * Collapse a series into the one number the card shows.
  *
  * Three kinds of metric collapse three different ways, and using the wrong one is the classic

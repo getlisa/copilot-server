@@ -24,8 +24,6 @@ scoped_quotes AS (
   FROM quotes q
   WHERE ($3::int[] IS NULL OR q.company_id = ANY($3::int[]))
 ),
-scopes AS (SELECT DISTINCT scope_id FROM scoped_quotes),
-grid AS (SELECT s.scope_id, b.b FROM scopes s CROSS JOIN buckets b),
 -- An estimating chat is a conversation with no job attached: job chats carry a job_id, the
 -- estimating agent's do not.
 --
@@ -46,6 +44,16 @@ est_chat AS (
   WHERE c.job_id IS NULL
     AND ($3::int[] IS NULL OR u.company_id = ANY($3::int[]))
 ),
+-- Every scope that shows ANY estimating activity, not only those that produced a quote.
+-- Built from quotes alone, a company whose technicians have started chats but completed
+-- nothing yet gets no row in the grid at all — so its DAU, WAU and MAU come back empty and
+-- the page reads "no technicians" for a tenant that is actively using the product.
+scopes AS (
+  SELECT scope_id FROM scoped_quotes
+  UNION
+  SELECT scope_id FROM est_chat
+),
+grid AS (SELECT s.scope_id, b.b FROM scopes s CROSS JOIN buckets b),
 -- Active-technician counts are calendar buckets, each at its own size: a day for DAU, a week
 -- for WAU, a month for MAU. The spec lists them as three rows precisely because they are
 -- three bucket sizes, not one metric viewed three ways.

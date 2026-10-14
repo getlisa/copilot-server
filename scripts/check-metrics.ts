@@ -1,9 +1,11 @@
 import assert from "assert";
 import {
   bucketEnd,
+  dropInProgressBucket,
   grainFor,
   summarize,
   truncateToGrain,
+  WINDOW_METRICS,
 } from "../src/api/services/metricsMath";
 import { SeriesPoint } from "../src/api/services/metrics.types";
 
@@ -109,5 +111,35 @@ assert.strictEqual(g(2), "hour");
 assert.strictEqual(g(3), "day");
 assert.strictEqual(g(120), "day");
 assert.strictEqual(g(121), "week");
+
+// ---- dropInProgressBucket: a partial bucket must not become the headline ---------------
+// DAU reports the most recent bucket, and the most recent bucket of a window ending now is
+// almost always still running. At 09:00 that is a part-day compared against whole ones.
+const dayPoints = [p("2026-10-13T00:00:00.000Z", 4), p("2026-10-14T00:00:00.000Z", 1)];
+const midMorning = new Date("2026-10-14T09:00:00Z");
+assert.strictEqual(dropInProgressBucket(dayPoints, "day", midMorning).length, 1);
+assert.strictEqual(summarize("dau", dropInProgressBucket(dayPoints, "day", midMorning)), 4);
+// Once the bucket has closed it counts normally.
+const nextDay = new Date("2026-10-15T00:30:00Z");
+assert.strictEqual(dropInProgressBucket(dayPoints, "day", nextDay).length, 2);
+assert.strictEqual(summarize("dau", dropInProgressBucket(dayPoints, "day", nextDay)), 1);
+// Nothing to drop is not an error.
+assert.deepStrictEqual(dropInProgressBucket([], "day", midMorning), []);
+
+// ---- WINDOW_METRICS: percentiles never come from the series ----------------------------
+// The median of ninety daily medians is not the median of the ninety days, so these three
+// are answered by window.sql instead of by collapsing buckets.
+for (const k of ["time_to_quote_p50_secs", "time_to_quote_p90_secs", "median_markup_percent"])
+  assert.ok(WINDOW_METRICS.has(k), `${k} must be answered over the window`);
+assert.ok(!WINDOW_METRICS.has("quotes_completed"));
+
+// ---- the "Today" preset must not block DAU ---------------------------------------------
+// Today arrives as 00:00:00.000 -> 23:59:59.999, which is 0.99999 days. Compared raw against
+// minDays 1 that blocked DAU on the one preset whose entire purpose is to show today.
+const todayDays =
+  (new Date("2026-10-14T23:59:59.999Z").getTime() - new Date("2026-10-14T00:00:00.000Z").getTime()) /
+  86_400_000;
+assert.ok(todayDays < 1, "the Today window really is under a day");
+assert.ok(Math.ceil(todayDays) >= 1, "but it contains one whole day bucket");
 
 console.log("ok   check-metrics: series collapsing + bucket arithmetic");

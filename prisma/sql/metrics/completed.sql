@@ -119,5 +119,8 @@ CROSS JOIN LATERAL (
     ('median_markup_percent',     f.med_markup,      NULL::numeric),
     ('pct_quotes_with_image',     f.n_with_image,    f.n_quotes)
 ) AS m(metric_key, numerator, denominator)
-WHERE f.n_quotes > 0
+-- Every bucket in the window is emitted, including the ones with no completed quote. A bucket
+-- dropped here is not drawn as zero by the page, it is drawn as a straight line between its
+-- neighbours — a fortnight where nothing completed then reads as steady activity. An empty
+-- bucket gives quotes_completed 0, and every ratio NULL via the denominator = 0 branch above.
 ORDER BY g.scope_id, g.b, m.metric_key;

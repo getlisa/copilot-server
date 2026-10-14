@@ -10,7 +10,7 @@ import {
   MetricRow,
   SeriesPoint,
 } from "./metrics.types";
-import { grainFor, summarize } from "./metricsMath";
+import { dropInProgressBucket, grainFor, summarize, WINDOW_METRICS } from "./metricsMath";
 
 /**
  * Estimating Agent metrics.
@@ -120,6 +120,37 @@ export class MetricsService {
     return out;
   }
 
+  /**
+   * Whole-window values for the metrics a bucket series cannot answer.
+   *
+   * Returns metric_key -> value for one scope. Percentiles are not additive, so the headline
+   * has to be computed over the period rather than picked out of the series.
+   */
+  private async runWindowQuery(params: {
+    startDate: Date;
+    endDate: Date;
+    companyIds: number[] | null;
+    global: boolean;
+  }): Promise<Map<number, Map<string, number | null>>> {
+    const raw = await prisma.$queryRawUnsafe<
+      { company_id: number; metric_key: string; value: unknown }[]
+    >(
+      this.loadSql("window"),
+      params.startDate,
+      params.endDate,
+      params.companyIds,
+      params.global
+    );
+    const out = new Map<number, Map<string, number | null>>();
+    for (const r of raw) {
+      const scope = Number(r.company_id);
+      const m = out.get(scope) ?? new Map<string, number | null>();
+      m.set(r.metric_key, this.toNumber(r.value));
+      out.set(scope, m);
+    }
+    return out;
+  }
+
   /** Group rows into one sorted series per metric key. */
   private toSeries(rows: MetricRow[]): Map<string, SeriesPoint[]> {
     const byMetric = new Map<string, SeriesPoint[]>();
@@ -155,16 +186,25 @@ export class MetricsService {
     const isAll = ids === undefined;
     const windowDays = (params.endDate.getTime() - params.startDate.getTime()) / 86_400_000;
 
-    const rows = await this.runQueries({
-      startDate: params.startDate,
-      endDate: params.endDate,
-      companyIds: ids ?? null,
-      global: true,
-      grain: params.grain,
-    });
+    const [rows, windowValues, readiness] = await Promise.all([
+      this.runQueries({
+        startDate: params.startDate,
+        endDate: params.endDate,
+        companyIds: ids ?? null,
+        global: true,
+        grain: params.grain,
+      }),
+      this.runWindowQuery({
+        startDate: params.startDate,
+        endDate: params.endDate,
+        companyIds: ids ?? null,
+        global: true,
+      }),
+      this.fieldReadiness(),
+    ]);
 
+    const windowGlobal = windowValues.get(GLOBAL_COMPANY_ID) ?? new Map<string, number | null>();
     const byMetric = this.toSeries(rows);
-    const readiness = await this.fieldReadiness();
 
     // A split is only meaningful when the number covers more than one tenant. A single
     // selected company already is its own breakdown.
@@ -178,18 +218,36 @@ export class MetricsService {
           })
         : {};
 
+    /**
+     * The one number a card shows.
+     *
+     * Three sources, because three kinds of metric collapse differently: a percentile comes
+     * from the window query, a per-calendar-bucket count from its last COMPLETE bucket, and
+     * everything else from the series totals.
+     */
+    const headline = (key: string, series: SeriesPoint[], grain: MetricGrain) => {
+      if (WINDOW_METRICS.has(key)) return windowGlobal.get(key) ?? null;
+      if (FIXED_GRAIN_METRICS[key]) return summarize(key, dropInProgressBucket(series, grain));
+      return summarize(key, series);
+    };
+
     const sections: Record<string, MetricSeriesResult[]> = {};
 
     for (const [section, defs] of Object.entries(METRIC_SECTIONS)) {
       sections[section] = defs.map((def): MetricSeriesResult => {
         // A window shorter than the metric's own bucket cannot express it. Say so, rather
         // than drawing a partial bucket that looks like a complete one.
+        //
+        // Measured in whole days, not a fraction of one. "Today" arrives as 00:00:00.000 to
+        // 23:59:59.999, which is 0.99999 days — against a raw `< 1` that blocked DAU on the
+        // one preset whose entire purpose is to show today.
         const fixed = FIXED_GRAIN_METRICS[def.key];
-        if (fixed && windowDays < fixed.minDays) {
+        if (fixed && Math.ceil(windowDays) < fixed.minDays) {
+          const unit = fixed.minDays === 1 ? "day" : "days";
           return {
             key: def.key,
             blocked: true,
-            reason: `Needs at least ${fixed.minDays} days in the selected period — this metric counts technicians per ${fixed.grain}.`,
+            reason: `Needs at least ${fixed.minDays} ${unit} in the selected period — this metric counts technicians per ${fixed.grain}.`,
             series: [],
             current: null,
             grain: fixed.grain,
@@ -219,10 +277,14 @@ export class MetricsService {
           // numerator/denominator travel with every point so the detail table can show the
           // counts behind a ratio, not just the ratio.
           series,
-          current: summarize(def.key, series),
+          current: headline(def.key, series, fixed?.grain ?? params.grain),
           companions: (def.companions ?? []).map((ck) => ({
             key: ck,
-            current: summarize(ck, byMetric.get(ck) ?? []),
+            current: headline(
+              ck,
+              byMetric.get(ck) ?? [],
+              FIXED_GRAIN_METRICS[ck]?.grain ?? params.grain
+            ),
           })),
         };
       });
@@ -248,13 +310,19 @@ export class MetricsService {
     companyIds: number[] | null;
     grain: MetricGrain;
   }): Promise<Record<string, { companyId: number; name: string; value: number | null }[]>> {
-    const [rows, companies] = await Promise.all([
+    const [rows, windowByCompany, companies] = await Promise.all([
       this.runQueries({
         startDate: params.startDate,
         endDate: params.endDate,
         companyIds: params.companyIds,
         global: false,
         grain: params.grain,
+      }),
+      this.runWindowQuery({
+        startDate: params.startDate,
+        endDate: params.endDate,
+        companyIds: params.companyIds,
+        global: false,
       }),
       this.listCompanies(),
     ]);
@@ -272,8 +340,15 @@ export class MetricsService {
     const out: Record<string, { companyId: number; name: string; value: number | null }[]> = {};
 
     for (const [companyId, companyRows] of byCompany) {
+      const win = windowByCompany.get(companyId);
       for (const [key, series] of this.toSeries(companyRows)) {
-        const value = summarize(key, series);
+        // Same three collapse rules as the headline, so a company's row never disagrees with
+        // the total it is supposed to explain.
+        const value = WINDOW_METRICS.has(key)
+          ? win?.get(key) ?? null
+          : FIXED_GRAIN_METRICS[key]
+            ? summarize(key, dropInProgressBucket(series, FIXED_GRAIN_METRICS[key].grain))
+            : summarize(key, series);
         if (value === null) continue;
         out[key] = out[key] ?? [];
         out[key].push({

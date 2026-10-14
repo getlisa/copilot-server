@@ -3,7 +3,7 @@ import { MetricsController } from "../controllers/metrics.controller";
 import { validate } from "../middlewares/validate";
 import { withValidatedRequest } from "../middlewares/withValidatedRequest";
 import { authMiddleware } from "../middlewares/auth";
-import { getMetricsSchema, listCompaniesSchema } from "../schemas/metrics.schema";
+import { getMetricsSchema } from "../schemas/metrics.schema";
 
 /**
  * Estimating Agent metrics, read by the unlinked /metrics-smolorbig page.
@@ -22,10 +22,7 @@ metricsRoute.get(
   withValidatedRequest(MetricsController.getMetrics)
 );
 
-metricsRoute.get(
-  "/companies",
-  validate(listCompaniesSchema),
-  withValidatedRequest(MetricsController.listCompanies)
-);
+// No query, params or body — nothing to validate.
+metricsRoute.get("/companies", MetricsController.listCompanies);
 
 export { metricsRoute };
