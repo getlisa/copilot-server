@@ -380,7 +380,7 @@ export class MetricsService {
       SELECT
         EXISTS (SELECT 1 FROM quote_line_items WHERE price_edited_at    IS NOT NULL) AS price_edited,
         EXISTS (SELECT 1 FROM quote_line_items WHERE quantity_edited_at IS NOT NULL) AS quantity_edited,
-        EXISTS (SELECT 1 FROM quote_line_items WHERE deleted_at         IS NOT NULL) AS line_deleted,
+        EXISTS (SELECT 1 FROM quote_line_items_deleted)                              AS line_deleted,
         EXISTS (SELECT 1 FROM quote_line_items WHERE agent_suggested)                AS agent_suggested,
         EXISTS (SELECT 1 FROM quotes           WHERE origin             IS NOT NULL) AS quote_origin,
         EXISTS (SELECT 1 FROM quotes           WHERE first_shared_at    IS NOT NULL) AS quote_shared

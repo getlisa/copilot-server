@@ -133,6 +133,50 @@ few hundred MB of RAM briefly, so check the ECS task's memory reservation before
 Without Chromium the server still runs: `htmlPdfAvailable()` is false and HTML templates fall
 back to the block renderer.
 
+## Pending migration: removed-line-item archive — phase19 (2026-10-14)
+
+`docs/sql/phase19.sql` — creates `quote_line_items_deleted`, and DROPS the `deleted_at` /
+`deleted_by` columns phase18 put on `quote_line_items`. Requires phase18. Run via
+`bash docs/sql/apply-phase19.sh` BEFORE the image deploys: the image removes a line with one
+statement that deletes the row and inserts it here, so without the table a technician cannot
+delete a line at all.
+
+Dropping those two columns is safe because nothing ever wrote them (0 of 113 rows). They were
+added for a soft-delete design that this phase replaces, and leaving them would leave two
+contradictory ways to say "this line was removed".
+
+**Why an archive rather than soft delete or a counter.** Soft delete keeps the removed row in
+`quote_line_items`, so every read has to exclude it and one missed filter puts a line the
+technician deliberately removed back onto a customer's proposal, or onto the estimate posted
+into their QuickBooks — silently, with no error. A counter is safe to read but cannot be
+recomputed if it desyncs and can never say *which* lines were deleted. Moving the row keeps the
+hard delete (so no read path changes at all), keeps the metric a `COUNT` over rows like every
+other metric, and keeps the record.
+
+The write is one statement, which is what makes it correct:
+
+```sql
+WITH locked  AS (SELECT id FROM quotes WHERE id=$2 AND status='DRAFT' FOR UPDATE),
+     removed AS (DELETE FROM quote_line_items WHERE id=$1 AND quote_id IN (SELECT id FROM locked) RETURNING *)
+INSERT INTO quote_line_items_deleted (...) SELECT ... FROM removed RETURNING id;
+```
+
+`FOR UPDATE` is not decoration. A plain subquery reads the quote through the statement's own
+snapshot, so a completion committing mid-statement is invisible and the line is deleted from an
+already-posted quote — reproduced locally. Locking the quote row gets the re-check a plain read
+does not, and the delete is then correctly refused. Measured overhead versus a plain delete,
+over 20k line items: **+0.054 ms** per deletion, 311 bytes per archived row.
+
+Verify:
+
+```sql
+SELECT to_regclass('public.quote_line_items_deleted');  -- not null
+SELECT column_name FROM information_schema.columns
+ WHERE table_name='quote_line_items' AND column_name IN ('deleted_at','deleted_by');  -- 0 rows
+SELECT indexname FROM pg_indexes
+ WHERE indexname IN ('quote_line_items_deleted_quote_id_idx','quote_line_items_deleted_deleted_at_idx');  -- 2 rows
+```
+
 ## Pending migration: Estimating Agent metrics columns — phase18 (2026-10-14)
 
 `docs/sql/phase18.sql` — the facts the metrics page needs and the schema does not keep. Additive

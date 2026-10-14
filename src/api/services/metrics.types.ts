@@ -113,7 +113,7 @@ export const METRIC_SECTIONS: Record<string, MetricDef[]> = {
       key: "lines_deleted_rate",
       requires: ["line_deleted", "agent_suggested"],
       pendingReason:
-        "Needs soft delete writing deleted_at instead of removing the row, and agent_suggested set on agent-created lines. Its denominator is lines the agent added, so with agent_suggested false everywhere this divides by zero.",
+        "No line has been archived to quote_line_items_deleted yet, and agent_suggested is false on every row. Its denominator is lines the agent proposed, so with agent_suggested unset everywhere this would divide by zero.",
     },
     {
       key: "manual_line_rate",
