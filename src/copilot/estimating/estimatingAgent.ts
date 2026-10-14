@@ -1,4 +1,5 @@
 import prisma from "../../lib/prisma";
+import { removeLineItems } from "./lineItemRemoval";
 import logger from "../../lib/logger";
 import { callStructured, EstimateTurn } from "../estimate/estimateService";
 import { ESTIMATED_PRICE_CODE } from "./quoteDto";
@@ -744,6 +745,8 @@ export async function runEstimatingTurn(opts: {
                 unitPrice: op.unitPrice,
                 optionGroup: op.optionGroup?.trim() || null,
                 isLabor: op.isLabor === true,
+                // The agent created this line, even though it carries a technician-stated price.
+                agentSuggested: true,
                 manuallyEdited: true,
                 priceMemoryId: learnedId,
                 sortOrder: nextSort++,
@@ -794,6 +797,7 @@ export async function runEstimatingTurn(opts: {
               priceMemoryId: priced.priceMemoryId,
               optionGroup: op.optionGroup?.trim() || null,
               isLabor: op.isLabor === true,
+              agentSuggested: true,
               sortOrder: nextSort++,
             },
           });
@@ -821,6 +825,7 @@ export async function runEstimatingTurn(opts: {
               unit: "hr",
               unitPrice: rate,
               isLabor: true,
+              agentSuggested: true,
               // Labor is not taxed by default, matching the "Taxed" column the estimate PDF has
               // always printed. Correctable per line on the Invoice tab.
               taxable: false,
@@ -973,11 +978,14 @@ export async function runEstimatingTurn(opts: {
         }
         case "remove_item": {
           if (!op.itemId || !validIds.has(op.itemId)) break;
-          // deleteMany, not delete: the relation filter is the only way to hang the Draft
-          // condition on a removal, and a delete landing on an already-synced quote would
-          // strip a line the CRM still shows. A no-op here is the turn being discarded.
-          await prisma.quoteLineItem.deleteMany({
-            where: { id: op.itemId, quote: { companyId: opts.companyId, status: "DRAFT" } },
+          // The Draft condition rides inside the removal's own statement — a delete landing on
+          // an already-synced quote would strip a line the CRM still shows. A no-op here is the
+          // turn being discarded. The row is archived on the way out so the deletion stays
+          // countable; deletedBy is null because the agent is acting, not a person.
+          await removeLineItems({
+            quoteId: opts.quoteId,
+            companyId: opts.companyId,
+            itemIds: [op.itemId],
           });
           break;
         }
@@ -990,6 +998,9 @@ export async function runEstimatingTurn(opts: {
             data: {
               quoteId: opts.quoteId,
               description: op.referenceText ?? "(ambiguous reference)",
+              // agentSuggested stays false: this is the placeholder holding a pending question,
+              // not a line proposed to the customer. It is also the one removal that is never
+              // archived, for the same reason.
               sortOrder: nextSort++,
               ambiguousAction: {
                 action: op.action ?? "remove",

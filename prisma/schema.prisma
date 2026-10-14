@@ -1334,6 +1334,21 @@ model Quote {
   /// Which option group the customer chose, answered at completion time (QBO PRD US3).
   /// Null = not asked / no options. Cleared on reopen so re-completion asks again.
   chosenOptionGroup String?         @map("chosen_option_group")
+  /// Where this quote was started (metrics: CRM-imported vs manually started chats). "crm" =
+  /// from a CRM job picker, "manual" = from a plain new chat; originProvider and originJobRef
+  /// name the ticket on the CRM side. NULL on every row predating phase19 — unknown, which the
+  /// metric counts in neither bucket rather than reading as manual and overstating manual starts.
+  /// Plain VARCHAR with a CHECK, not an enum: cheaper to extend (see docs/sql/phase19.sql).
+  origin            String?         @db.VarChar(16)
+  originProvider    String?         @map("origin_provider") @db.VarChar(32)
+  originJobRef      String?         @map("origin_job_ref") @db.VarChar(128)
+  /// First time this quote reached a customer, by any route — email, DOCX or PDF (metrics:
+  /// share rate). Set once and never overwritten: sending the same quote twice is one shared
+  /// quote, and counting events instead would push the rate above 100%. shareCount keeps the
+  /// event count separately, for anyone who does want it.
+  firstSharedAt     DateTime?       @map("first_shared_at")
+  shareChannel      String?         @map("share_channel") @db.VarChar(16)
+  shareCount        Int             @default(0) @map("share_count")
   createdAt         DateTime        @default(now()) @map("created_at")
   updatedAt         DateTime        @updatedAt @map("updated_at")
   completedAt       DateTime?       @map("completed_at")
@@ -1394,6 +1409,16 @@ model QuoteLineItem {
   /// and the common case; the per-line toggle exists for the exceptions (a permit fee, a
   /// non-taxable service). Maps to `TaxCodeRef` = `TAX` or `NON` on the posted estimate.
   taxable           Boolean  @default(true)
+  /// Field-level edit provenance (metrics: price override rate, quantity edit rate).
+  /// `manuallyEdited` is one boolean and cannot tell the two apart — both rates would report
+  /// the identical number. Set once, on the FIRST edit of that field, and the original value is
+  /// captured in the same write so a reviewer can see how far the technician moved the agent's
+  /// figure. Null on rows predating phase19: a guessed timestamp would be indistinguishable
+  /// from a real one and would quietly corrupt the first month of both rates.
+  priceEditedAt     DateTime? @map("price_edited_at")
+  quantityEditedAt  DateTime? @map("quantity_edited_at")
+  originalUnitPrice Decimal?  @map("original_unit_price") @db.Decimal(12, 2)
+  originalQuantity  Decimal?  @map("original_quantity") @db.Decimal(12, 2)
   sortOrder         Int      @map("sort_order")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
@@ -1409,6 +1434,48 @@ model QuoteLineItem {
 /// source when two books carry the same item at the same price — the price that wins a
 /// collision is always the HIGHER one, regardless of priority. Unique priority per company
 /// is validated at configuration time (reorders swap values, so no DB constraint).
+/// A line item removed from a draft quote (metrics: line items deleted), written by the same
+/// statement that deletes the row:
+///
+///   WITH locked  AS (SELECT id FROM quotes WHERE id=$2 AND status='DRAFT' FOR UPDATE),
+///        removed AS (DELETE FROM quote_line_items WHERE id=$1 AND quote_id IN (SELECT id FROM locked) RETURNING *)
+///   INSERT INTO quote_line_items_deleted (...) SELECT ... FROM removed
+///
+/// One statement, so the delete and the record cannot come apart. The INSERT is driven by the
+/// DELETE's RETURNING, so a retry after an ambiguous failure archives nothing rather than
+/// double-counting. FOR UPDATE is what makes the Draft check hold: a plain subquery reads the
+/// quote through the statement's own snapshot and will happily delete from a quote that was
+/// completed a moment ago, because Postgres only re-checks rows the statement itself targets —
+/// and the completion writes `quotes`, not this line.
+///
+/// The row genuinely leaves quote_line_items, which is the point: no read path anywhere needs a
+/// "not deleted" filter, so no proposal or CRM push can ever resurrect a removed line.
+model QuoteLineItemDeleted {
+  /// The original line's id. Primary key here too, so re-archiving the same line is refused by
+  /// the database rather than silently double-counted.
+  id             String   @id
+  quoteId        String   @map("quote_id")
+  /// Denormalised from the removed row. agent_suggested is the load-bearing one: the rate's
+  /// denominator is lines the agent proposed, so a deleted line has to be added back to it or
+  /// the deletion counts twice — once in the numerator, once as a missing proposal.
+  agentSuggested Boolean  @default(false) @map("agent_suggested")
+  isLabor        Boolean  @default(false) @map("is_labor")
+  quantity       Decimal? @db.Decimal(12, 2)
+  unitPrice      Decimal? @map("unit_price") @db.Decimal(12, 2)
+  deletedAt      DateTime @default(now()) @map("deleted_at")
+  deletedBy      BigInt?  @map("deleted_by")
+  /// The whole original row. The typed columns above are what the metrics query; this keeps the
+  /// record complete when quote_line_items gains a column this table does not have.
+  snapshot       Json
+
+  /// No relation to Quote on purpose. quote_line_items cascades from quotes, so a deleted quote
+  /// takes its lines with it; a cascading FK here would do the same to the history.
+  @@index([quoteId])
+  @@index([deletedAt])
+  @@map("quote_line_items_deleted")
+  @@schema("public")
+}
+
 model Pricebook {
   id               Int      @id @default(autoincrement())
   companyId        Int      @map("company_id")

@@ -1,6 +1,7 @@
 import { Response } from "express";
 import { Prisma } from "@prisma/client";
 import prisma from "../../lib/prisma";
+import { removeLineItems } from "../../copilot/estimating/lineItemRemoval";
 import logger from "../../lib/logger";
 import { RequestWithUser } from "../middlewares/auth";
 import { runEstimatingTurn } from "../../copilot/estimating/estimatingAgent";
@@ -229,6 +230,33 @@ async function recordQboPostResult(quoteId: string, syncToken: string | null) {
       qboRemoteChangedAt: null,
     },
   });
+}
+
+/**
+ * Record that a quote reached a customer (metrics: share rate).
+ *
+ * First send only — `first_shared_at` is set once and never overwritten, because emailing the
+ * same quote twice is one shared quote and counting events instead would push the rate above
+ * 100%. `share_count` keeps the event count separately for anyone who does want it.
+ *
+ * Called only after the document was actually produced and sent: an attempt that threw would
+ * otherwise report a quote as shared that the customer never received. Failures here are
+ * swallowed — the customer HAS the document by this point, and a metrics write must never turn
+ * a delivered proposal into an error response.
+ */
+async function markShared(quoteId: string, channel: "email" | "docx" | "pdf") {
+  try {
+    await prisma.quote.updateMany({
+      where: { id: quoteId, firstSharedAt: null },
+      data: { firstSharedAt: new Date(), shareChannel: channel },
+    });
+    await prisma.quote.update({
+      where: { id: quoteId },
+      data: { shareCount: { increment: 1 } },
+    });
+  } catch (error) {
+    logger.warn("Could not record quote share", { quoteId, channel, error });
+  }
 }
 
 async function touchQuote(quoteId: string) {
@@ -526,6 +554,24 @@ export class QuoteController {
         markupPercent: config?.default_markup_percent ?? 0,
         salesTaxId: crmSeed?.salesTaxId ?? tax?.id ?? null,
         taxRatePercent: crmSeed?.taxRatePercent ?? tax?.ratePercent ?? null,
+        // Where this quote was started, for "CRM-imported vs manually started chats". Derived
+        // from whether a CRM job seeded it, which is the only thing that distinguishes the two —
+        // quote conversations carry no job_id and crm_entity_links is empty, so there is nothing
+        // to infer it from later. Quotes created before this stay NULL: unknown, and counted in
+        // neither bucket rather than guessed as manual.
+        origin: crmSeed ? "crm" : "manual",
+        originProvider: crmSeed
+          ? ztSeed
+            ? "zentrades"
+            : uptickSeed
+              ? "uptick"
+              : stSeed
+                ? "servicetrade"
+                : hcpSeed
+                  ? "housecallpro"
+                  : null
+          : null,
+        originJobRef: crmSeed ? (ztTicketId ?? uptickTaskId ?? stJobId ?? hcpJobId ?? null) : null,
         ...(crmSeed
           ? {
               ztTicketId: ztSeed ? ztTicketId : null,
@@ -1116,13 +1162,21 @@ export class QuoteController {
       // estimate the CRM has already been sent.
       const draftScope = { quote: { companyId: user.companyId, status: "DRAFT" as const } };
       if (action.action === "remove") {
-        await prisma.quoteLineItem.deleteMany({
-          where: { id: body.resolveCandidateId, ...draftScope },
+        // A real line the technician chose to drop — archived, because this is exactly what
+        // "line items deleted" counts.
+        await removeLineItems({
+          quoteId: quote.id,
+          companyId: user.companyId,
+          itemIds: [body.resolveCandidateId],
+          deletedBy: user.userId,
         });
       } else {
         await updateDraftLineItem(body.resolveCandidateId, user.companyId, { ...action.fields });
       }
-      await prisma.quoteLineItem.deleteMany({ where: { id: item.id, ...draftScope } }); // placeholder
+      // The placeholder row that held the pending "which line did you mean?" question. Plain
+      // delete on purpose: it is bookkeeping, never a line proposed to a customer, so archiving
+      // it would add a phantom deletion to the metric on every ambiguous reference resolved.
+      await prisma.quoteLineItem.deleteMany({ where: { id: item.id, ...draftScope } });
       await touchQuote(quote.id);
       const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
       return res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
@@ -1161,6 +1215,13 @@ export class QuoteController {
       if (item.isLabor && !(Number(body.quantity) > 0))
         return fail(res, 400, "Labor hours must be greater than zero");
       data.quantity = body.quantity;
+      // First quantity edit only (metrics: quantity edit rate), capturing what the agent had
+      // proposed in the same write. `manuallyEdited` is one boolean and cannot tell a price
+      // edit from a quantity edit — both rates would report the identical number.
+      if (item.quantityEditedAt == null) {
+        data.quantityEditedAt = new Date();
+        data.originalQuantity = item.quantity;
+      }
     }
     if (body.unit !== undefined) data.unit = body.unit;
     // Per-line QBO item pick (QBO PRD US5). Both set together from the dropdown; null clears
@@ -1173,6 +1234,13 @@ export class QuoteController {
     if (body.unitPrice !== undefined) {
       data.unitPrice = body.unitPrice == null ? null : toBase(body.unitPrice);
       data.manuallyEdited = true;
+      // First price edit only (metrics: price override rate). The original is captured here so
+      // a reviewer can see how far the technician moved the agent's figure, not merely that
+      // they did.
+      if (item.priceEditedAt == null) {
+        data.priceEditedAt = new Date();
+        data.originalUnitPrice = item.unitPrice;
+      }
       data.sourcePricebookId = null; // the technician's own number has no book source
       // The technician's own number retires any web-search estimate.
       if (item.pricebookCode === ESTIMATED_PRICE_CODE) data.pricebookCode = null;
@@ -1217,10 +1285,13 @@ export class QuoteController {
     if (quote.status === "COMPLETED") return fail(res, 409, "Quote is Completed and frozen");
     const item = quote.lineItems.find((i) => i.id === req.params.itemId);
     if (!item) return fail(res, 404, "Line item not found");
-    const { count } = await prisma.quoteLineItem.deleteMany({
-      where: { id: item.id, quote: { companyId: user.companyId, status: "DRAFT" } },
+    const { removed } = await removeLineItems({
+      quoteId: quote.id,
+      companyId: user.companyId,
+      itemIds: [item.id],
+      deletedBy: user.userId,
     });
-    if (count === 0) return fail(res, 409, "Quote is Completed and frozen");
+    if (removed === 0) return fail(res, 409, "Quote is Completed and frozen");
     await touchQuote(quote.id);
     const updated = await loadOwnedQuote(quote.id, user.userId, user.companyId);
     res.json({ success: true, data: await quoteDtoWithProducts(updated!) });
@@ -1975,6 +2046,7 @@ export class QuoteController {
         `attachment; filename="quote-${stamp}-${dto.status.toLowerCase()}.docx"`
       )
       .send(buffer);
+    await markShared(quote.id, "docx");
   }
 
   /** GET /api/v1/quotes/:quoteId/proposal-docx — branded bid-proposal Word export. */
@@ -1993,6 +2065,7 @@ export class QuoteController {
       )
       .setHeader("Content-Disposition", `attachment; filename="proposal-${stamp}.docx"`)
       .send(buffer);
+    await markShared(quote.id, "docx");
   }
 
   /** GET /api/v1/quotes/:quoteId/proposal-pdf — the same proposal rendered as a PDF. */
@@ -2008,6 +2081,7 @@ export class QuoteController {
       .setHeader("Content-Type", "application/pdf")
       .setHeader("Content-Disposition", `attachment; filename="proposal-${stamp}.pdf"`)
       .send(buffer);
+    await markShared(quote.id, "pdf");
   }
 
   /** GET /api/v1/quotes/:quoteId/email-draft — drafted proposal email for in-app review. */
@@ -2088,6 +2162,7 @@ export class QuoteController {
       },
     });
     logger.info("Proposal emailed", { quoteId: quote.id, to });
+    await markShared(quote.id, "email");
     // Deliberately NO QuickBooks side effect here (QBO PRD US2): posting is tied to quote
     // completion, and emailing a proposal must never touch the books.
     res.json({ success: true, data: { sent: true, to } });
