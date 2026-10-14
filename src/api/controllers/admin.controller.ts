@@ -5,6 +5,7 @@ import logger from "../../lib/logger";
 import { uploadBufferToS3, publicUrlForKey } from "../../lib/s3";
 import { parsePricebookFile, IngestError, ParsedRow } from "../../copilot/estimating/ingest";
 import { repriceDrafts, repriceLaborDrafts } from "../../copilot/estimating/reprice";
+import { memoryKey } from "../../copilot/estimating/priceMemory";
 import {
   DEFAULT_PROPOSAL_BLOCKS,
   validateProposalBlocks,
@@ -477,6 +478,119 @@ export class AdminController {
     await prisma.laborRate.delete({ where: { id } });
     const repriced = await repriceLaborDrafts(rate.companyId);
     res.json({ success: true, data: { repricedDraftLines: repriced } });
+  }
+
+  // ---------- technicians: price-memory learning permission (price-memory PRD FR-1..4) ----------
+
+  /** GET /admin/companies/:companyId/users — every account with its learning permission. */
+  static async listUsers(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const users = await prisma.users.findMany({
+      where: { company_id: companyId },
+      orderBy: [{ first_name: "asc" }, { last_name: "asc" }],
+      select: { id: true, first_name: true, last_name: true, email: true, role: true, price_memory_learner: true },
+    });
+    res.json({
+      success: true,
+      data: users.map((u) => ({
+        id: String(u.id),
+        name: `${u.first_name} ${u.last_name}`.trim(),
+        email: u.email,
+        role: u.role,
+        priceMemoryLearner: u.price_memory_learner,
+      })),
+    });
+  }
+
+  /** PATCH /admin/users/:userId — { priceMemoryLearner: boolean }. Clara staff only (FR-3). */
+  static async patchUser(req: Request, res: Response) {
+    let id: bigint;
+    try {
+      id = BigInt(req.params.userId);
+    } catch {
+      return fail(res, 400, "Numeric userId required");
+    }
+    if (typeof req.body?.priceMemoryLearner !== "boolean")
+      return fail(res, 400, "priceMemoryLearner must be a boolean");
+    const user = await prisma.users.findUnique({ where: { id }, select: { id: true } });
+    if (!user) return fail(res, 404, "User not found");
+    await prisma.users.update({ where: { id }, data: { price_memory_learner: req.body.priceMemoryLearner } });
+    logger.info("Price-memory learning permission changed", {
+      userId: String(id),
+      priceMemoryLearner: req.body.priceMemoryLearner,
+    });
+    res.json({ success: true, data: { id: String(id), priceMemoryLearner: req.body.priceMemoryLearner } });
+  }
+
+  // ---------- organization price memory (price-memory PRD FR-15..19) ----------
+
+  /** GET /admin/companies/:companyId/price-memory — every entry, disabled ones included. */
+  static async listPriceMemory(req: Request, res: Response) {
+    const companyId = companyIdOf(req, res);
+    if (!companyId) return;
+    const entries = await prisma.priceMemory.findMany({
+      where: { companyId },
+      orderBy: [{ nameKey: "asc" }, { setAt: "desc" }],
+    });
+    const users = await prisma.users.findMany({
+      where: { id: { in: [...new Set(entries.map((e) => e.setByUserId))] } },
+      select: { id: true, first_name: true, last_name: true },
+    });
+    const nameOf = new Map(users.map((u) => [u.id, `${u.first_name} ${u.last_name}`.trim()]));
+    res.json({
+      success: true,
+      data: entries.map((e) => ({
+        id: e.id,
+        name: e.name,
+        description: e.description,
+        rate: Number(e.rate),
+        isLabor: e.isLabor,
+        isActive: e.isActive,
+        setBy: nameOf.get(e.setByUserId) ?? null,
+        setAt: e.setAt.toISOString(),
+      })),
+    });
+  }
+
+  /**
+   * PATCH /admin/price-memory/:id — { name?, description?, rate?, isLabor?, isActive? }. Edits
+   * change what NEW lines get; existing estimates are never touched (PRD: no re-pricing). The
+   * setter attribution is left alone — a staff correction is not a technician's rate.
+   */
+  static async updatePriceMemory(req: Request, res: Response) {
+    const id = Number(req.params.id);
+    const entry = await prisma.priceMemory.findUnique({ where: { id } });
+    if (!entry) return fail(res, 404, "Memory entry not found");
+    const data: Record<string, unknown> = {};
+    const b = req.body ?? {};
+    if (b.name !== undefined) {
+      const name = str(b.name);
+      if (!name) return fail(res, 400, "A product name cannot be blank");
+      data.name = name;
+      data.nameKey = memoryKey(name);
+    }
+    if (b.description !== undefined) data.description = str(b.description);
+    if (b.rate !== undefined) {
+      const rate = Number(b.rate);
+      if (!Number.isFinite(rate) || rate < 0) return fail(res, 400, "rate must be zero or a positive number");
+      data.rate = rate;
+    }
+    if (typeof b.isLabor === "boolean") data.isLabor = b.isLabor;
+    if (typeof b.isActive === "boolean") data.isActive = b.isActive;
+    if (Object.keys(data).length === 0) return fail(res, 400, "Nothing to update");
+    const updated = await prisma.priceMemory.update({ where: { id }, data });
+    res.json({ success: true, data: { id: updated.id, isActive: updated.isActive } });
+  }
+
+  /** DELETE /admin/price-memory/:id — lines priced from it keep their price, lose the link. */
+  static async deletePriceMemory(req: Request, res: Response) {
+    const id = Number(req.params.id);
+    const entry = await prisma.priceMemory.findUnique({ where: { id } });
+    if (!entry) return fail(res, 404, "Memory entry not found");
+    await prisma.quoteLineItem.updateMany({ where: { priceMemoryId: id }, data: { priceMemoryId: null } });
+    await prisma.priceMemory.delete({ where: { id } });
+    res.json({ success: true, data: { deleted: true } });
   }
 
   // ---------- templates ----------

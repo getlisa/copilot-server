@@ -345,13 +345,25 @@ function productFor(item: LineItemInput, catalog?: CatalogIndex): LineItemProduc
 /** Pricebook names keyed by id, for the priceSource display. */
 export type PricebookNameIndex = Map<number, string>;
 
-function priceSourceFor(item: LineItemInput, bookNames?: PricebookNameIndex): string | null {
+/**
+ * Both display indexes the price-source label reads from: pricebook names by book id, and the
+ * "Organization memory — set by X on <date>" label by price-memory entry id (price-memory PRD
+ * FR-12). Either may be absent; the label then falls back to a generic one.
+ */
+export interface PriceSourceIndexes {
+  bookNames?: PricebookNameIndex;
+  memorySources?: Map<number, string>;
+}
+
+function priceSourceFor(item: LineItemInput, sources?: PriceSourceIndexes): string | null {
   // A technician's own number has no external source — the manually_edited flag carries
   // that signal; the source display stays blank (US8's one exception).
   if (item.manuallyEdited) return null;
   if (item.sourcePricebookId != null)
-    return bookNames?.get(item.sourcePricebookId) ?? "Company pricebook";
+    return sources?.bookNames?.get(item.sourcePricebookId) ?? "Company pricebook";
   if (isFallbackPrice(item) || isEstimatedPrice(item)) return "Home Depot — online fallback";
+  if (item.priceMemoryId != null)
+    return sources?.memorySources?.get(item.priceMemoryId) ?? "Organization memory";
   return null;
 }
 
@@ -391,6 +403,8 @@ export type LineItemInput = {
   manuallyEdited: boolean;
   ambiguousAction: unknown;
   sourcePricebookId: number | null;
+  /** Optional: a fixture or an older row without the price-memory link. */
+  priceMemoryId?: number | null;
   qboItemId: string | null;
   qboItemName: string | null;
   taxable: boolean;
@@ -445,7 +459,7 @@ export function toLineItemDto(
   item: LineItemInput,
   catalog?: CatalogIndex,
   markupPercent = 0,
-  bookNames?: PricebookNameIndex
+  sources?: PriceSourceIndexes
 ): LineItemDto {
   const prices = markedUpPrices(item, markupPercent);
   return {
@@ -462,7 +476,7 @@ export function toLineItemDto(
     // verified nor a row, and a client that renders them identically would erase the difference.
     priceEstimated: isEstimatedPrice(item),
     estimateLink: isEstimatedPrice(item) ? homeDepotSearchLink(item.searchTerm ?? item.description) : null,
-    priceSource: priceSourceFor(item, bookNames),
+    priceSource: priceSourceFor(item, sources),
     flags: flagsFor(item),
     ambiguousAction: (item.ambiguousAction as LineItemDto["ambiguousAction"]) ?? null,
     optionGroup: item.optionGroup ?? null,
@@ -477,14 +491,14 @@ export function toLineItemDto(
 export function toQuoteDto(
   quote: QuoteInput,
   catalog?: CatalogIndex,
-  bookNames?: PricebookNameIndex
+  sources?: PriceSourceIndexes
 ): QuoteDto {
   const items = [...quote.lineItems].sort((a, b) => a.sortOrder - b.sortOrder);
   // Markup is a live multiplier, not a stored snapshot: it is applied here, on every read, so
   // a line added after the percentage was set gets it with no extra action and a changed
   // percentage re-reflects on every line at once. Labor lines pass through untouched.
   const markupPercent = Number(quote.markupPercent ?? 0);
-  const dtos = items.map((i) => toLineItemDto(i, catalog, markupPercent, bookNames));
+  const dtos = items.map((i) => toLineItemDto(i, catalog, markupPercent, sources));
   // Option groups are mutually exclusive alternatives: `total` covers base-scope lines only
   // and each group gets its own total. Summing alternatives billed customers for both —
   // observed on two real option-based quotes ($6,591 printed for a $3,430-or-$4,430 choice).

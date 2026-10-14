@@ -7,6 +7,13 @@ import { runEstimatingTurn } from "../../copilot/estimating/estimatingAgent";
 import { dedupeSharedRows } from "../../copilot/estimating/pricebookMatch";
 import { resolveFromHomeDepot } from "../../copilot/estimating/homeDepotCatalog";
 import { loadCompanyPricing } from "../../copilot/estimating/companyPricing";
+import {
+  inPriceBook,
+  learnPrice,
+  memoryPriceFields,
+  memorySourcesFor,
+  MEMORY_PRICE_CODE,
+} from "../../copilot/estimating/priceMemory";
 import { updateDraftLineItem } from "../../copilot/estimating/draftWrite";
 import { packAwareQuantity, unitsCompatible } from "../../copilot/estimating/packMath";
 import {
@@ -258,13 +265,14 @@ async function bookNamesFor(companyId: number): Promise<PricebookNameIndex> {
   return new Map(books.map((b) => [b.id, b.name]));
 }
 
-/** toQuoteDto with product provenance and pricebook names attached. */
+/** toQuoteDto with product provenance, pricebook names and price-memory attribution attached. */
 async function quoteDtoWithProducts(quote: Parameters<typeof toQuoteDto>[0] & { companyId: number }) {
-  const [catalog, bookNames] = await Promise.all([
+  const [catalog, bookNames, memorySources] = await Promise.all([
     catalogFor(quote),
     bookNamesFor(quote.companyId),
+    memorySourcesFor(quote.lineItems),
   ]);
-  return toQuoteDto(quote, catalog, bookNames);
+  return toQuoteDto(quote, catalog, { bookNames, memorySources });
 }
 
 /**
@@ -422,6 +430,8 @@ async function matcherFor(companyId: number) {
   const pricing = await loadCompanyPricing(companyId);
   const match = (description: string) => pricing.match(description);
   match.fallbackEnabled = pricing.fallbackEnabled;
+  // Organization memory (price-memory PRD): exact on the description, after the books miss.
+  match.memory = pricing.memory;
   return match;
 }
 
@@ -728,6 +738,7 @@ export class QuoteController {
       turn = await runEstimatingTurn({
         quoteId: quote.id,
         companyId: user.companyId,
+        userId: user.userId,
         utterance: content,
         history,
         imageUrls,
@@ -987,8 +998,26 @@ export class QuoteController {
     const markup = Number(quote.markupPercent ?? 0);
     const basePrice = (v: unknown) =>
       typeof v === "number" ? stripMarkup(v, markup, isLabor) : null;
-    // No manual price → same pricebook matching as a spoken item (US6).
-    const match = manualPrice ? null : (await matcherFor(user.companyId))(description);
+    // No manual price → same pricebook matching as a spoken item (US6), then organization
+    // memory (price-memory PRD FR-10). A manual price on a product the books don't carry is
+    // LEARNED when this technician holds the learning permission (FR-5); the book is still
+    // consulted first because a book hit is never learned — the book wins.
+    const matcher = await matcherFor(user.companyId);
+    const book = matcher(description);
+    const match = manualPrice ? null : book;
+    const memory = manualPrice || book ? null : matcher.memory(description);
+    const mem = memory ? memoryPriceFields(memory) : null;
+    const learnedId =
+      !book && typeof unitPrice === "number"
+        ? await learnPrice({
+            companyId: user.companyId,
+            userId: user.userId,
+            name: description,
+            rate: basePrice(unitPrice)!,
+            isLabor,
+            fromMemoryId: matcher.memory(description)?.id,
+          })
+        : null;
     const nextSort =
       quote.lineItems.length > 0
         ? Math.max(...quote.lineItems.map((i) => i.sortOrder)) + 1
@@ -1006,9 +1035,10 @@ export class QuoteController {
         description,
         quantity: addQty.quantity,
         unit: addUnit,
-        unitPrice: basePrice(unitPrice) ?? match?.unitPrice ?? null,
+        unitPrice: basePrice(unitPrice) ?? match?.unitPrice ?? mem?.unitPrice ?? null,
         totalPrice: basePrice(totalPrice),
-        pricebookCode: match?.code ?? null,
+        pricebookCode: match?.code ?? mem?.pricebookCode ?? null,
+        priceMemoryId: mem?.priceMemoryId ?? learnedId,
         isLabor,
         /**
          * Labor is not taxed by default — the estimate PDF's "Taxed" column has always shown
@@ -1048,7 +1078,8 @@ export class QuoteController {
       data: toLineItemDto(
         item,
         await catalogFor({ companyId: user.companyId, lineItems: [item] }),
-        markup
+        markup,
+        { memorySources: await memorySourcesFor([item]) }
       ),
     });
   }
@@ -1114,10 +1145,14 @@ export class QuoteController {
       data.description = body.description;
       // Edited description on an unmatched, un-priced item → try matching again.
       if (!item.manuallyEdited && item.unitPrice == null && body.unitPrice == null) {
-        const match = (await matcherFor(user.companyId))(body.description);
-        data.pricebookCode = match?.code ?? null;
-        data.unitPrice = match?.unitPrice ?? null;
+        const matcher = await matcherFor(user.companyId);
+        const match = matcher(body.description);
+        const memory = match ? null : matcher.memory(body.description);
+        const mem = memory ? memoryPriceFields(memory) : null;
+        data.pricebookCode = match?.code ?? mem?.pricebookCode ?? null;
+        data.unitPrice = match?.unitPrice ?? mem?.unitPrice ?? null;
         data.sourcePricebookId = match?.sourcePricebookId ?? null;
+        data.priceMemoryId = mem?.priceMemoryId ?? null;
         if (match?.unit && body.unit == null && item.unit == null) data.unit = match.unit;
       }
     }
@@ -1141,6 +1176,20 @@ export class QuoteController {
       data.sourcePricebookId = null; // the technician's own number has no book source
       // The technician's own number retires any web-search estimate.
       if (item.pricebookCode === ESTIMATED_PRICE_CODE) data.pricebookCode = null;
+      // Price-memory PRD FR-13/14: on a product the books don't carry, a learner's rate
+      // updates (or creates) the organization's memory entry; anyone else's rate applies to
+      // this estimate only. A book-priced line is never learned — the book wins.
+      if (typeof body.unitPrice === "number" && !inPriceBook(item)) {
+        const learnedId = await learnPrice({
+          companyId: user.companyId,
+          userId: user.userId,
+          name: typeof data.description === "string" ? data.description : item.description,
+          rate: toBase(body.unitPrice),
+          isLabor: typeof data.isLabor === "boolean" ? data.isLabor : item.isLabor,
+          fromMemoryId: item.priceMemoryId,
+        });
+        if (learnedId != null) data.priceMemoryId = learnedId;
+      }
     }
     if (body.totalPrice !== undefined) {
       // not required to equal qty × unit price
@@ -1202,10 +1251,16 @@ export class QuoteController {
 
     const matcher = await matcherFor(user.companyId);
     const match = matcher(term);
-    // Live Home Depot lookup only when this client's fallback toggle is on (US5); with it
-    // off, their own pricebooks are the only price source even for an explicit search.
+    // Organization memory after the books (price-memory PRD FR-10) — on the line's description,
+    // which is the memory key, not the catalog-shaped term. Then the live Home Depot lookup,
+    // only when this client's fallback toggle is on (US5); with it off, their own pricebooks
+    // and memory are the only price sources even for an explicit search.
+    const memory = match ? null : matcher.memory(item.description);
+    const mem = memory
+      ? { ...memoryPriceFields(memory), code: MEMORY_PRICE_CODE, unit: null, packageQuantity: null }
+      : null;
     const resolved =
-      match ?? (matcher.fallbackEnabled ? await resolveFromHomeDepot(term, user.companyId) : null);
+      match ?? mem ?? (matcher.fallbackEnabled ? await resolveFromHomeDepot(term, user.companyId) : null);
     if (!resolved)
       return fail(
         res,
@@ -1250,6 +1305,7 @@ export class QuoteController {
       unitPrice: resolved.unitPrice,
       pricebookCode: resolved.code,
       sourcePricebookId: match?.sourcePricebookId ?? null,
+      priceMemoryId: mem?.priceMemoryId ?? null,
       manuallyEdited: false,
       ...(resolved.unit ? { unit: resolved.unit } : {}),
       ...(packed.rounded ? { quantity: packed.quantity } : {}),

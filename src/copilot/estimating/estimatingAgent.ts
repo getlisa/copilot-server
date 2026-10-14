@@ -6,6 +6,7 @@ import { packAwareQuantity, unitsCompatible } from "./packMath";
 import { enqueueResolve } from "./homeDepotCatalog";
 import { quoteIsDraft, updateDraftLineItem, updateDraftQuote } from "./draftWrite";
 import { loadCompanyPricing, MatchableRow } from "./companyPricing";
+import { inPriceBook, learnPrice, memoryPriceFields } from "./priceMemory";
 import { searchPricebookCandidates } from "./pricebookMatch";
 import { listProposalTemplateChoices } from "../../lib/proposalTemplates";
 import { ztChatContext } from "../../lib/ztIngest";
@@ -446,6 +447,8 @@ export interface AgentTurnResult {
 export async function runEstimatingTurn(opts: {
   quoteId: string;
   companyId: number;
+  /** The technician speaking — whose learning permission decides whether stated prices are remembered. */
+  userId: string | bigint;
   utterance: string;
   history: EstimateTurn[];
   /** Presigned URLs of photos attached to this turn (vision input). */
@@ -584,7 +587,15 @@ export async function runEstimatingTurn(opts: {
       unit: null as string | null,
       packageQuantity: null as number | null,
       sourcePricebookId: null as number | null,
+      priceMemoryId: null as number | null,
       resolveTerm: null as string | null,
+    };
+    // Organization memory (price-memory PRD FR-10): after the books, before Home Depot. Keyed
+    // on the DESCRIPTION, exact after normalization — so unlike the books it also applies to
+    // lines with no searchTerm (labor, diagnostics), which a learner may have priced before.
+    const fromMemory = () => {
+      const entry = pricing.memory(description);
+      return entry ? { ...blank, ...memoryPriceFields(entry) } : null;
     };
 
     // 0. An explicit KB code is a curated, exact identity mapping. It outranks any fuzzy
@@ -593,38 +604,39 @@ export async function runEstimatingTurn(opts: {
     const curated = explicitCode ? pricing.byCode.get(explicitCode) : undefined;
     if (curated) {
       return {
+        ...blank,
         pricebookCode: curated.code,
         unitPrice: curated.unitPrice,
         unit: curated.unit,
         packageQuantity: curated.packageQuantity,
         sourcePricebookId: curated.sourcePricebookId,
-        resolveTerm: null,
       };
     }
 
     // A null searchTerm means "not a purchasable part" (labour, diagnosis, testing). Honour it
-    // literally: no lookup at all. Falling back to the prose description here priced labour
-    // lines as parts — "Install 20A breaker" matched a $7.26 breaker and even attached its
-    // product link, asserting that the labour line WAS that breaker.
-    if (!term) return blank;
+    // literally: no catalog lookup at all. Falling back to the prose description here priced
+    // labour lines as parts — "Install 20A breaker" matched a $7.26 breaker and even attached
+    // its product link, asserting that the labour line WAS that breaker. Memory is exact-match
+    // on that same prose, so it carries no such risk.
+    if (!term) return fromMemory() ?? blank;
 
     // 1. Client books first (collision rule inside), then the HD cache when fallback is on.
     const hit = pricing.match(term);
     if (hit) {
       return {
+        ...blank,
         pricebookCode: hit.code,
         unitPrice: hit.unitPrice,
         unit: hit.unit,
         packageQuantity: hit.packageQuantity,
         sourcePricebookId: hit.sourcePricebookId,
-        resolveTerm: null,
       };
     }
 
-    // 2. Nothing anywhere. With fallback on, the caller starts a live Home Depot resolve
-    //    AFTER the row exists so the backfill can target it by id; with fallback off the
-    //    line simply stays unpriced (the `unmatched` flag) — no lookup of any kind.
-    return { ...blank, resolveTerm: pricing.fallbackEnabled ? term : null };
+    // 2. Organization memory, then nothing anywhere. With fallback on, the caller starts a
+    //    live Home Depot resolve AFTER the row exists so the backfill can target it by id;
+    //    with fallback off the line simply stays unpriced (the `unmatched` flag).
+    return fromMemory() ?? { ...blank, resolveTerm: pricing.fallbackEnabled ? term : null };
   };
 
   /** Start a Home Depot resolve for a row that now has an id the backfill can target. */
@@ -708,6 +720,21 @@ export async function runEstimatingTurn(opts: {
           // Technician-stated price (labor rate, hand-quoted amount): used as-is, flagged
           // like a manual edit so no catalog resolve or backfill ever overwrites it.
           if (op.unitPrice != null) {
+            // Price-memory PRD FR-5: a learner's stated price for a product the books don't
+            // carry is remembered for the whole company. A book hit means the book wins and
+            // nothing is learned — the stated price still applies to this one line.
+            const statedTerm = op.searchTerm?.trim();
+            const learnedId =
+              statedTerm && pricing.match(statedTerm)
+                ? null
+                : await learnPrice({
+                    companyId: opts.companyId,
+                    userId: opts.userId,
+                    name: op.description,
+                    rate: op.unitPrice,
+                    isLabor: op.isLabor === true,
+                    fromMemoryId: pricing.memory(op.description)?.id,
+                  });
             await prisma.quoteLineItem.create({
               data: {
                 quoteId: opts.quoteId,
@@ -718,6 +745,7 @@ export async function runEstimatingTurn(opts: {
                 optionGroup: op.optionGroup?.trim() || null,
                 isLabor: op.isLabor === true,
                 manuallyEdited: true,
+                priceMemoryId: learnedId,
                 sortOrder: nextSort++,
               },
             });
@@ -739,6 +767,7 @@ export async function runEstimatingTurn(opts: {
               unit: null,
               packageQuantity: null,
               sourcePricebookId: null,
+              priceMemoryId: null,
               resolveTerm: priced.resolveTerm,
             };
           }
@@ -762,6 +791,7 @@ export async function runEstimatingTurn(opts: {
               unitPrice: priced.unitPrice,
               pricebookCode: priced.pricebookCode,
               sourcePricebookId: priced.sourcePricebookId,
+              priceMemoryId: priced.priceMemoryId,
               optionGroup: op.optionGroup?.trim() || null,
               isLabor: op.isLabor === true,
               sortOrder: nextSort++,
@@ -829,6 +859,7 @@ export async function runEstimatingTurn(opts: {
               unit: null,
               packageQuantity: null,
               sourcePricebookId: null,
+              priceMemoryId: null,
               resolveTerm: priced.resolveTerm,
             };
           }
@@ -845,6 +876,7 @@ export async function runEstimatingTurn(opts: {
               unitPrice: priced.unitPrice,
               pricebookCode: priced.pricebookCode,
               sourcePricebookId: priced.sourcePricebookId,
+              priceMemoryId: priced.priceMemoryId,
               optionGroup: op.optionGroup?.trim() || null,
               isLabor: op.isLabor === true,
               agentSuggested: true,
@@ -870,6 +902,19 @@ export async function runEstimatingTurn(opts: {
             // manually-edited flag is for (labor PRD US7); hours edits never set it.
             data.manuallyEdited = true;
             data.sourcePricebookId = null; // technician's own number — no book is the source
+            // Price-memory PRD FR-13/14: a learner's new rate on a non-book line updates (or
+            // creates) the memory entry; anyone else's change stays on this estimate.
+            if (!inPriceBook(existing)) {
+              const learnedId = await learnPrice({
+                companyId: opts.companyId,
+                userId: opts.userId,
+                name: op.description ?? existing.description,
+                rate: op.unitPrice,
+                isLabor: op.isLabor ?? existing.isLabor,
+                fromMemoryId: existing.priceMemoryId,
+              });
+              if (learnedId != null) data.priceMemoryId = learnedId;
+            }
           }
           if (op.isLabor != null) data.isLabor = op.isLabor;
           // Audit trail (labor PRD): hours corrections/additions log prior and new values.
@@ -899,6 +944,7 @@ export async function runEstimatingTurn(opts: {
                 data.pricebookCode = priced.pricebookCode;
                 data.unitPrice = priced.unitPrice;
                 data.sourcePricebookId = priced.sourcePricebookId;
+                data.priceMemoryId = priced.priceMemoryId;
                 if (priced.unit && op.unit == null) data.unit = priced.unit;
               }
             }

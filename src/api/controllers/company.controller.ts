@@ -12,6 +12,7 @@ import {
   qboConnectionFor,
   qboConnected,
   qboReconnectRequired,
+  QboReconnectError,
   qboItems,
   connectQbo,
   disconnectQbo,
@@ -99,8 +100,42 @@ export class CompanyController {
     if (!accountEmail || !EMAIL_RE.test(accountEmail))
       return fail(400, "A valid account email is required");
     if (password.length < 8) return fail(400, "Password must be at least 8 characters");
-    const existing = await prisma.users.findUnique({ where: { email: accountEmail } });
-    if (existing) return fail(409, "An account with this email already exists");
+
+    /**
+     * Technician accounts set up alongside the admin (price-memory PRD FR-1..3): each may be
+     * marked as a learning technician, which is the only place other than the Clara admin
+     * console that flag is set — this page is Clara-staff-only by the same hidden-URL rule.
+     * Arrives as a JSON string because the form is multipart (logo file).
+     */
+    let technicians: { firstName: string; lastName: string; email: string; password: string; learner: boolean }[] = [];
+    if (b.technicians) {
+      let parsed: unknown;
+      try {
+        parsed = typeof b.technicians === "string" ? JSON.parse(b.technicians) : b.technicians;
+      } catch {
+        return fail(400, "technicians must be a JSON list");
+      }
+      if (!Array.isArray(parsed)) return fail(400, "technicians must be a list");
+      for (const [i, t] of (parsed as Record<string, unknown>[]).entries()) {
+        const row = {
+          firstName: str(t?.firstName) ?? "",
+          lastName: str(t?.lastName) ?? "",
+          email: str(t?.email)?.toLowerCase() ?? "",
+          password: typeof t?.password === "string" ? t.password : "",
+          learner: t?.learner === true,
+        };
+        const label = `Technician ${i + 1}`;
+        if (!row.firstName || !row.lastName) return fail(400, `${label}: first and last name are required`);
+        if (!EMAIL_RE.test(row.email)) return fail(400, `${label}: a valid email is required`);
+        if (row.password.length < 8) return fail(400, `${label}: password must be at least 8 characters`);
+        technicians.push(row);
+      }
+    }
+    const allEmails = [accountEmail, ...technicians.map((t) => t.email)];
+    if (new Set(allEmails).size !== allEmails.length)
+      return fail(400, "Each account needs a different email");
+    const existing = await prisma.users.findFirst({ where: { email: { in: allEmails } } });
+    if (existing) return fail(409, `An account with the email ${existing.email} already exists`);
 
     /**
      * A name that already belongs to a company JOINS that company rather than standing up a
@@ -157,6 +192,17 @@ export class CompanyController {
     };
     const hasServiceAddress = Object.values(serviceAddress).some(Boolean);
     const hashedPassword = await bcrypt.hash(password, 10);
+    const technicianRows = await Promise.all(
+      technicians.map(async (t) => ({
+        first_name: t.firstName,
+        last_name: t.lastName,
+        email: t.email,
+        username: t.email,
+        hashed_password: await bcrypt.hash(t.password, 10),
+        role: "technician" as const,
+        price_memory_learner: t.learner,
+      }))
+    );
     const { company, user } = await prisma.$transaction(async (tx) => {
       const company =
         joined ??
@@ -186,6 +232,10 @@ export class CompanyController {
           company_id: company.id,
         },
       });
+      if (technicianRows.length > 0)
+        await tx.users.createMany({
+          data: technicianRows.map((t) => ({ ...t, company_id: company.id })),
+        });
       return { company, user };
     });
 
@@ -193,6 +243,8 @@ export class CompanyController {
       companyId: company.id,
       name: company.name,
       adminUserId: String(user.id),
+      technicians: technicians.length,
+      learners: technicians.filter((t) => t.learner).length,
       joined: !!joined,
     });
     res.status(201).json({
@@ -202,6 +254,7 @@ export class CompanyController {
         name: company.name,
         logoUrl: company.logo_url,
         adminEmail: user.email,
+        technicians: technicians.map((t) => ({ email: t.email, learner: t.learner })),
       },
     });
   }
@@ -762,8 +815,8 @@ export class CompanyController {
       // seconds instead of only when another admin clicked. Flattening it into the 502 below told
       // people their accounting system was down when it was simply busy. 409 matches what this
       // endpoint already returns for its other not-ready state.
-      if (e instanceof QboSyncBusyError) {
-        logger.info("QBO reference sync skipped: already running", { companyId });
+      if (e instanceof QboSyncBusyError || e instanceof QboReconnectError) {
+        logger.info("QBO reference sync skipped", { companyId, reason: e.message });
         return res.status(409).json({
           success: false,
           error: { status: 409, message: e.message },
