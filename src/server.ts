@@ -9,6 +9,7 @@ import { estimateRoute } from "./api/routes/estimate.route";
 import { quoteRoute } from "./api/routes/quote.route";
 import { companyRoute } from "./api/routes/company.route";
 import { adminRoute } from "./api/routes/admin.route";
+import { metricsRoute } from "./api/routes/metrics.route";
 import webhookRoute from "./api/routes/webhook.route";
 import { startQboWebhookDrain, qboWebhookDrainStatus } from "./lib/qboWebhookProcessor";
 import { startDailySyncScheduler, dailySyncStatus } from "./lib/syncScheduler";
@@ -106,6 +107,10 @@ app.use("/api/v1/companies", companyRoute); // Hidden company registration (URL-
 // the URL. ponytail: obscurity-only by explicit owner decision; add real auth if this
 // ever holds more than internal config.
 app.use("/api/v1/op-x7k2", adminRoute);
+// Estimating Agent metrics, read by the unlinked /metrics-smolorbig page. Unlike the console
+// above this one IS authenticated: it serves quote values across every tenant, so the role
+// check is the control and the path is only a way to keep it out of the nav.
+app.use("/api/v1/metrics-smolorbig", metricsRoute);
 
 // Health check
 app.get("/health", (req, res) => {
