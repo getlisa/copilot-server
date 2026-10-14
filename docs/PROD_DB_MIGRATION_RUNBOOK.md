@@ -135,15 +135,10 @@ back to the block renderer.
 
 ## Pending migration: removed-line-item archive — phase19 (2026-10-14)
 
-`docs/sql/phase19.sql` — creates `quote_line_items_deleted`, and DROPS the `deleted_at` /
-`deleted_by` columns phase18 put on `quote_line_items`. Requires phase18. Run via
+`docs/sql/phase19.sql` — creates `quote_line_items_deleted`. Run via
 `bash docs/sql/apply-phase19.sh` BEFORE the image deploys: the image removes a line with one
 statement that deletes the row and inserts it here, so without the table a technician cannot
 delete a line at all.
-
-Dropping those two columns is safe because nothing ever wrote them (0 of 113 rows). They were
-added for a soft-delete design that this phase replaces, and leaving them would leave two
-contradictory ways to say "this line was removed".
 
 **Why an archive rather than soft delete or a counter.** Soft delete keeps the removed row in
 `quote_line_items`, so every read has to exclude it and one missed filter puts a line the
@@ -171,8 +166,6 @@ Verify:
 
 ```sql
 SELECT to_regclass('public.quote_line_items_deleted');  -- not null
-SELECT column_name FROM information_schema.columns
- WHERE table_name='quote_line_items' AND column_name IN ('deleted_at','deleted_by');  -- 0 rows
 SELECT indexname FROM pg_indexes
  WHERE indexname IN ('quote_line_items_deleted_quote_id_idx','quote_line_items_deleted_deleted_at_idx');  -- 2 rows
 ```
@@ -185,34 +178,33 @@ and nullable throughout, except `quotes.share_count` which is `NOT NULL DEFAULT 
 | Table | Columns | Unlocks |
 |---|---|---|
 | `quote_line_items` | `price_edited_at`, `quantity_edited_at`, `original_unit_price`, `original_quantity` | Price override rate, Quantity edit rate — `manually_edited` is one boolean and reports the same number for both |
-| `quote_line_items` | `deleted_at`, `deleted_by` | Line items deleted — lines are hard-deleted today and leave no trace |
 | `quotes` | `origin`, `origin_provider`, `origin_job_ref` | CRM-imported vs manually started chats — not derivable, quote conversations carry no `job_id` and `crm_entity_links` is empty |
 | `quotes` | `first_shared_at`, `share_channel`, `share_count` | Share rate — the email and document endpoints leave no trace |
 
-Also two partial indexes Prisma cannot express, so they live only in the SQL:
-`quote_line_items_quote_id_live_idx` (the common read, off the tombstones) and
-`quotes_completed_at_idx` (every speed/accuracy/value metric scans that same slice).
+Also one partial index Prisma cannot express, so it lives only in the SQL:
+`quotes_completed_at_idx` (every speed/accuracy/value metric scans that same slice). Removed line
+items are phase19's archive table, not a column here.
 
-Run via `bash docs/sql/apply-phase18.sh` BEFORE the image deploys. The ordering matters more here
-than on a usual additive phase: the image turns every line removal into an `UPDATE ... SET
-deleted_at`, so deployed ahead of this script a technician deleting a line gets a Prisma error.
+Run via `bash docs/sql/apply-phase18.sh` BEFORE the image deploys: the image writes these columns
+when a quote is created and when a line is edited, so deployed ahead of this script those writes
+fail with a Prisma error.
 
 Backfill is deliberately none. A guessed `price_edited_at` is indistinguishable from a real one and
 would corrupt the first month of both rates; `origin` left NULL means the metric counts the row in
-neither bucket rather than reading unknown as manual. Deleted lines from before the writer lands
-are gone for good — that metric starts from the deploy, not from this script.
+neither bucket rather than reading unknown as manual. The metrics only count quotes created after the
+deploy (`origin IS NOT NULL`), so old rows with empty columns never enter these rates.
 
 Verify:
 
 ```sql
 SELECT column_name FROM information_schema.columns
  WHERE table_name='quote_line_items'
-   AND column_name IN ('price_edited_at','quantity_edited_at','original_unit_price','original_quantity','deleted_at','deleted_by');  -- 6 rows
+   AND column_name IN ('price_edited_at','quantity_edited_at','original_unit_price','original_quantity');  -- 4 rows
 SELECT column_name FROM information_schema.columns
  WHERE table_name='quotes'
    AND column_name IN ('origin','origin_provider','origin_job_ref','first_shared_at','share_channel','share_count');  -- 6 rows
 SELECT conname FROM pg_constraint WHERE conname IN ('quotes_origin_check','quotes_share_channel_check');  -- 2 rows
-SELECT indexname FROM pg_indexes WHERE indexname IN ('quote_line_items_quote_id_live_idx','quotes_completed_at_idx');  -- 2 rows
+SELECT indexname FROM pg_indexes WHERE indexname = 'quotes_completed_at_idx';  -- 1 row
 ```
 
 ## Pending migration: Housecall Pro estimate linkage — phase17 (2026-10-09)

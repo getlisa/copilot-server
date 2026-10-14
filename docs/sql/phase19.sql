@@ -18,7 +18,7 @@
 --                  the expensive material lines the agent guessed at?
 --
 -- Additive and idempotent; runs via docs/sql/apply-phase19.sh — never prisma migrate.
--- ORDER: run BEFORE the image that writes it deploys. Requires phase18.
+-- ORDER: run BEFORE the image that writes it deploys.
 
 CREATE TABLE IF NOT EXISTS public.quote_line_items_deleted (
   -- The ORIGINAL line's id, as the primary key. This is what makes the write idempotent: a
@@ -54,10 +54,3 @@ CREATE INDEX IF NOT EXISTS quote_line_items_deleted_deleted_at_idx
 COMMENT ON TABLE public.quote_line_items_deleted IS
   'Line items removed from a draft quote. Written by the same statement that deletes the row.';
 
--- phase18 added deleted_at/deleted_by to quote_line_items for the soft-delete design that this
--- phase replaces. Nothing ever wrote them — verified 0 of 113 rows — so dropping them now costs
--- nothing, and leaving them would leave two contradictory ways to express "this line was
--- removed". Dropping deleted_at also drops the partial index built on it; the plain (quote_id)
--- index that every quote load actually uses is declared on the model and stays.
-ALTER TABLE public.quote_line_items DROP COLUMN IF EXISTS deleted_at;
-ALTER TABLE public.quote_line_items DROP COLUMN IF EXISTS deleted_by;

@@ -34,7 +34,6 @@ cq AS (
          COALESCE(li.line_count, 0)      AS line_count,
          COALESCE(li.price_edited_count, 0) AS price_edited_count,
          COALESCE(li.qty_edited_count, 0)   AS qty_edited_count,
-         COALESCE(del.deleted_count, 0)       AS deleted_count,
          COALESCE(del.agent_deleted_count, 0) AS agent_deleted_count,
          -- What the agent ORIGINALLY proposed: the lines still standing PLUS the ones since
          -- removed. Without adding the removed ones back, every deletion would be counted
@@ -46,7 +45,13 @@ cq AS (
          COALESCE(li.manual_count, 0)    AS manual_count,
          COALESCE(li.labor_lines, 0)     AS labor_lines,
          COALESCE(img.n, 0)              AS image_count,
-         (q.first_shared_at IS NOT NULL)  AS was_shared
+         (q.first_shared_at IS NOT NULL)  AS was_shared,
+         -- Created after the provenance writers landed. origin is stamped on every new quote by
+         -- the same deploy that stamps edits, deletions, agent_suggested and first_shared_at, so
+         -- a quote without it predates all of them: its blank columns mean "not recorded", not
+         -- "never happened". The five provenance metrics below count only tracked quotes; every
+         -- other metric still counts every quote.
+         (q.origin IS NOT NULL)           AS tracked
   FROM quotes q
   LEFT JOIN LATERAL (
     -- Every row here is a live line. A removed one was MOVED to quote_line_items_deleted by the
@@ -68,8 +73,7 @@ cq AS (
   LEFT JOIN LATERAL (
     -- The lines that were removed, counted from the archive rather than inferred — the rows are
     -- gone from quote_line_items, which is exactly what keeps every read of that table honest.
-    SELECT count(*)                                AS deleted_count,
-           count(*) FILTER (WHERE agent_suggested) AS agent_deleted_count
+    SELECT count(*) FILTER (WHERE agent_suggested) AS agent_deleted_count
     FROM quote_line_items_deleted WHERE quote_id = q.id
   ) del ON true
   LEFT JOIN LATERAL (
@@ -97,19 +101,20 @@ CROSS JOIN LATERAL (
     (SELECT sum(line_count)      FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS lines_total,
     (SELECT sum(untouched_count) FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS lines_untouched,
     (SELECT sum(edited_count)    FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS lines_edited,
-    (SELECT sum(manual_count)    FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS lines_manual,
+    (SELECT sum(manual_count)    FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b AND tracked)::numeric AS lines_manual,
+    (SELECT sum(line_count)      FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b AND tracked)::numeric AS lines_tracked,
+    (SELECT count(*)             FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b AND tracked)::numeric AS n_tracked,
     (SELECT sum(total_value)     FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS v_total,
     (SELECT sum(materials_value) FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS v_materials,
     (SELECT sum(labor_value)     FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS v_labor,
     (SELECT count(*) FILTER (WHERE labor_lines    > 0) FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS n_with_labor,
     (SELECT count(*) FILTER (WHERE markup_percent > 0) FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS n_with_markup,
     (SELECT count(*) FILTER (WHERE image_count    > 0) FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS n_with_image,
-    (SELECT count(*) FILTER (WHERE was_shared)         FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS n_shared,
-    (SELECT sum(price_edited_count) FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS lines_price_edited,
-    (SELECT sum(qty_edited_count)   FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS lines_qty_edited,
-    (SELECT sum(deleted_count)       FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS lines_deleted,
-    (SELECT sum(agent_deleted_count) FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS lines_agent_deleted,
-    (SELECT sum(agent_line_count)   FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b)::numeric AS lines_agent
+    (SELECT count(*) FILTER (WHERE was_shared)         FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b AND tracked)::numeric AS n_shared,
+    (SELECT sum(price_edited_count) FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b AND tracked)::numeric AS lines_price_edited,
+    (SELECT sum(qty_edited_count)   FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b AND tracked)::numeric AS lines_qty_edited,
+    (SELECT sum(agent_deleted_count) FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b AND tracked)::numeric AS lines_agent_deleted,
+    (SELECT sum(agent_line_count)   FROM cq WHERE cq.scope_id = g.scope_id AND cq.b = g.b AND tracked)::numeric AS lines_agent
 ) f
 CROSS JOIN LATERAL (
   VALUES
@@ -118,14 +123,14 @@ CROSS JOIN LATERAL (
     ('time_to_quote_p90_secs',    f.p90,             NULL::numeric),
     ('first_draft_accuracy',      f.lines_untouched, f.lines_total),
     ('line_edit_rate',            f.lines_edited,       f.lines_total),
-    ('price_override_rate',       f.lines_price_edited, f.lines_total),
-    ('quantity_edit_rate',        f.lines_qty_edited,   f.lines_total),
+    ('price_override_rate',       f.lines_price_edited, f.lines_tracked),
+    ('quantity_edit_rate',        f.lines_qty_edited,   f.lines_tracked),
     -- Agent-proposed deletions over agent-proposed lines. Counting EVERY deletion against that
     -- denominator would let a technician who adds three lines by hand and removes them push the
-    -- rate past 100%. The plain total is still one count away, as f.lines_deleted.
+    -- rate past 100%.
     ('lines_deleted_rate',        f.lines_agent_deleted, f.lines_agent),
-    ('manual_line_rate',          f.lines_manual,       f.lines_total),
-    ('share_rate',                f.n_shared,           f.n_quotes),
+    ('manual_line_rate',          f.lines_manual,       f.lines_tracked),
+    ('share_rate',                f.n_shared,           f.n_tracked),
     ('avg_quote_value',           f.v_total,         f.n_quotes),
     ('avg_materials_value',       f.v_materials,     f.n_quotes),
     ('avg_labor_value',           f.v_labor,         f.n_quotes),

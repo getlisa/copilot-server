@@ -1,8 +1,8 @@
 -- Phase 18: the facts the Estimating Agent metrics need and the schema does not keep
 -- (product metrics spec, 2026-10-14). Six metrics are uncomputable today because the database
 -- stores only final state: it knows a line was edited, not whether the price or the quantity
--- moved; it forgets a deleted line entirely; and it records neither where a quote came from
--- nor whether it ever reached a customer. Additive and idempotent; runs via
+-- moved, and it records neither where a quote came from nor whether it ever reached a
+-- customer. Removed lines are phase19's concern. Additive and idempotent; runs via
 -- docs/sql/apply-phase18.sh — never prisma migrate.
 -- ORDER: run BEFORE the image that writes these columns deploys.
 
@@ -13,12 +13,6 @@ ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS price_edited_at    
 ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS quantity_edited_at  TIMESTAMP(6);
 ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS original_unit_price NUMERIC(12, 2);
 ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS original_quantity   NUMERIC(12, 2);
-
--- Soft delete. Lines are hard-deleted today, so a line the agent proposed and the technician
--- threw away leaves no trace at all. Unrecoverable for anything already deleted: the metric
--- starts from the day the writer change lands, not from the day this column appears.
-ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP(6);
-ALTER TABLE public.quote_line_items ADD COLUMN IF NOT EXISTS deleted_by BIGINT;
 
 -- Quote origin. Nothing distinguishes a CRM-started quote from a plain new chat: quote
 -- conversations carry no job_id and crm_entity_links is empty, so the split cannot be derived
@@ -47,11 +41,6 @@ BEGIN
   END IF;
 END $$;
 
--- Live lines are read on every quote load; deleted ones only by the metrics query. A partial
--- index keeps the common read off the tombstones.
-CREATE INDEX IF NOT EXISTS quote_line_items_quote_id_live_idx
-  ON public.quote_line_items (quote_id) WHERE deleted_at IS NULL;
-
 -- Completed-quote metrics bucket on completed_at and filter on status, and every one of them
 -- scans the same slice.
 CREATE INDEX IF NOT EXISTS quotes_completed_at_idx
@@ -65,10 +54,6 @@ COMMENT ON COLUMN public.quote_line_items.original_unit_price IS
   'unit_price as the agent first proposed it. Captured once, on the first price edit.';
 COMMENT ON COLUMN public.quote_line_items.original_quantity IS
   'quantity as the agent first proposed it. Captured once, on the first quantity edit.';
-COMMENT ON COLUMN public.quote_line_items.deleted_at IS
-  'Set instead of deleting the row. Every read path must filter deleted_at IS NULL.';
-COMMENT ON COLUMN public.quote_line_items.deleted_by IS
-  'users.id of whoever removed the line.';
 COMMENT ON COLUMN public.quotes.origin IS
   'crm = started from a CRM job picker, manual = started from a plain new chat. Null on rows
    that predate this column: unknown, which the metric must not read as manual.';

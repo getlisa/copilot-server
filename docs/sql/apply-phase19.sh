@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Apply docs/sql/phase19.sql to production Aurora — the quote_line_items_deleted archive, plus
-# dropping the two unused soft-delete columns phase18 added to quote_line_items.
+# Apply docs/sql/phase19.sql to production Aurora — the quote_line_items_deleted archive that
+# keeps a copy of every line item removed from a draft quote.
 #
 # Run it from the repo root with prod AWS credentials (or from AWS CloudShell after uploading
 # phase19.sql, apply-phase19.sh and build-runner.py into one folder):
@@ -14,8 +14,6 @@
 # ORDER: RUN THIS BEFORE DEPLOYING THE IMAGE THAT USES IT. The image removes a line item with a
 # single statement that deletes the row and inserts it into the archive; without the table that
 # statement fails and a technician cannot delete a line at all.
-#
-# Requires phase18 (it drops two columns phase18 created).
 #
 # Success marker: PHASE19_APPLIED (derived from the SQL filename by build-runner.py).
 set -euo pipefail
@@ -100,4 +98,4 @@ EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
               --query "tasks[0].containers[?name=='$CONTAINER'].exitCode | [0]" --output text)
 echo "----- exit code: $EXIT_CODE -----"
 [ "$EXIT_CODE" = "0" ] || exit 1
-echo "Phase 17 applied. quotes.hcp_estimate_id / hcp_option_id / hcp_estimate_ref exist; deploy the image next."
+echo "Phase 19 applied. quote_line_items_deleted exists; deploy the image next."

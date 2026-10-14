@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Apply docs/sql/phase18.sql to production Aurora — the columns the Estimating Agent metrics
-# need: line-item edit provenance and soft delete on quote_line_items, origin and share
-# tracking on quotes (all additive, all nullable except share_count which defaults to 0).
+# need: line-item edit provenance on quote_line_items, origin and share tracking on quotes (all additive, all nullable except share_count which defaults to 0).
 #
 # Run it from the repo root with prod AWS credentials (or from AWS CloudShell after uploading
 # phase18.sql, apply-phase18.sh and build-runner.py into one folder):
@@ -12,9 +11,9 @@
 # credentials attached because `quotes` is owned by `postgres`, not `app_user`. The throwaway
 # task-definition revision is DEREGISTERED on exit, including on failure.
 #
-# ORDER: RUN THIS BEFORE DEPLOYING THE IMAGE THAT USES IT. The soft-delete writer turns every
-# line removal into an UPDATE of deleted_at, so on an image deployed ahead of this script a
-# technician deleting a line gets a Prisma error instead.
+# ORDER: RUN THIS BEFORE DEPLOYING THE IMAGE THAT USES IT. The image writes these columns on
+# quote creation and on line edits, so on an image deployed ahead of this script creating a
+# quote or editing a line gets a Prisma error instead.
 #
 # Success marker: PHASE18_APPLIED (derived from the SQL filename by build-runner.py).
 set -euo pipefail
@@ -99,4 +98,4 @@ EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
               --query "tasks[0].containers[?name=='$CONTAINER'].exitCode | [0]" --output text)
 echo "----- exit code: $EXIT_CODE -----"
 [ "$EXIT_CODE" = "0" ] || exit 1
-echo "Phase 17 applied. quotes.hcp_estimate_id / hcp_option_id / hcp_estimate_ref exist; deploy the image next."
+echo "Phase 18 applied. Edit provenance, origin and share columns exist; run phase19 next."

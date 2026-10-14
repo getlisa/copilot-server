@@ -56,19 +56,11 @@ export function grainFor(startDate: Date, endDate: Date): MetricGrain {
 export const COUNT_METRICS = new Set(["quotes_started", "quotes_completed"]);
 
 /**
- * Metrics that cannot be recombined across buckets at all. A distinct-technician count and a
- * percentile are both meaningless when added or averaged — the median of seven daily medians
- * is not the week's median, and summing DAU across a week counts one technician seven times.
- * The most recent bucket carrying a value wins instead.
+ * Distinct-technician counts, which cannot be recombined across buckets: summing DAU across a
+ * week counts one technician seven times. The most recent bucket carrying a value wins instead.
+ * Percentiles are the same kind of metric but never reach summarize(); see WINDOW_METRICS.
  */
-export const POINT_IN_TIME_METRICS = new Set([
-  "dau",
-  "wau",
-  "mau",
-  "time_to_quote_p50_secs",
-  "time_to_quote_p90_secs",
-  "median_markup_percent",
-]);
+export const POINT_IN_TIME_METRICS = new Set(["dau", "wau", "mau"]);
 
 /**
  * Metrics whose headline is computed over the whole window by window.sql, because no

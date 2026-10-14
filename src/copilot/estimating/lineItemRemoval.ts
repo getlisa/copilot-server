@@ -49,23 +49,21 @@ export type RemovalOutcome = {
   removed: number;
 };
 
-/**
- * Remove line items from a DRAFT quote, archiving each one.
- *
- * `itemIds` is a list so the ambiguous-reference path can resolve and remove in one call; every
- * id is still scoped to the quote and the Draft condition, so a stray id removes nothing.
- */
-export async function removeLineItems(params: {
+type RemovalParams = {
   quoteId: string;
   companyId: number;
   itemIds: string[];
   /** users.id of whoever removed the line. Null for the agent acting on its own. */
   deletedBy?: bigint | null;
-}): Promise<RemovalOutcome> {
-  const { quoteId, companyId, itemIds, deletedBy = null } = params;
-  if (itemIds.length === 0) return { removed: 0 };
+};
 
-  const rows = await prisma.$queryRaw<{ id: string }[]>`
+/**
+ * The removal statement itself. Exported so scripts/check-line-removal.ts runs this exact SQL
+ * against Postgres rather than a copy of it. `itemIds` must not be empty: `IN ()` is invalid SQL.
+ */
+export function lineItemRemovalSql(params: RemovalParams): Prisma.Sql {
+  const { quoteId, companyId, itemIds, deletedBy = null } = params;
+  return Prisma.sql`
     WITH locked AS (
       SELECT id FROM quotes
        WHERE id = ${quoteId} AND company_id = ${companyId} AND status = 'DRAFT'
@@ -84,6 +82,19 @@ export async function removeLineItems(params: {
       FROM removed r
     RETURNING id
   `;
+}
+
+/**
+ * Remove line items from a DRAFT quote, archiving each one.
+ *
+ * `itemIds` is a list so the ambiguous-reference path can resolve and remove in one call; every
+ * id is still scoped to the quote and the Draft condition, so a stray id removes nothing.
+ */
+export async function removeLineItems(params: RemovalParams): Promise<RemovalOutcome> {
+  const { quoteId, itemIds } = params;
+  if (itemIds.length === 0) return { removed: 0 };
+
+  const rows = await prisma.$queryRaw<{ id: string }[]>(lineItemRemovalSql(params));
 
   if (rows.length !== itemIds.length) {
     // Not an error on its own: a completed quote removes nothing, and the caller turns that

@@ -22,15 +22,15 @@ import { dropInProgressBucket, grainFor, summarize, WINDOW_METRICS } from "./met
  * on demand, which then has to be kept in step with the source, and it would answer with
  * yesterday's figures on the one page whose whole job is to say what is happening.
  *
- * The cost of being always current is two queries per request. The service this replaced
- * measured the pair at tens of milliseconds, and it cached only day-or-week grains over
+ * The cost of being always current is two queries per request: a 90-day request measured
+ * 0.165s on this branch. The service this replaced cached only day-or-week grains over
  * whole tenants — every short window, every hourly view and every hand-picked set of tenants
  * already computed live there.
  *
  * Worth knowing: history is recomputed, not frozen. Reopening and re-completing a quote moves
  * its own past time-to-quote, because the metric always reflects current truth.
  *
- * Watch for: completed.sql runs ~19 correlated subqueries per bucket, so cost grows with
+ * Watch for: completed.sql runs ~21 correlated subqueries per bucket, so cost grows with
  * buckets x rows, not rows alone. If a 12-month view ever drags, the answer is a single-pass
  * rewrite of that query or a materialized rollup — not a cache in front of the current shape.
  */

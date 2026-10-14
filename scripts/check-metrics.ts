@@ -46,11 +46,6 @@ assert.strictEqual(
 // ---- summarize: non-combinable metrics take the latest bucket with a value --------------
 // Summing DAU across a week would count one technician seven times.
 assert.strictEqual(summarize("dau", [p("2026-10-01", 5), p("2026-10-02", 3)]), 3);
-// The median of daily medians is not the window's median.
-assert.strictEqual(
-  summarize("time_to_quote_p50_secs", [p("2026-10-01", 600), p("2026-10-02", 900)]),
-  900
-);
 // A trailing empty bucket must not win — "latest" means latest that measured something.
 assert.strictEqual(
   summarize("dau", [p("2026-10-01", 5), p("2026-10-02", null)]),

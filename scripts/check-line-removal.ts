@@ -1,9 +1,11 @@
 import assert from "assert";
 import prisma from "../src/lib/prisma";
+import { lineItemRemovalSql } from "../src/copilot/estimating/lineItemRemoval";
 
 /**
- * Proves the line-removal statement against a real Postgres, because what matters here is
- * Postgres behaviour rather than TypeScript: the delete and the archive cannot come apart, a
+ * Proves the line-removal statement against a real Postgres. The SQL is imported from
+ * src/copilot/estimating/lineItemRemoval.ts, not copied, so an edit there is tested here. What
+ * matters is Postgres behaviour rather than TypeScript: the delete and the archive cannot come apart, a
  * retry archives nothing, and a completed quote refuses the removal.
  *
  * Everything runs inside ONE transaction in a throwaway schema and is then rolled back, so it
@@ -12,22 +14,6 @@ import prisma from "../src/lib/prisma";
  *
  *   npx tsx scripts/check-line-removal.ts
  */
-
-/** The statement under test, as src/copilot/estimating/lineItemRemoval.ts issues it. */
-const REMOVE = `
-  WITH locked AS (
-    SELECT id FROM quotes WHERE id = $1 AND company_id = $2 AND status = 'DRAFT' FOR UPDATE
-  ),
-  removed AS (
-    DELETE FROM quote_line_items
-     WHERE id = ANY($3::text[]) AND quote_id IN (SELECT id FROM locked)
-    RETURNING *
-  )
-  INSERT INTO quote_line_items_deleted
-    (id, quote_id, agent_suggested, is_labor, quantity, unit_price, deleted_at, deleted_by, snapshot)
-  SELECT r.id, r.quote_id, r.agent_suggested, r.is_labor, r.quantity, r.unit_price, now(), $4, to_jsonb(r)
-    FROM removed r
-  RETURNING id`;
 
 class Rollback extends Error {}
 
@@ -66,7 +52,9 @@ async function main() {
         INSERT INTO quote_line_items (id, quote_id, agent_suggested) VALUES ('M1','D',false), ('C1','C',true)`);
 
       const remove = (quoteId: string, companyId: number, ids: string[]) =>
-        tx.$queryRawUnsafe<{ id: string }[]>(REMOVE, quoteId, companyId, ids, BigInt(7));
+        tx.$queryRaw<{ id: string }[]>(
+          lineItemRemovalSql({ quoteId, companyId, itemIds: ids, deletedBy: BigInt(7) })
+        );
       const count = async (sql: string) =>
         Number((await tx.$queryRawUnsafe<{ n: bigint }[]>(sql))[0].n);
 
