@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
+import { UserFacingError } from "./clientError";
 import jwt from "jsonwebtoken";
 import type { QboConnection } from "@prisma/client";
 import prisma from "./prisma";
@@ -175,9 +176,19 @@ async function tokenRequest(body: Record<string, string>): Promise<TokenResponse
     },
     body: new URLSearchParams(body).toString(),
   });
-  if (!res.ok) throw new Error(`QBO token endpoint ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    const text = await res.text();
+    // Intuit says the refresh token is dead: revoked, past 100 days, rotated by another process,
+    // or minted under a different client id. No retry can fix it — only a fresh consent can.
+    if (res.status === 400 && text.includes("invalid_grant"))
+      throw new QboReconnectError("QuickBooks session expired — reconnect from Settings → Connections");
+    throw new Error(`QBO token endpoint ${res.status}: ${text}`);
+  }
   return (await res.json()) as TokenResponse;
 }
+
+/** Stored tokens are unusable; the only remedy is a new OAuth consent. */
+export class QboReconnectError extends UserFacingError {}
 
 const expiry = (seconds: number) => new Date(Date.now() + seconds * 1000);
 
