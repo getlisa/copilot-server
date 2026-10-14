@@ -9,4 +9,9 @@ dist/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 /keys
+
+# Claude Code session/context files
+.claude/

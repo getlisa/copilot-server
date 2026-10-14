@@ -1330,6 +1330,21 @@ model Quote {
   /// Which option group the customer chose, answered at completion time (QBO PRD US3).
   /// Null = not asked / no options. Cleared on reopen so re-completion asks again.
   chosenOptionGroup String?         @map("chosen_option_group")
+  /// Where this quote was started (metrics: CRM-imported vs manually started chats). "crm" =
+  /// from a CRM job picker, "manual" = from a plain new chat; originProvider and originJobRef
+  /// name the ticket on the CRM side. NULL on every row predating phase18 — unknown, which the
+  /// metric counts in neither bucket rather than reading as manual and overstating manual starts.
+  /// Plain VARCHAR with a CHECK, not an enum: cheaper to extend (see docs/sql/phase18.sql).
+  origin            String?         @db.VarChar(16)
+  originProvider    String?         @map("origin_provider") @db.VarChar(32)
+  originJobRef      String?         @map("origin_job_ref") @db.VarChar(128)
+  /// First time this quote reached a customer, by any route — email, DOCX or PDF (metrics:
+  /// share rate). Set once and never overwritten: sending the same quote twice is one shared
+  /// quote, and counting events instead would push the rate above 100%. shareCount keeps the
+  /// event count separately, for anyone who does want it.
+  firstSharedAt     DateTime?       @map("first_shared_at")
+  shareChannel      String?         @map("share_channel") @db.VarChar(16)
+  shareCount        Int             @default(0) @map("share_count")
   createdAt         DateTime        @default(now()) @map("created_at")
   updatedAt         DateTime        @updatedAt @map("updated_at")
   completedAt       DateTime?       @map("completed_at")
@@ -1387,6 +1402,23 @@ model QuoteLineItem {
   /// and the common case; the per-line toggle exists for the exceptions (a permit fee, a
   /// non-taxable service). Maps to `TaxCodeRef` = `TAX` or `NON` on the posted estimate.
   taxable           Boolean  @default(true)
+  /// Field-level edit provenance (metrics: price override rate, quantity edit rate).
+  /// `manuallyEdited` is one boolean and cannot tell the two apart — both rates would report
+  /// the identical number. Set once, on the FIRST edit of that field, and the original value is
+  /// captured in the same write so a reviewer can see how far the technician moved the agent's
+  /// figure. Null on rows predating phase18: a guessed timestamp would be indistinguishable
+  /// from a real one and would quietly corrupt the first month of both rates.
+  priceEditedAt     DateTime? @map("price_edited_at")
+  quantityEditedAt  DateTime? @map("quantity_edited_at")
+  originalUnitPrice Decimal?  @map("original_unit_price") @db.Decimal(12, 2)
+  originalQuantity  Decimal?  @map("original_quantity") @db.Decimal(12, 2)
+  /// Soft delete (metrics: line items deleted). A removed line is a fact about how good the
+  /// agent's first draft was, and a hard DELETE throws that fact away. EVERY read of this table
+  /// must filter `deletedAt: null` — a missed one resurrects a deleted line onto a proposal the
+  /// customer sees. The shared `quoteDtoInclude` in quote.controller.ts carries that filter for
+  /// the DTO paths; the direct findMany callers carry their own.
+  deletedAt         DateTime? @map("deleted_at")
+  deletedBy         BigInt?   @map("deleted_by")
   sortOrder         Int      @map("sort_order")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
