@@ -1133,7 +1133,6 @@ export class QuoteController {
   /**
    * PATCH /api/v1/quotes/:quoteId/items/:itemId — direct edits + flag resolution:
    * body may carry description/quantity/unit/unitPrice/totalPrice,
-   * confirm: true (accept an agent-suggested item), or
    * resolveCandidateId (apply a pending ambiguous action to the chosen item).
    */
   static async updateItem(req: RequestWithUser, res: Response) {
@@ -1183,7 +1182,6 @@ export class QuoteController {
     }
 
     const data: Record<string, unknown> = {};
-    if (body.confirm === true) data.agentSuggested = false;
     // Per-line Taxable toggle. Strict `=== boolean` rather than truthiness: a client sending
     // "false" as a string would otherwise turn tax ON for a line the technician just turned off.
     if (typeof body.taxable === "boolean") data.taxable = body.taxable;
