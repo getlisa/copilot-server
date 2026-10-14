@@ -5,7 +5,6 @@ import { PricebookItem, Quote, QuoteLineItem } from "@prisma/client";
  * Serialization + flag derivation for quotes. Flags are DERIVED from row state,
  * not stored, so they can never drift:
  *  - ambiguous:          row is a pending ambiguous reference (tap-to-select)
- *  - agent_suggested:    KB proposal the technician hasn't confirmed yet
  *  - missing_quantity:   quantity is null (the system never invents a number)
  *  - unmatched:          no pricebook match and no manual price
  *  - manually_edited:    price differs from pricebook (informational, non-blocking)
@@ -13,12 +12,12 @@ import { PricebookItem, Quote, QuoteLineItem } from "@prisma/client";
 
 export const BLOCKING_FLAGS = [
   "ambiguous",
-  "agent_suggested",
   "missing_quantity",
   "unmatched",
   // A web-search price has no product id behind it, so it cannot be verified the way a catalog
-  // price can. It blocks completion for the same reason an agent-suggested line does: a human
-  // has to look at it before it reaches a customer.
+  // price can. It blocks completion: a human has to look at it before it reaches a customer.
+  // (`agentSuggested` is still stored for the metrics, but no longer surfaces as a flag — owner
+  // decision 2026-10-14: the tag and its Confirm step were noise on the review screen.)
   "estimated_price",
 ] as const;
 
@@ -249,7 +248,6 @@ export function isFallbackPrice(item: { pricebookCode: string | null }): boolean
 export function flagsFor(item: LineItemInput): LineItemFlag[] {
   if (item.ambiguousAction) return ["ambiguous"];
   const flags: LineItemFlag[] = [];
-  if (item.agentSuggested) flags.push("agent_suggested");
   if (item.quantity == null) flags.push("missing_quantity");
   if (item.unitPrice == null && item.totalPrice == null && !item.manuallyEdited)
     flags.push("unmatched");
