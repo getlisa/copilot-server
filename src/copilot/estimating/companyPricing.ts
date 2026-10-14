@@ -1,7 +1,8 @@
 import prisma from "../../lib/prisma";
 import logger from "../../lib/logger";
 import { matchPricebook, dedupeSharedRows } from "./pricebookMatch";
-import { PricebookItem } from "@prisma/client";
+import { loadPriceMemory, memoryKey } from "./priceMemory";
+import { PricebookItem, PriceMemory } from "@prisma/client";
 
 /**
  * Per-client pricing pool (pricebook-config PRD).
@@ -39,6 +40,11 @@ export interface CompanyPricing {
   fallbackEnabled: boolean;
   /** Books → legacy manual → (HD cache when fallback is on). Null = nothing matched. */
   match(term: string): PricedMatch | null;
+  /**
+   * Organization price memory (price-memory PRD): exact match on the line's DESCRIPTION after
+   * normalization, consulted only after `match` misses. Never fuzzy — see priceMemory.ts.
+   */
+  memory(name: string): PriceMemory | null;
   /** Every own row by code, for explicit KB code lookups. */
   byCode: Map<string, PricedMatch>;
   /** The deduped underlying rows, for product-provenance maps (turn context, DTOs). */
@@ -73,7 +79,7 @@ export async function hdFallbackEnabledFor(companyId: number): Promise<boolean> 
 }
 
 export async function loadCompanyPricing(companyId: number): Promise<CompanyPricing> {
-  const [books, rows, fallbackEnabled] = await Promise.all([
+  const [books, rows, fallbackEnabled, memory] = await Promise.all([
     prisma.pricebook.findMany({ where: { companyId }, orderBy: { priority: "asc" } }),
     // Own rows in full, plus other companies' accepted HD cache rows — a cached retail
     // price is the same number for everyone (see pricebookRowsFor's rationale).
@@ -81,6 +87,7 @@ export async function loadCompanyPricing(companyId: number): Promise<CompanyPric
       where: { OR: [{ companyId }, { source: "HOME_DEPOT", provisional: false }] },
     }),
     hdFallbackEnabledFor(companyId),
+    loadPriceMemory(companyId),
   ]);
   const deduped = dedupeSharedRows(rows, companyId);
 
@@ -120,6 +127,7 @@ export async function loadCompanyPricing(companyId: number): Promise<CompanyPric
   return {
     fallbackEnabled,
     match,
+    memory: (name: string) => memory.get(memoryKey(name)) ?? null,
     byCode,
     rawRows: deduped,
     ownRows: pools.flatMap((p) => p.items),

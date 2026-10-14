@@ -57,6 +57,7 @@ export async function repriceDrafts(companyId: number): Promise<number> {
           unitPrice: hit.unitPrice,
           pricebookCode: hit.code,
           sourcePricebookId: hit.sourcePricebookId,
+          priceMemoryId: null, // a book now covers it: the pricebook takes over (price-memory PRD)
           ...(hit.unit && line.unit == null ? { unit: hit.unit } : {}),
         },
         line.id
