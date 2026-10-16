@@ -14,8 +14,7 @@ import { resolveProposalBlocks, resolveProposalTemplate } from "../../lib/propos
 import { renderProposalPdf } from "../../copilot/estimating/proposalEstimate";
 import { importProposalDocument } from "../../copilot/estimating/proposalImportClassify";
 import { ProposalImportError } from "../../copilot/estimating/proposalImport";
-import { renderHtmlTemplate } from "../../copilot/estimating/html/htmlTemplate";
-import { htmlTemplateData, loadHtmlTemplate } from "../../copilot/estimating/html/htmlProposal";
+import { loadHtmlTemplate, renderProposalHtml } from "../../copilot/estimating/html/htmlProposal";
 import { sanitiseTemplateHtml } from "../../copilot/estimating/html/htmlSafety";
 import type { ProposalInput } from "../../copilot/estimating/proposalDocx";
 import { validateDocxTemplate } from "../../copilot/estimating/templates";
@@ -848,7 +847,7 @@ export class AdminController {
       return res
         .status(200)
         .setHeader("Content-Type", "text/html; charset=utf-8")
-        .send(renderHtmlTemplate(stored, await htmlTemplateData(AdminController.previewInput(company))));
+        .send(await renderProposalHtml(stored, AdminController.previewInput(company)));
     if (!file)
       return fail(
         res,
@@ -862,7 +861,7 @@ export class AdminController {
     res
       .status(200)
       .setHeader("Content-Type", "text/html; charset=utf-8")
-      .send(renderHtmlTemplate(template, await htmlTemplateData(input)));
+      .send(await renderProposalHtml(template, input));
   }
 
   /**
@@ -897,7 +896,7 @@ export class AdminController {
     // Render it once before storing: a template that cannot produce a document must not become
     // the one a technician reaches for at a customer's kitchen table.
     try {
-      renderHtmlTemplate(html, await htmlTemplateData(AdminController.previewInput(company)));
+      await renderProposalHtml(html, AdminController.previewInput(company));
     } catch (err) {
       return fail(
         res,

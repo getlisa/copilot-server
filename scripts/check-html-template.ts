@@ -159,7 +159,7 @@ console.log("check-html-template: docx mapping assertions passed");
 // token the data does not carry.
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join } from "path";
-import { htmlTemplateData } from "../src/copilot/estimating/html/htmlProposal";
+import { htmlTemplateData, withPhotosSection } from "../src/copilot/estimating/html/htmlProposal";
 
 const TEMPLATE_ROOT = join(__dirname, "..", "src", "copilot", "estimating", "html", "templates");
 
@@ -200,6 +200,21 @@ assert.ok(!resolves("..\\windows\\system32"), "backslashes are refused");
 assert.ok(!resolves("nlfp/_base.html"), "a leading underscore is not a loadable template");
 
 console.log("check-html-template: template-path assertions passed");
+
+// Chat photos: a template that never mentions them gets a PROJECT PHOTOS section before
+// </body>; one that places {{#photos}} itself is left alone; no photos prints nothing.
+{
+  const photo = { src: "data:image/png;base64,AA==", width: 10, height: 5 };
+  const withPhotos = renderHtmlTemplate(withPhotosSection("<body><p>x</p></body>"), {
+    hasPhotos: true,
+    photos: [photo],
+  });
+  assert.ok(/<p>x<\/p>[\s\S]*Project Photos[\s\S]*<img src="data:image\/png;base64,AA=="[\s\S]*<\/body>/.test(withPhotos),
+    "photos are appended inside <body>");
+  eq("no photos adds nothing", renderHtmlTemplate(withPhotosSection("<body></body>"), { hasPhotos: false, photos: [] }), "<body></body>");
+  eq("a template placing {{#photos}} itself is untouched", withPhotosSection("{{#photos}}{{src}}{{/photos}}"), "{{#photos}}{{src}}{{/photos}}");
+}
+console.log("check-html-template: photo-section assertions passed");
 
 void (async () => {
   const data = await htmlTemplateData({
