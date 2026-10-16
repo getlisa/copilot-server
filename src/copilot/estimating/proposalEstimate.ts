@@ -16,8 +16,7 @@ import type { EstimateQuote } from "../estimate/estimateQuoteSchema";
 import { buildQuotePdf } from "../estimate/pdf/quotePdf";
 import { imageDims, loadLogo, loadPhotos, type ProposalInput } from "./proposalDocx";
 import { validateProposalBlocks } from "./proposalTemplate";
-import { renderHtmlTemplate } from "./html/htmlTemplate";
-import { htmlTemplateData, loadHtmlTemplate } from "./html/htmlProposal";
+import { loadHtmlTemplate, renderProposalHtml } from "./html/htmlProposal";
 import { htmlToPdf } from "./html/htmlToPdf";
 import { docxSection, htmlToDocxNodes } from "./html/htmlToDocx";
 import {
@@ -379,7 +378,7 @@ export async function renderProposalPdf(input: ProposalInput, stored: unknown): 
     // A missing file must not fail a technician's download: fall through to the block
     // renderer, which every company can always produce.
     if (template)
-      return htmlToPdf(renderHtmlTemplate(template, await htmlTemplateData(input)), {
+      return htmlToPdf(await renderProposalHtml(template, input), {
         trusted: stored.kind === "html",
       });
     return renderTemplatedProposalPdf(input, null);
@@ -419,7 +418,7 @@ export async function renderProposalDocx(input: ProposalInput, stored: unknown):
     if (template)
       try {
         return await renderHtmlProposalDocx(
-          renderHtmlTemplate(template, await htmlTemplateData(input)),
+          await renderProposalHtml(template, input),
           stored.kind === "html"
         );
       } catch (err) {

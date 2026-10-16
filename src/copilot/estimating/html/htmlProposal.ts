@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "fs";
 import path from "path";
 import logger from "../../../lib/logger";
 import { optionPayable, payable, taxRowAmount, taxRowLabel } from "../proposalTotals";
-import { amountInWords, loadLogo, type ProposalInput } from "../proposalDocx";
+import { amountInWords, loadLogo, loadPhotos, type ProposalInput } from "../proposalDocx";
 import { renderHtmlTemplate, type HtmlTemplateData } from "./htmlTemplate";
 
 /**
@@ -112,6 +112,13 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
   const logoUrl = logo
     ? `data:image/${logo.type === "jpg" ? "jpeg" : "png"};base64,${logo.data.toString("base64")}`
     : "";
+  // Chat-attached job photos, inlined like the logo. The block/pdfkit renderers already print
+  // a PROJECT PHOTOS section; without this the HTML document silently dropped every photo.
+  const photos = (input.photos?.length ? await loadPhotos(input.photos) : []).map((p) => ({
+    src: `data:image/${p.type === "jpg" ? "jpeg" : "png"};base64,${p.data.toString("base64")}`,
+    width: p.width,
+    height: p.height,
+  }));
   const taxLabel = taxRowLabel(input);
   const row = (l: NonNullable<ProposalInput["lineItems"]>[number]) => ({
     activity: l.code ?? l.description,
@@ -219,11 +226,41 @@ export async function htmlTemplateData(input: ProposalInput): Promise<HtmlTempla
     hasExclusions: (input.exclusions ?? []).length > 0,
     hasMilestones: scheduleOfValues(input, payable(input)).length > 0,
     hasDeficiencies: (input.deficiencies ?? []).length > 0,
+    photos,
+    hasPhotos: photos.length > 0,
   };
+}
+
+/**
+ * The default PROJECT PHOTOS section, for a template that does not place its own.
+ *
+ * A hand-authored document can print photos wherever it likes with {{#photos}}; one that
+ * never mentions them (every uploaded document, and the repo templates built before photos
+ * reached this renderer) gets this appended before </body>, matching where the block
+ * renderers put theirs. Inline styles only: the template's CSS is unknown.
+ */
+const PHOTOS_SECTION = `{{#hasPhotos}}
+<section class="project-photos" style="page-break-before: always; padding: 24px 0">
+  <h2 style="font: bold 12pt sans-serif; margin: 0 0 12px">Project Photos</h2>
+  {{#photos}}<img src="{{src}}" width="{{width}}" height="{{height}}" style="display: block; max-width: 100%; height: auto; margin: 0 0 12px" />{{/photos}}
+</section>
+{{/hasPhotos}}`;
+
+export function withPhotosSection(template: string): string {
+  if (/\{\{[#^]\s*(photos|hasPhotos)\s*\}\}/.test(template)) return template;
+  const close = template.search(/<\/body\s*>/i);
+  return close === -1
+    ? template + PHOTOS_SECTION
+    : template.slice(0, close) + PHOTOS_SECTION + template.slice(close);
+}
+
+/** Fill any HTML proposal template (repo file or uploaded document) with a quote's values. */
+export async function renderProposalHtml(template: string, input: ProposalInput): Promise<string> {
+  return renderHtmlTemplate(withPhotosSection(template), await htmlTemplateData(input));
 }
 
 /** Fill a named template with a quote's values. */
 export async function renderHtmlProposal(file: string, input: ProposalInput): Promise<string | null> {
   const template = loadHtmlTemplate(file);
-  return template ? renderHtmlTemplate(template, await htmlTemplateData(input)) : null;
+  return template ? renderProposalHtml(template, input) : null;
 }
