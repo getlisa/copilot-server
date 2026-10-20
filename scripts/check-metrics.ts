@@ -1,8 +1,9 @@
 import assert from "assert";
 import {
   bucketEnd,
-  dropInProgressBucket,
+  dropFutureBuckets,
   grainFor,
+  periodReadings,
   summarize,
   truncateToGrain,
   WINDOW_METRICS,
@@ -107,19 +108,48 @@ assert.strictEqual(g(3), "day");
 assert.strictEqual(g(120), "day");
 assert.strictEqual(g(121), "week");
 
-// ---- dropInProgressBucket: a partial bucket must not become the headline ---------------
-// DAU reports the most recent bucket, and the most recent bucket of a window ending now is
-// almost always still running. At 09:00 that is a part-day compared against whole ones.
-const dayPoints = [p("2026-10-13T00:00:00.000Z", 4), p("2026-10-14T00:00:00.000Z", 1)];
-const midMorning = new Date("2026-10-14T09:00:00Z");
-assert.strictEqual(dropInProgressBucket(dayPoints, "day", midMorning).length, 1);
-assert.strictEqual(summarize("dau", dropInProgressBucket(dayPoints, "day", midMorning)), 4);
-// Once the bucket has closed it counts normally.
-const nextDay = new Date("2026-10-15T00:30:00Z");
-assert.strictEqual(dropInProgressBucket(dayPoints, "day", nextDay).length, 2);
-assert.strictEqual(summarize("dau", dropInProgressBucket(dayPoints, "day", nextDay)), 1);
-// Nothing to drop is not an error.
-assert.deepStrictEqual(dropInProgressBucket([], "day", midMorning), []);
+// ---- periodReadings: DAU, WAU and MAU read the SAME moment ------------------------------
+// The bug this pins: each metric used to take its own last COMPLETE bucket, so on 20 Oct WAU
+// was the week of 12 Oct and MAU was September. A tenant growing in October then showed
+// WAU 2 against MAU 0.
+const now = new Date("2026-10-20T08:00:00Z");
+const winStart = new Date("2026-09-20T18:30:00Z"); // 30 days, IST midnights
+const winEnd = new Date("2026-10-20T18:29:59.999Z");
+const weeks = [p("2026-10-12T00:00:00.000Z", 2), p("2026-10-19T00:00:00.000Z", 0)];
+const months = [p("2026-09-01T00:00:00.000Z", 0), p("2026-10-01T00:00:00.000Z", 2)];
+
+const wau = periodReadings(weeks, "week", winStart, winEnd, now);
+const mau = periodReadings(months, "month", winStart, winEnd, now);
+// The running bucket is the headline, marked so far, with the dates it covers.
+assert.strictEqual(wau.current?.value, 0);
+assert.strictEqual(wau.current?.inProgress, true);
+assert.strictEqual(wau.current?.start, "2026-10-19T00:00:00.000Z");
+assert.strictEqual(wau.current?.end, now.toISOString());
+assert.strictEqual(mau.current?.value, 2);
+assert.strictEqual(mau.current?.start, "2026-10-01T00:00:00.000Z");
+// The previous bucket rides along, complete.
+assert.strictEqual(wau.previous?.value, 2);
+assert.strictEqual(wau.previous?.inProgress, false);
+assert.strictEqual(wau.previous?.end, "2026-10-18T23:59:59.999Z");
+// A previous bucket that started before the window is labelled from the window start.
+assert.strictEqual(mau.previous?.start, winStart.toISOString());
+
+// A window that ended in the past is read at its end, not now.
+const pastEnd = new Date("2026-10-13T18:29:59.999Z");
+const pastWeek = periodReadings(weeks, "week", winStart, pastEnd, now);
+assert.strictEqual(pastWeek.current?.value, 2);
+assert.strictEqual(pastWeek.current?.end, pastEnd.toISOString());
+assert.strictEqual(pastWeek.current?.inProgress, true);
+
+// No bucket for the moment is no reading, not an error.
+assert.deepStrictEqual(periodReadings([], "day", winStart, winEnd, now), {
+  current: null,
+  previous: null,
+});
+
+// A bucket starting after now has not happened and is not drawn.
+const dayBuckets = [p("2026-10-20T00:00:00.000Z", 1), p("2026-10-21T00:00:00.000Z", 0)];
+assert.strictEqual(dropFutureBuckets(dayBuckets, now).length, 1);
 
 // ---- WINDOW_METRICS: percentiles never come from the series ----------------------------
 // The median of ninety daily medians is not the median of the ninety days, so these three

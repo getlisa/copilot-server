@@ -43,6 +43,10 @@ est_chat AS (
   JOIN users u ON u.id = c.user_id
   WHERE c.job_id IS NULL
     AND ($3::int[] IS NULL OR u.company_id = ANY($3::int[]))
+    -- Only chats inside the selected window. A bucket that starts before the window (the
+    -- month of a window opening on the 20th) counts from the window start, not the 1st.
+    AND c.created_at >= (SELECT start_ts FROM params)
+    AND c.created_at <= (SELECT end_ts FROM params)
 ),
 -- Every scope that shows ANY estimating activity, not only those that produced a quote.
 -- Built from quotes alone, a company whose technicians have started chats but completed
