@@ -1,0 +1,253 @@
+<!doctype html>
+<!--
+  Covenant Electric — estimate, authored from their own ZenTrades document
+  (Estimate_E000045-1.pdf). Theirs to change: the sans face, the grey header band, the three
+  address columns, the summary box beside the signature line.
+
+  Print-first: US Letter, half-inch margins, so browser PDF and server print agree.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Estimate {{proposalNumber}}</title>
+    <style>
+      @page {
+        size: letter;
+        margin: 0.5in 0.5in 0.7in;
+        @bottom-center {
+          content: "Estimate#{{proposalNumber}} - (Page " counter(page) " of " counter(pages) ")";
+          font-family: "Courier New", Courier, monospace;
+          font-size: 7.5pt;
+          font-weight: bold;
+          color: #000;
+        }
+      }
+      html {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      body {
+        margin: 0;
+        font-family: Roboto, Helvetica, Arial, "Liberation Sans", sans-serif;
+        font-size: 9.5pt;
+        line-height: 1.5;
+        color: #222;
+      }
+      .sheet {
+        width: 7.5in;
+        margin: 0 auto;
+      }
+      .muted {
+        color: #777;
+      }
+      .notes {
+        white-space: pre-line;
+      }
+      b {
+        font-weight: 600;
+      }
+
+      /* ---------- letterhead ----------
+         Logo on a pale panel at left; "Estimate" and the company block at right. */
+      .head {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        column-gap: 40px;
+        align-items: start;
+        margin-bottom: 26px;
+      }
+      .logo {
+        background: #f5f5f5;
+        padding: 12px;
+        display: inline-block;
+      }
+      .logo img {
+        max-width: 2.9in;
+        max-height: 2.9in;
+        display: block;
+      }
+      .title {
+        padding-left: 1.3in;
+      }
+      .title h1 {
+        font-size: 30pt;
+        font-weight: normal;
+        color: #666;
+        margin: 10px 0 14px;
+      }
+      .title .name {
+        font-weight: 600;
+        margin-bottom: 14px;
+      }
+
+      /* ---------- parties ---------- */
+      .parties {
+        display: grid;
+        grid-template-columns: 2.7in 2.7in 1fr;
+        column-gap: 16px;
+        margin-bottom: 20px;
+      }
+      .parties .label {
+        color: #777;
+        margin-bottom: 2px;
+      }
+      .parties .name {
+        font-weight: 600;
+      }
+
+      /* ---------- items ---------- */
+      table.items {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      table.items th {
+        background: #e5e5e5;
+        text-align: left;
+        font-weight: 600;
+        padding: 14px 12px;
+      }
+      table.items td {
+        padding: 12px 12px 10px;
+        vertical-align: top;
+        border-bottom: 1px solid #ddd;
+      }
+      table.items .num {
+        white-space: nowrap;
+      }
+      table.items .desc {
+        color: #777;
+        font-size: 9pt;
+        margin-top: 10px;
+      }
+      table.items tr {
+        page-break-inside: avoid;
+      }
+
+      /* ---------- signature + summary ---------- */
+      .foot {
+        display: grid;
+        grid-template-columns: 1fr 3.7in;
+        column-gap: 40px;
+        margin-top: 50px;
+        page-break-inside: avoid;
+      }
+      .sign {
+        align-self: end;
+        text-align: center;
+      }
+      .sign .line {
+        border-bottom: 1px solid #333;
+        margin-bottom: 8px;
+      }
+      .totals .row {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 12px;
+        border-bottom: 1px solid #ddd;
+      }
+      .totals .row:last-child {
+        border-bottom: 0;
+      }
+      .totals .row b {
+        font-weight: 600;
+      }
+
+      /* ---------- trailing copy ---------- */
+      .copy h3 {
+        font-size: 10.5pt;
+        font-weight: 600;
+        margin: 26px 0 10px;
+      }
+      .copy p {
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="sheet">
+      <div class="head">
+        <div><div class="logo"><img src="{{logoUrl}}" alt="{{companyName}}" /></div></div>
+        <div class="title">
+          <h1>Estimate</h1>
+          <div class="name">{{companyName}}</div>
+          <div class="notes">{{companyAddress}}</div>
+          <div>Phone: {{companyPhone}}</div>
+          <div>Email: {{companyEmail}}</div>
+        </div>
+      </div>
+
+      <div class="parties">
+        <div>
+          <div class="label">Billing Address</div>
+          <div class="name">{{customerName}}</div>
+          <div class="notes">{{customerAddress}}</div>
+          <div>Phone: {{customerPhone}}</div>
+        </div>
+        <div>
+          <div class="label">Service Address</div>
+          <div class="name">{{contactName}}</div>
+          <div class="notes">{{serviceAddress}}</div>
+          <div>Phone: {{contactPhone}}</div>
+        </div>
+        <div>
+          <div><b>Date:</b> {{date}}</div>
+          <div><b>Estimate #</b> {{proposalNumber}}</div>
+        </div>
+      </div>
+
+      <table class="items">
+        <thead>
+          <tr>
+            <th>Line Item</th>
+            <th class="num">Rate</th>
+            <th class="num">Qty</th>
+            <th class="num">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{#lineItems}}
+          <tr>
+            <td>
+              <div>{{activity}}</div>
+              {{#description}}<div class="desc">{{description}}</div>{{/description}}
+            </td>
+            <td class="num">{{rate}}</td>
+            <td class="num">{{qty}}</td>
+            <td class="num">{{amount}}</td>
+          </tr>
+          {{/lineItems}}
+        </tbody>
+      </table>
+
+      <div class="foot">
+        <div class="sign">
+          <div class="line">&nbsp;</div>
+          <div>Customer Signature</div>
+        </div>
+        <div class="totals">
+          <div class="row"><b>Subtotal</b><span>{{subtotal}}</span></div>
+          {{#taxed}}
+          <div class="row"><b>Total Tax - {{taxLabel}}</b><span>{{taxAmount}}</span></div>
+          {{/taxed}}
+          <div class="row"><b>Total</b><span>{{total}}</span></div>
+          <div class="row"><b>Net Amount</b><span>{{total}}</span></div>
+        </div>
+      </div>
+
+      <div class="copy">
+        {{#notes}}
+        <h3>Job Description</h3>
+        <p class="notes">{{notes}}</p>
+        {{/notes}}
+
+        <h3>Terms and Conditions</h3>
+        <p>
+          All pricing is based on estimated conditions. Any changes in scope, site conditions, or
+          requirements may affect the total cost. Significant changes will be discussed and
+          approved prior to proceeding
+        </p>
+        {{#legalFooter}}<p class="notes">{{legalFooter}}</p>{{/legalFooter}}
+      </div>
+    </div>
+  </body>
+</html>
