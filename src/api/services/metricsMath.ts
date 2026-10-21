@@ -72,23 +72,68 @@ export const WINDOW_METRICS = new Set([
   "median_markup_percent",
 ]);
 
+/** One calendar bucket as the card reads it, clipped to the selected window. */
+export interface PeriodReading {
+  value: number | null;
+  /** First instant counted: the bucket start, or the window start if that is later. */
+  start: string;
+  /** Last instant counted: the bucket's last moment, or the as-of moment if that is earlier. */
+  end: string;
+  /** The bucket was still running at the as-of moment, so the value is "so far". */
+  inProgress: boolean;
+}
+
 /**
- * Drop a trailing bucket that has not finished yet.
- *
- * DAU, WAU and MAU report the most recent bucket, and the most recent bucket of a window
- * ending now is almost always in progress. At 09:00 that is a partial day being compared
- * against complete ones — a headline that climbs through the day and reads 0 every morning.
- * The last COMPLETE bucket is the honest answer; if none has completed, there is none.
+ * The moment DAU, WAU and MAU are read at: the window end, or now if the window runs into
+ * the future. "Today" arrives as 00:00 -> 23:59:59.999, so its end is usually hours ahead.
  */
-export function dropInProgressBucket(
+export function asOfMoment(windowEnd: Date, now = new Date()): Date {
+  return windowEnd.getTime() < now.getTime() ? windowEnd : now;
+}
+
+/**
+ * The current bucket (the one holding the as-of moment) and the one before it.
+ *
+ * All three cards read the bucket that holds the SAME moment, so the day sits inside the
+ * week and the week inside the month. The previous version took each metric's last COMPLETE
+ * bucket instead, which on 20 Oct compared the week of 12 Oct against all of September — and
+ * a growing tenant then showed more weekly than monthly technicians.
+ *
+ * A running bucket is shown as "so far" rather than dropped. The previous bucket rides along
+ * so a quiet Monday morning (WAU 0 so far) still shows what last week looked like.
+ */
+export function periodReadings(
   series: SeriesPoint[],
   grain: MetricGrain,
+  windowStart: Date,
+  windowEnd: Date,
   now = new Date()
-): SeriesPoint[] {
-  if (series.length === 0) return series;
-  const last = series[series.length - 1];
-  const ends = bucketEnd(new Date(last.t), grain);
-  return ends.getTime() > now.getTime() ? series.slice(0, -1) : series;
+): { current: PeriodReading | null; previous: PeriodReading | null } {
+  const asOf = asOfMoment(windowEnd, now);
+  const byStart = new Map(series.map((p) => [new Date(p.t).getTime(), p]));
+
+  const read = (bucketStart: Date): PeriodReading | null => {
+    const point = byStart.get(bucketStart.getTime());
+    if (!point) return null;
+    const ends = bucketEnd(bucketStart, grain);
+    const start = Math.max(bucketStart.getTime(), windowStart.getTime());
+    const end = Math.min(ends.getTime() - 1, asOf.getTime());
+    return {
+      value: point.value,
+      start: new Date(start).toISOString(),
+      end: new Date(end).toISOString(),
+      inProgress: ends.getTime() - 1 > asOf.getTime(),
+    };
+  };
+
+  const currentStart = truncateToGrain(asOf, grain);
+  const previousStart = truncateToGrain(new Date(currentStart.getTime() - 1), grain);
+  return { current: read(currentStart), previous: read(previousStart) };
+}
+
+/** Buckets that start after the as-of moment have not happened yet; a chart must not draw them. */
+export function dropFutureBuckets(series: SeriesPoint[], asOf: Date): SeriesPoint[] {
+  return series.filter((p) => new Date(p.t).getTime() <= asOf.getTime());
 }
 
 /**

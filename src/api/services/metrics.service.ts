@@ -10,7 +10,15 @@ import {
   MetricRow,
   SeriesPoint,
 } from "./metrics.types";
-import { dropInProgressBucket, grainFor, summarize, WINDOW_METRICS } from "./metricsMath";
+import {
+  asOfMoment,
+  dropFutureBuckets,
+  grainFor,
+  PeriodReading,
+  periodReadings,
+  summarize,
+  WINDOW_METRICS,
+} from "./metricsMath";
 
 /**
  * Estimating Agent metrics.
@@ -51,6 +59,9 @@ export interface MetricSeriesResult {
   reason?: string;
   series: SeriesPoint[];
   current: number | null;
+  /** DAU, WAU and MAU only: the dates `current` covers, and the bucket before it. */
+  period?: PeriodReading | null;
+  previous?: PeriodReading | null;
   companions?: { key: string; current: number | null }[];
   breakdown?: { companyId: number; name: string; value: number | null }[];
 }
@@ -222,14 +233,17 @@ export class MetricsService {
      * The one number a card shows.
      *
      * Three sources, because three kinds of metric collapse differently: a percentile comes
-     * from the window query, a per-calendar-bucket count from its last COMPLETE bucket, and
-     * everything else from the series totals.
+     * from the window query, a per-calendar-bucket count from the bucket holding the as-of
+     * moment (see periodReadings), and everything else from the series totals.
      */
     const headline = (key: string, series: SeriesPoint[], grain: MetricGrain) => {
       if (WINDOW_METRICS.has(key)) return windowGlobal.get(key) ?? null;
-      if (FIXED_GRAIN_METRICS[key]) return summarize(key, dropInProgressBucket(series, grain));
+      if (FIXED_GRAIN_METRICS[key]) return readings(series, grain).current?.value ?? null;
       return summarize(key, series);
     };
+    const readings = (series: SeriesPoint[], grain: MetricGrain) =>
+      periodReadings(series, grain, params.startDate, params.endDate);
+    const asOf = asOfMoment(params.endDate);
 
     const sections: Record<string, MetricSeriesResult[]> = {};
 
@@ -266,7 +280,9 @@ export class MetricsService {
           };
         }
 
-        const series = byMetric.get(def.key) ?? [];
+        const all = byMetric.get(def.key) ?? [];
+        const series = fixed ? dropFutureBuckets(all, asOf) : all;
+        const period = fixed ? readings(series, fixed.grain) : null;
         return {
           key: def.key,
           blocked: false,
@@ -278,6 +294,7 @@ export class MetricsService {
           // counts behind a ratio, not just the ratio.
           series,
           current: headline(def.key, series, fixed?.grain ?? params.grain),
+          ...(period ? { period: period.current, previous: period.previous } : {}),
           companions: (def.companions ?? []).map((ck) => ({
             key: ck,
             current: headline(
@@ -347,7 +364,12 @@ export class MetricsService {
         const value = WINDOW_METRICS.has(key)
           ? win?.get(key) ?? null
           : FIXED_GRAIN_METRICS[key]
-            ? summarize(key, dropInProgressBucket(series, FIXED_GRAIN_METRICS[key].grain))
+            ? periodReadings(
+                series,
+                FIXED_GRAIN_METRICS[key].grain,
+                params.startDate,
+                params.endDate
+              ).current?.value ?? null
             : summarize(key, series);
         if (value === null) continue;
         out[key] = out[key] ?? [];
