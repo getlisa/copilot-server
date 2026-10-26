@@ -1,0 +1,428 @@
+<!doctype html>
+<!--
+  DTB Fire Protection — RETROFIT proposal, authored from their ZenTrades estimate (Retrofit 1 Zen.pdf,
+  E005615-3). Letter-style document: logo beside the company block, billing / service / estimate
+  columns, a Service Summary narrative, the numbered work list, a one-line lump-sum price,
+  exclusions, a signed closing; the acceptance block on its own page; their General Terms and
+  Conditions verbatim on the pages after. service.html and inspection.html beside it share
+  everything but the Service Summary page.
+
+  Values arrive as double-brace tokens. The work list repeats per line item; the narrative comes from the
+  quote's scope sections. Everything else is their boilerplate and theirs to change.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Estimate {{proposalNumber}}</title>
+    <style>
+      @page {
+        size: letter;
+        margin: 0.6in 0.75in 0.7in;
+        @bottom-center {
+          content: "Estimate#{{proposalNumber}} - (Page " counter(page) " of "
+            counter(pages) ")";
+          font-family: "Courier New", Courier, monospace;
+          font-size: 8pt;
+          font-weight: bold;
+          color: #000;
+        }
+      }
+      html {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      body {
+        margin: 0;
+        padding-inline: 0.75in;
+        font-family: Roboto, Arial, Helvetica, sans-serif;
+        font-size: 10pt;
+        line-height: 1.45;
+        color: #000;
+      }
+      @media print {
+        body {
+          padding-inline: 0;
+        }
+      }
+      p {
+        margin: 0 0 10px;
+      }
+      h2 {
+        font-size: 11pt;
+        margin: 0 0 14px;
+      }
+      .page-break {
+        page-break-before: always;
+        break-before: page;
+      }
+
+      /* ---------- letterhead ---------- */
+      .head {
+        display: grid;
+        grid-template-columns: 1fr 2.6in;
+        column-gap: 24px;
+        margin-bottom: 30px;
+      }
+      .logo img {
+        max-width: 2.4in;
+        max-height: 2.4in;
+      }
+      .company {
+        padding-top: 4px;
+        overflow-wrap: anywhere;
+      }
+      .company .name {
+        font-weight: bold;
+      }
+      .company .pre {
+        white-space: pre-line;
+      }
+
+      /* ---------- parties ---------- */
+      .parties {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        column-gap: 16px;
+        margin-bottom: 36px;
+      }
+      .parties .label {
+        color: #555;
+        margin-bottom: 2px;
+      }
+      .parties .pre {
+        white-space: pre-line;
+      }
+      .parties b {
+        font-weight: bold;
+      }
+
+      /* ---------- body ---------- */
+      .narrative {
+        white-space: pre-line;
+      }
+      .lead {
+        font-weight: bold;
+        text-decoration: underline;
+      }
+      .bold {
+        font-weight: bold;
+      }
+      ul.work {
+        list-style: none;
+        margin: 0 0 14px;
+        padding: 0;
+      }
+      ol.work {
+        list-style: decimal inside;
+        margin: 0 0 14px;
+        padding: 0;
+      }
+      /* Inline comma list, "and" before the last item, full stop after it — their sentence shape. */
+      .excl:not(:last-child)::after {
+        content: ", ";
+      }
+      .excl:nth-last-child(2)::after {
+        content: ", and ";
+      }
+      .excl:last-child::after {
+        content: ".";
+      }
+      .price {
+        font-weight: bold;
+        text-decoration: underline;
+        margin: 14px 0;
+      }
+      .signoff {
+        margin: 18px 0;
+      }
+      .signoff .name,
+      .signoff .title {
+        font-weight: bold;
+        text-decoration: underline;
+      }
+
+      /* ---------- acceptance ---------- */
+      .accept {
+        padding-top: 1.2in;
+      }
+      .accept .line {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        margin-top: 22px;
+      }
+      .accept .field {
+        flex: 1;
+        white-space: nowrap;
+      }
+      .accept .field span {
+        display: inline-block;
+        border-bottom: 1px solid #000;
+        width: 2.6in;
+        vertical-align: bottom;
+      }
+      .accept .field.short span {
+        width: 1.9in;
+      }
+
+      /* ---------- terms ---------- */
+      .terms p {
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="head">
+      <div class="logo"><img src="{{logoUrl}}" alt="{{companyName}}" /></div>
+      <div class="company">
+        <div class="name">{{companyName}}</div>
+        <div>Your Fire Protection Specialist</div>
+        <div class="pre">{{companyAddress}}</div>
+        <div>{{companyCityStateZip}}</div>
+        <div>Phone: {{companyPhone}}</div>
+        <div>Email: {{companyEmail}}</div>
+      </div>
+    </div>
+
+    <div class="parties">
+      <div>
+        <div class="label">Billing Address</div>
+        <div><b>{{customerName}}</b></div>
+        <div class="pre"><b>{{customerAddress}}</b></div>
+        <div><b>Phone:</b> {{customerPhone}}</div>
+      </div>
+      <div>
+        <div class="label">Service Address</div>
+        <div><b>{{customerName}}</b></div>
+        <div class="pre"><b>{{serviceAddress}}</b></div>
+        {{#contactName}}
+        <div><b>Contact:</b> {{contactName}}</div>
+        {{/contactName}}
+      </div>
+      <div>
+        <div><b>Date:</b> {{date}}</div>
+        <div><b>Estimate #</b> {{proposalNumber}}</div>
+        <div><b>Technician:</b> {{technicianName}}</div>
+      </div>
+    </div>
+
+    <h2>Service Summary</h2>
+
+    <p>
+      We would like to thank you for considering {{companyName}}, ("DTB") as a
+      competitive bidder for this project. We are pleased to submit this
+      proposal for {{projectTitle}} at the above referenced location.
+      {{#scopeSections}}{{#bullets}}{{text}} {{/bullets}}{{/scopeSections}} All
+      labor, tools, material and equipment will be provided to perform the work
+      as outlined in the plans and specifications, in accordance with NFPA 13
+      standards. All work to be performed during normal business hours.
+      (7am-3:30pm).
+    </p>
+
+    <p class="lead" style="margin-bottom: 2px">
+      DTB will perform the following work:
+    </p>
+    <ol class="work">
+      {{#lineItems}}
+      <li>{{item}}</li>
+      {{/lineItems}}
+    </ol>
+
+    <p class="price">
+      DTB Fire Protection proposes to perform the above scope of work for a
+      total price of:{{total}}
+    </p>
+    {{#taxed}}
+    <p>Includes {{taxLabel}} of {{taxAmount}}.</p>
+    {{/taxed}} {{#hasExclusions}}
+    <p>
+      <span class="lead">Exclusions for this project are as follows:</span>
+      {{#exclusions}}<span class="excl">{{text}}</span>{{/exclusions}}
+    </p>
+    {{/hasExclusions}} {{#notes}}
+    <p class="narrative">{{notes}}</p>
+    {{/notes}}
+
+    <p>
+      We thank you for this opportunity. If you should have any questions or
+      comments at this time, please contact me. The above quoted price will hold
+      for {{validFor}} from the date of this Proposal. Your counter-signature to
+      this proposal below acknowledges your acceptance of this Proposal. We
+      thank you for this opportunity and look forward to hearing from you.
+    </p>
+
+    <div class="signoff">
+      <div>Sincerely,</div>
+      <div>DTB FIRE PROTECTION</div>
+      <div class="name">Daniel T. Hinkle</div>
+      <div class="title">President</div>
+    </div>
+
+    <!-- ---------- page 2: acceptance ---------- -->
+    <div class="page-break accept">
+      <p>
+        <span class="lead">Acceptance of Proposal:</span> This Proposal, if
+        accepted, is subject to and incorporates the attached General Terms and
+        Conditions. By signing below, you acknowledge that you have reviewed and
+        agree to be bound by the General Terms and Conditions.
+      </p>
+      <p>
+        If {{companyName}} is unable to perform above work for any of the
+        reasons listed below, the customer will be charged an additional fee of
+        $165.00 per man/per hour (1) Unable to put alarms on test (2) Unable to
+        gain access to riser room / shut off valves / alarm panels (3) Unable to
+        gain access to tenant space
+      </p>
+      <div class="line">
+        <div class="field">Print Name: <span></span></div>
+        <div class="field">Signature: <span></span></div>
+      </div>
+      <div class="line">
+        <div class="field">Title: <span class="short"></span></div>
+        <div class="field">Company Name: <span></span></div>
+      </div>
+      <div class="line">
+        <div class="field short">P.O. No. <span></span></div>
+        <div class="field short">Date: <span></span></div>
+      </div>
+    </div>
+
+    <!-- ---------- pages 3-4: their General Terms and Conditions, verbatim ---------- -->
+    <div class="page-break terms">
+      <h2>Terms and Conditions</h2>
+      <p>DTB FIRE PROTECTION, INC.</p>
+      <p style="margin-bottom: 14px">GENERAL TERMS AND CONDITIONS</p>
+      <p>
+        Upon acceptance of the Proposal for work to be undertaken by DTB Fire
+        Protection, Inc. ("DTB"), Customer agrees to be further bound by the
+        following terms and conditions:
+      </p>
+      <p>
+        (1). DTB agrees to furnish the materials and services outlined in the
+        Description of Work, and as further detailed in the drawings and
+        specifications that may be prepared by DTB. The Proposal agreed to by
+        Customer (hereafter, the "Agreement") comprises various documents,
+        typically including but not necessarily the following: (1) Letter to
+        Customer outlining the Proposal; (2) Description of Work; (3) the
+        drawings and specifications when prepared; (4) the General Terms and
+        Conditions set forth herein; (5) the DTB Warranty; (6) any subsequent
+        change order or written modification agreed to by and between DTB and
+        Customer; and (7) any other documents intended to form a part of the
+        Agreement. (2). Customer agrees to make payment therefore in accordance
+        with the schedule of payment set forth in the Agreement. However, if at
+        any time DTB believes that conditions exist requiring modifications not
+        reasonably anticipated or known, Customer shall be responsible for
+        obtaining and paying the cost and expense for the modification,
+        including but not limited to the services of a registered architect or
+        engineer, before DTB will continue with the work as contemplated under
+        this Agreement. In that regard, the Agreement is subject to change in
+        the event of changes in design, specifications, plans, field conditions
+        and/or building dimensions made by the Customer, architect, contractor
+        or any other persons involved with the project. Customer shall bear any
+        increase in cost or expense associated with such changes.
+      </p>
+      <p>
+        3. Customer understands and agrees that the price agreed upon herein
+        does not include possible additional expense caused by unforeseen or
+        unknown conditions found at the job site. In the event such conditions
+        arise and DTB is required to furnish labor or materials or otherwise
+        perform work not reasonably provided for or contemplated by DTB, the
+        actual cost thereof, plus reasonable allowance for profit to DTB, will
+        be paid by the Customer. Contingencies include but are not limited to,
+        insufficient water pressure not reasonably known to DTB prior to
+        submittal of the Proposal; the relocation of concealed pipes, risers,
+        wiring or conduits, the presence of which cannot be determined until the
+        work has started; imperfections, rotting or decay in the structure or
+        parts thereof necessitating replacement; or discovery of asbestos on the
+        project site.
+      </p>
+      <p>
+        4. Except as provided in the DTB Warranty document, which compromises
+        part of this Agreement, DTB and its directors, officers, agents and
+        employees provide no warranty as to the quality and/or performance of
+        the installation, design, materials and/or equipment provided, used or
+        specified by DTB or others.
+      </p>
+      <p>
+        5. Customer understands and agrees that job management will be the sole
+        responsibility of the Customer, unless otherwise agreed upon and set
+        forth in this Agreement.
+      </p>
+      <p>
+        6. All dates given hereunder shall be deemed approximate and performance
+        is subject to delays caused by unavailability of materials, strikes,
+        fires, acts of God or other reasons not under control of DTB. If a
+        construction schedule is required by Customer, DTB will adhere to such
+        schedule only if provided in writing to DTB at the time of acceptance of
+        the Proposal. Thereafter, DTB will not be subject to any construction
+        schedule unless subsequently agreed to in writing.
+      </p>
+      <p>
+        7. Customer understands that the work contemplated in the Agreement is
+        specially designed and built for Customer's ultimate use and benefit,
+        and that DTB takes immediate steps upon execution of this Agreement to
+        design, order and construct those items set forth herein; therefore,
+        this Agreement is not subject to cancellation by the Customer for any
+        reason.
+      </p>
+      <p>
+        8. The prices stated herein do not include allowances for asbestos that
+        is discovered or is determined to be in the probable path of DTB's
+        employees after acceptance of this Agreement. DTB shall notify Customer
+        as soon as practicable upon such discovery or determination, and
+        Customer hereby agrees to and shall pay any adjustment in the quoted
+        price that DTB deems reasonably necessary to offset any and all added
+        costs that it will or must incur as a result of the presence of
+        asbestos. Furthermore, in consideration of DTB's performing work in an
+        area found to contain asbestos, Customer hereby agrees to indemnify and
+        hold harmless DTB, its agents, employees and servants, from any and all
+        claims, suits, causes of action, demands, damages, (including but not
+        limited to consequential and incidental damages) or injuries to persons
+        or property whatsoever in law or equity arising out of the work
+        performed and equipment installed by DTB.
+      </p>
+      <p>
+        9. Delays in payment by Customer shall be subject to interest charges of
+        eighteen percent (18%) per annum on the outstanding principal balance
+        owed. If DTB engages the services of a collection agency or attorney,
+        the Customer agrees to reimburse DTB for costs, expenses and reasonable
+        attorney's fees incurred. Customer understands that upon the failure to
+        pay any amounts when due hereunder, DTB's obligation under this
+        Agreement shall cease after DTB mails notice to the Customer.
+      </p>
+      <p>
+        10. DTB agrees that it will perform this Agreement in conformity with
+        customary industry practices. The Customer agrees that any claim for
+        adjustment shall not be reason or cause for failure to make payment of
+        the purchase price in full. Any unresolved controversy or claim arising
+        from or under this Agreement may be settled by arbitration and judgment
+        upon the award rendered may be entered in any court of competent
+        jurisdiction.
+      </p>
+      <p>
+        11. Customer hereby agrees to indemnify and hold harmless DTB from any
+        and all claims, suits, causes of action, demands, damages (including but
+        not limited to consequential and incidental damages) or injuries to
+        person or property whatsoever in law or equity arising out of the work
+        performed and equipment installed by DTB, its agents, employees and
+        servants, unless caused solely by negligence on the part of DTB. This
+        provision shall survive completion of the job.
+      </p>
+      <p>
+        12. This Agreement sets forth the entire agreement between the parties;
+        any and all prior Agreements, warranties or representations made by
+        either party are superseded by this Agreement. All changes in the
+        Agreement shall be made by a separate document and executed with the
+        same formalities. No agent of DTB, unless authorized in writing by DTB,
+        has any authority to waive, alter, or enlarge this contract or to make
+        any new or substituted or different contracts, representations, or
+        warranties.
+      </p>
+      <p>
+        13. If any provision of this Agreement is declared invalid by any
+        tribunal, the remaining provisions of the Agreement shall not be
+        affected thereby and shall remain in full force and effect.
+      </p>
+    </div>
+  </body>
+</html>
