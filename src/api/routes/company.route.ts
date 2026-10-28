@@ -108,6 +108,7 @@ companyRoute.delete(
 companyRoute.post("/connections/hcp/connect", authMiddleware, requireAdmin, CompanyController.connectHcpForCompany);
 companyRoute.post("/connections/hcp/sync", authMiddleware, requireAdmin, CompanyController.syncHcpForCompany);
 companyRoute.get("/connections/hcp/jobs", authMiddleware, CompanyController.listHcpJobsForCompany);
+companyRoute.get("/connections/hcp/customers", authMiddleware, CompanyController.listHcpCustomersForCompany);
 companyRoute.delete("/connections/hcp", authMiddleware, requireAdmin, CompanyController.disconnectHcpForCompany);
 
 // Reference data. The sync is a settings write, so admin-only. The reads a technician's estimate

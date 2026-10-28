@@ -952,6 +952,23 @@ model HcpJobRaw {
 }
 
 /// CLARA customer ↔ Housecall Pro customer id (the customer_zt pattern).
+model HcpCustomerRaw {
+  id            Int       @id @default(autoincrement())
+  companyId     Int       @map("company_id")
+  hcpCustomerId String    @map("hcp_customer_id") @db.VarChar(64)
+  name          String?   @db.VarChar(255)
+  hcpUpdatedAt  DateTime? @map("hcp_updated_at")
+  rawPayload    Json      @map("raw_payload")
+  contentHash   String    @map("content_hash") @db.VarChar(64)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@unique([companyId, hcpCustomerId])
+  @@index([companyId, hcpUpdatedAt(sort: Desc)])
+  @@map("hcp_customers_raw")
+  @@schema("public")
+}
+
 model CustomerHcp {
   id            Int      @id @default(autoincrement())
   customerId    Int      @map("customer_id")

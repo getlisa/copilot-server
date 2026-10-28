@@ -42,7 +42,7 @@ import {
   SERVICETRADE_SYNC_CLAIM_STALE_MS,
 } from "../../lib/servicetradeIngest";
 import { isHcpConfigured, hcpConnected, hcpConnectionFor, connectHcp, disconnectHcp } from "../../lib/hcp";
-import { syncHcpData, listHcpJobs, HcpSyncRunningError, HCP_SYNC_CLAIM_STALE_MS } from "../../lib/hcpIngest";
+import { syncHcpData, listHcpJobs, listHcpCustomers, HcpSyncRunningError, HCP_SYNC_CLAIM_STALE_MS } from "../../lib/hcpIngest";
 import { syncProgressFor, SYNC_PROVIDERS, type SyncProvider } from "../../lib/syncProgress";
 import {
   syncUptickData,
@@ -644,7 +644,7 @@ export class CompanyController {
     }
   }
 
-  /** POST /api/v1/companies/connections/hcp/sync — jobs + price book. Admin-only. */
+  /** POST /api/v1/companies/connections/hcp/sync — jobs + customers + price book. Admin-only. */
   static async syncHcpForCompany(req: RequestWithUser, res: Response) {
     const companyId = req.user?.companyId;
     if (companyId == null)
@@ -669,6 +669,17 @@ export class CompanyController {
         .json({ success: false, error: { status: 400, message: "No company on this account" } });
     const q = typeof req.query.q === "string" ? req.query.q : undefined;
     res.json({ success: true, data: await listHcpJobs(companyId, q) });
+  }
+
+  /** GET /api/v1/companies/connections/hcp/customers?q= — the "from a customer" picker's rows, any role. */
+  static async listHcpCustomersForCompany(req: RequestWithUser, res: Response) {
+    const companyId = req.user?.companyId;
+    if (companyId == null)
+      return res
+        .status(400)
+        .json({ success: false, error: { status: 400, message: "No company on this account" } });
+    const q = typeof req.query.q === "string" ? req.query.q : undefined;
+    res.json({ success: true, data: await listHcpCustomers(companyId, q) });
   }
 
   /** DELETE /api/v1/companies/connections/hcp */

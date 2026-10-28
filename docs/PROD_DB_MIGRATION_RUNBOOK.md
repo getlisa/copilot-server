@@ -133,6 +133,21 @@ few hundred MB of RAM briefly, so check the ECS task's memory reservation before
 Without Chromium the server still runs: `htmlPdfAvailable()` is false and HTML templates fall
 back to the block renderer.
 
+## Pending migration: Housecall Pro customers — phase21 (2026-10-28)
+
+`docs/sql/phase21.sql` — one new table, `hcp_customers_raw` (the `hcp_jobs_raw` shape). The
+Housecall Pro sync now has a third stage, `GET /customers`, so a technician can start an
+estimate from an HCP **customer** that has no job yet ("From Housecall Pro customer" in the
+New Chat menu). The estimate still posts through `customer_hcp` → `quotes.customer_id`; no
+`quotes` column changes. Run via `bash docs/sql/apply-phase21.sh` BEFORE the image deploys:
+without the table every HCP sync reports a customers-stage error and the picker stays empty.
+Requires phase15. Applied to dev Supabase 2026-10-28; prod Aurora pending. Verify:
+
+```sql
+SELECT to_regclass('public.hcp_customers_raw');  -- not null
+SELECT tableowner FROM pg_tables WHERE tablename = 'hcp_customers_raw';  -- app_user
+```
+
 ## Pending migration: removed-line-item archive — phase20 (2026-10-14)
 
 `docs/sql/phase20.sql` — creates `quote_line_items_deleted`. Run via

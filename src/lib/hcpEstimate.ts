@@ -1,7 +1,7 @@
 import { HcpConnection } from "@prisma/client";
 import logger from "./logger";
 import { hcpFetch, uploadHcpAttachment, HcpApiError } from "./hcp";
-import { hcpServiceItemResolver, jobBits, type HcpItemKind } from "./hcpIngest";
+import { hcpCustomerAddressId, hcpServiceItemResolver, jobBits, type HcpItemKind } from "./hcpIngest";
 import type { QuoteDto } from "../copilot/estimating/quoteDto";
 
 /**
@@ -112,18 +112,29 @@ export async function syncQuoteToHcp(
   dto: QuoteDto,
   pdf: { fileName: string; buffer: Buffer } | null
 ): Promise<HcpSyncResult> {
-  if (!quote.hcpJobId) throw new Error("This quote is not linked to a Housecall Pro job");
-
-  let job: Record<string, unknown> | null;
-  try {
-    job = await hcpFetch<Record<string, unknown>>(conn, `jobs/${encodeURIComponent(quote.hcpJobId)}`);
-  } catch (err) {
-    if (err instanceof HcpApiError && err.status === 404)
-      throw new Error(`Housecall Pro job ${quote.hcpJobId} no longer exists — it was deleted in Housecall Pro`);
-    throw err;
+  // Who the estimate is for: the job's customer + service address, or — a quote started from a
+  // customer with no job — the linked HCP customer and its first synced address.
+  let customerId: string;
+  let addressId: string | null;
+  if (quote.hcpJobId) {
+    let job: Record<string, unknown> | null;
+    try {
+      job = await hcpFetch<Record<string, unknown>>(conn, `jobs/${encodeURIComponent(quote.hcpJobId)}`);
+    } catch (err) {
+      if (err instanceof HcpApiError && err.status === 404)
+        throw new Error(`Housecall Pro job ${quote.hcpJobId} no longer exists — it was deleted in Housecall Pro`);
+      throw err;
+    }
+    const bits = jobBits(job ?? {});
+    if (!bits.customerId) throw new Error(`Housecall Pro job ${bits.invoiceNumber ?? quote.hcpJobId} has no customer to estimate for`);
+    customerId = bits.customerId;
+    addressId = idOf(bits.address?.id);
+  } else if (dto.hcpCustomerId) {
+    customerId = dto.hcpCustomerId;
+    addressId = await hcpCustomerAddressId(quote.companyId, dto.hcpCustomerId);
+  } else {
+    throw new Error("This quote is not linked to a Housecall Pro job or customer");
   }
-  const bits = jobBits(job ?? {});
-  if (!bits.customerId) throw new Error(`Housecall Pro job ${bits.invoiceNumber ?? quote.hcpJobId} has no customer to estimate for`);
 
   const lines = hcpLineItemsPayload(quote, dto, await hcpServiceItemResolver(quote.companyId));
   if (lines.length === 0) throw new Error("The estimate has no line items to send");
@@ -162,11 +173,10 @@ export async function syncQuoteToHcp(
   }
 
   if (!estimateId || !optionId) {
-    const addressId = idOf(bits.address?.id);
     const created = await hcpFetch<Record<string, unknown>>(conn, "estimates", {
       method: "POST",
       body: {
-        customer_id: bits.customerId,
+        customer_id: customerId,
         ...(addressId ? { address_id: addressId } : {}),
         options: [{ name: quote.chosenOptionGroup ?? "Estimate", tax: hcpOptionTax(quote) }],
       },
