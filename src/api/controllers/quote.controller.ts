@@ -55,7 +55,7 @@ import { syncQuoteToUptick } from "../../lib/uptickEstimate";
 import { seedQuoteFromServicetradeJob, servicetradeWelcomeMessage } from "../../lib/servicetradeIngest";
 import { servicetradeConnectionFor, servicetradeConnected } from "../../lib/servicetrade";
 import { syncQuoteToServicetrade } from "../../lib/servicetradeEstimate";
-import { seedQuoteFromHcpJob, hcpWelcomeMessage } from "../../lib/hcpIngest";
+import { seedQuoteFromHcpJob, seedQuoteFromHcpCustomer, hcpWelcomeMessage } from "../../lib/hcpIngest";
 import { hcpConnectionFor, hcpConnected } from "../../lib/hcp";
 import { syncQuoteToHcp, hcpSyncedData } from "../../lib/hcpEstimate";
 import { randomUUID } from "crypto";
@@ -172,8 +172,13 @@ function alignAnswers(
  */
 const quoteDtoInclude = {
   lineItems: true,
-  customer: { select: { email: true } },
+  // hcp: the customer's Housecall Pro id, so a quote started from an HCP customer (no job) can post.
+  customer: { select: { email: true, hcp: { select: { hcpCustomerId: true }, take: 1 } } },
 } satisfies Prisma.QuoteInclude;
+
+/** Can this quote post to Housecall Pro — seeded from a job, or its customer is an HCP customer. */
+const hcpLinked = (q: { hcpJobId: string | null; customer?: { hcp?: unknown[] } | null }) =>
+  !!q.hcpJobId || !!q.customer?.hcp?.length;
 
 /**
  * Load the quote with items, enforcing ownership — by user AND by company (T-54).
@@ -544,7 +549,19 @@ export class QuoteController {
         success: false,
         error: { status: 404, message: "That Housecall Pro job is not synced for this company" },
       });
-    const crmSeed = ztSeed ?? uptickSeed ?? stSeed ?? hcpSeed;
+    // Housecall Pro CUSTOMER (no job yet): the synced customer seeds the quote; the estimate
+    // later posts for that customer through customer_hcp.
+    const hcpCustomerId =
+      !ztTicketId && !uptickTaskId && !stJobId && !hcpJobId && typeof req.body?.hcpCustomerId === "string" && req.body.hcpCustomerId.trim()
+        ? req.body.hcpCustomerId.trim()
+        : null;
+    const hcpCustomerSeed = hcpCustomerId ? await seedQuoteFromHcpCustomer(user.companyId, hcpCustomerId) : null;
+    if (hcpCustomerId && !hcpCustomerSeed)
+      return res.status(404).json({
+        success: false,
+        error: { status: 404, message: "That Housecall Pro customer is not synced for this company" },
+      });
+    const crmSeed = ztSeed ?? uptickSeed ?? stSeed ?? hcpSeed ?? hcpCustomerSeed;
     const quote = await prisma.quote.create({
       data: {
         conversationId: conversation.id,
@@ -567,7 +584,7 @@ export class QuoteController {
               ? "uptick"
               : stSeed
                 ? "servicetrade"
-                : hcpSeed
+                : hcpSeed || hcpCustomerSeed
                   ? "housecallpro"
                   : null
           : null,
@@ -604,7 +621,15 @@ export class QuoteController {
           ? uptickWelcomeMessage(user.companyId, uptickTaskId)
           : stJobId
             ? servicetradeWelcomeMessage(user.companyId, stJobId)
-            : hcpWelcomeMessage(user.companyId, hcpJobId!)
+            : hcpJobId
+              ? hcpWelcomeMessage(user.companyId, hcpJobId)
+              : Promise.resolve(
+                  crmSeed.customerName
+                    ? `This estimate is for **${crmSeed.customerName}** (Housecall Pro customer)${
+                        crmSeed.customerAddress ? ` at ${crmSeed.customerAddress}` : ""
+                      }. Describe the work and I'll build the estimate. When you complete it, it is created as an estimate in Housecall Pro for this customer.`
+                    : null
+                )
       ).catch(() => null);
       // An auto-picked template is stated, never silent — with the alternatives listed so
       // switching is one sentence. With no confident match, the welcome says nothing about
@@ -1765,7 +1790,7 @@ export class QuoteController {
   /** Fire-and-forget Housecall Pro post after completion — the ServiceTrade sibling, same rules. */
   private static postToHcpInBackground(quote: NonNullable<Awaited<ReturnType<typeof loadOwnedQuote>>>) {
     void (async () => {
-      if (!quote.hcpJobId) return;
+      if (!hcpLinked(quote)) return;
       const conn = await hcpConnectionFor(quote.companyId);
       if (!hcpConnected(conn)) return;
       const dto = await quoteDtoWithProducts(quote);
@@ -1793,7 +1818,7 @@ export class QuoteController {
     const quote = await loadOwnedQuote(req.params.quoteId as string, user.userId, user.companyId);
     if (!quote) return fail(res, 404, "Quote not found");
     if (quote.status !== "COMPLETED") return fail(res, 409, "Only a completed quote can be sent");
-    if (!quote.hcpJobId) return fail(res, 409, "This quote is not linked to a Housecall Pro job");
+    if (!hcpLinked(quote)) return fail(res, 409, "This quote is not linked to a Housecall Pro job or customer");
     const conn = await hcpConnectionFor(user.companyId);
     if (!hcpConnected(conn)) return fail(res, 409, "Housecall Pro is not connected");
     try {

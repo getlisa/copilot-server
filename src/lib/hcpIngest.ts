@@ -8,9 +8,11 @@ import { listProposalTemplateChoices, matchTemplateToJobType } from "./proposalT
 import type { ZtQuoteSeed } from "./ztIngest";
 
 /**
- * Housecall Pro sync engine — servicetradeIngest.ts structure, two stages:
+ * Housecall Pro sync engine — servicetradeIngest.ts structure, three stages:
  *  - jobs (GET /jobs sorted by updated_at desc; there is no updated_after filter, so the walk
  *    stops at the first page that is entirely older than the last COMPLETE run, 5-minute overlap);
+ *  - customers (GET /customers, same raw-first shape) so an estimate can start from a customer
+ *    with no job yet — the picker reads hcp_customers_raw, the post goes through customer_hcp;
  *  - price book: materials (walked category by category — GET /api/price_book/materials needs a
  *    material_category_uuid) and services (GET /api/price_book/services) → one "Housecall Pro
  *    catalog" pricebook (priority 9999, any admin book outranks it) so chat prices from their
@@ -50,7 +52,9 @@ export class HcpSyncRunningError extends Error {}
 
 // ---------- the run ----------
 
-export async function syncHcpData(companyId: number): Promise<{ jobs: number; items: number; errors: string[] }> {
+export async function syncHcpData(
+  companyId: number
+): Promise<{ jobs: number; customers: number; items: number; errors: string[] }> {
   const conn = await hcpConnectionFor(companyId);
   if (!hcpConnected(conn)) throw new Error("Housecall Pro is not connected for this company");
 
@@ -72,10 +76,11 @@ export async function syncHcpData(companyId: number): Promise<{ jobs: number; it
 
   const since = conn.lastSyncAt ? new Date(conn.lastSyncAt.getTime() - 5 * 60_000) : null;
   const errors: string[] = [];
-  const counts = { jobs: 0, items: 0 };
+  const counts = { jobs: 0, customers: 0, items: 0 };
   try {
     const stages: [keyof typeof counts, Promise<number>][] = [
       ["jobs", ingestJobs(conn, companyId, since)],
+      ["customers", ingestCustomers(conn, companyId)],
       ["items", ingestPricebook(conn, companyId)],
     ];
     const results = await Promise.allSettled(stages.map(([, p]) => p));
@@ -145,6 +150,62 @@ async function ingestJobs(conn: HcpConnection, companyId: number, since: Date | 
     }
   );
   setProgress(`Jobs: done (${synced} updated)`);
+  return synced;
+}
+
+// ---------- customers ----------
+
+/** HCP customer → the `name` column: company, else "First Last". */
+const customerName = (row: Record<string, unknown>): string | null =>
+  str(row.company) ?? ([str(row.first_name), str(row.last_name)].filter(Boolean).join(" ") || null);
+
+/**
+ * Full walk every run — ponytail: customers are hundreds, not tens of thousands, and the
+ * content hash makes an unchanged row a no-op write. Switch to the jobs-style `since` stop
+ * once a tenant's customer list is big enough for the walk to matter.
+ */
+async function ingestCustomers(conn: HcpConnection, companyId: number): Promise<number> {
+  let synced = 0;
+  const setProgress = (msg: string) => setSyncProgress("hcp", companyId, "customers", msg);
+  setProgress("Customers: fetching…");
+  await hcpPageAll<{ customers?: Record<string, unknown>[]; page?: number; total_pages?: number }>(
+    conn,
+    "customers?sort_by=updated_at&sort_direction=desc&page_size=100",
+    async (data) => {
+      setProgress(`Customers: page ${data.page ?? "?"}/${data.total_pages ?? "?"} — ${synced} updated…`);
+      const rows = arr(data.customers)
+        .filter((row) => row.id != null)
+        .map((row) => ({ id: String(row.id), row, contentHash: hash(row) }));
+      if (rows.length === 0) return;
+      const existing = await prisma.hcpCustomerRaw.findMany({
+        where: { companyId, hcpCustomerId: { in: rows.map((r) => r.id) } },
+        select: { hcpCustomerId: true, contentHash: true },
+      });
+      const hashById = new Map(existing.map((e) => [e.hcpCustomerId, e.contentHash]));
+      const changed = rows.filter((r) => hashById.get(r.id) !== r.contentHash);
+      if (changed.length === 0) return;
+      await prisma.$executeRaw`
+        INSERT INTO hcp_customers_raw
+          (company_id, hcp_customer_id, name, hcp_updated_at, raw_payload, content_hash, created_at, updated_at)
+        VALUES ${Prisma.join(
+          changed.map(
+            ({ id, row, contentHash }) =>
+              Prisma.sql`(${companyId}, ${id}, ${customerName(row)?.slice(0, 255) ?? null}, ${ts(row.updated_at)}, ${JSON.stringify(
+                row
+              )}::jsonb, ${contentHash}, now(), now())`
+          )
+        )}
+        ON CONFLICT (company_id, hcp_customer_id) DO UPDATE SET
+          raw_payload    = EXCLUDED.raw_payload,
+          content_hash   = EXCLUDED.content_hash,
+          name           = EXCLUDED.name,
+          hcp_updated_at = EXCLUDED.hcp_updated_at,
+          updated_at     = now()
+      `;
+      synced += changed.length;
+    }
+  );
+  setProgress(`Customers: done (${synced} updated)`);
   return synced;
 }
 
@@ -303,14 +364,13 @@ export const hcpJobRawFor = (companyId: number, hcpJobId: string) =>
 export const jobBits = (raw: Record<string, unknown>) => {
   const customer = obj(raw.customer);
   const address = obj(raw.address);
-  const person = [str(customer?.first_name), str(customer?.last_name)].filter(Boolean).join(" ");
   const notes = arr(raw.notes).map((n) => str(n.content)).filter(Boolean) as string[];
   const description = str(raw.description) ?? "";
   return {
     customer,
     address,
     customerId: customer?.id != null ? String(customer.id) : null,
-    customerName: str(customer?.company) ?? (person || null),
+    customerName: customer ? customerName(customer) : null,
     customerEmail: str(customer?.email),
     customerPhone: str(customer?.mobile_number) ?? str(customer?.home_number) ?? str(customer?.work_number),
     addressLine: addrText(address),
@@ -360,6 +420,131 @@ export async function listHcpJobs(companyId: number, q?: string): Promise<HcpJob
 
 // ---------- quote seeding ----------
 
+export interface HcpCustomerChoice {
+  hcpCustomerId: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  addressLine: string | null;
+  hcpUpdatedAt: string | null;
+}
+
+const hcpCustomerRawFor = (companyId: number, hcpCustomerId: string) =>
+  prisma.hcpCustomerRaw.findUnique({ where: { companyId_hcpCustomerId: { companyId, hcpCustomerId } } });
+
+/** jobBits for a raw HCP customer; the first address stands in for the service address. */
+export const customerBits = (raw: Record<string, unknown>) => {
+  const address = arr(raw.addresses)[0] ?? null;
+  return {
+    customer: raw as Record<string, unknown> | null,
+    address,
+    customerId: raw.id != null ? String(raw.id) : null,
+    customerName: customerName(raw),
+    customerEmail: str(raw.email),
+    customerPhone: str(raw.mobile_number) ?? str(raw.home_number) ?? str(raw.work_number),
+    addressLine: addrText(address),
+  };
+};
+
+/** The "From Housecall Pro customer" picker's rows, newest-updated first, `q` matched in memory. */
+export async function listHcpCustomers(companyId: number, q?: string): Promise<HcpCustomerChoice[]> {
+  const rows = await prisma.hcpCustomerRaw.findMany({ where: { companyId }, orderBy: { hcpUpdatedAt: "desc" }, take: 250 });
+  const needle = q?.trim().toLowerCase();
+  const choices = rows.map((r) => {
+    const b = customerBits(r.rawPayload as Record<string, unknown>);
+    return {
+      hcpCustomerId: r.hcpCustomerId,
+      name: r.name ?? b.customerName ?? r.hcpCustomerId,
+      email: b.customerEmail,
+      phone: b.customerPhone,
+      addressLine: b.addressLine,
+      hcpUpdatedAt: r.hcpUpdatedAt?.toISOString() ?? null,
+    };
+  });
+  if (!needle) return choices.slice(0, 200);
+  return choices
+    .filter((c) => [c.name, c.email, c.phone, c.addressLine].filter(Boolean).some((v) => String(v).toLowerCase().includes(needle)))
+    .slice(0, 200);
+}
+
+/** HCP's address id for a synced customer — the estimate posts with it when present. */
+export async function hcpCustomerAddressId(companyId: number, hcpCustomerId: string): Promise<string | null> {
+  const raw = await hcpCustomerRawFor(companyId, hcpCustomerId);
+  const id = raw ? customerBits(raw.rawPayload as Record<string, unknown>).address?.id : null;
+  return id == null || id === "" ? null : String(id);
+}
+
+interface HcpCustomerBits {
+  customer: Record<string, unknown> | null;
+  address: Record<string, unknown> | null;
+  customerId: string | null;
+  customerName: string | null;
+  customerEmail: string | null;
+  customerPhone: string | null;
+  addressLine: string | null;
+}
+
+/**
+ * The CLARA customer for an HCP customer: adopt via customer_hcp, else create and link. A
+ * same-name customer that already exists unlinked (unique [company, parent, name]) is linked
+ * instead of failing the seed.
+ */
+export async function adoptHcpCustomer(companyId: number, b: HcpCustomerBits): Promise<number | null> {
+  if (!b.customerId || !b.customerName) return null;
+  const link = await prisma.customerHcp.findUnique({
+    where: { companyId_hcpCustomerId: { companyId, hcpCustomerId: b.customerId } },
+    select: { customerId: true },
+  });
+  if (link) return link.customerId;
+  const data = {
+    companyId,
+    name: b.customerName,
+    email: b.customerEmail,
+    phone: b.customerPhone,
+    // ponytail: the service address stands in for billing — a customer's billing
+    // address is a separate GET /customers/{id}/addresses; fetch it if a client needs the split.
+    address: b.addressLine,
+    addressLine1: [str(b.address?.street), str(b.address?.street_line_2)].filter(Boolean).join(", ") || null,
+    city: str(b.address?.city),
+    state: str(b.address?.state),
+    postalCode: str(b.address?.zip),
+  };
+  let customerId: number;
+  try {
+    customerId = (await prisma.customer.create({ data, select: { id: true } })).id;
+  } catch (err) {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) throw err;
+    const same = await prisma.customer.findFirst({ where: { companyId, parentId: null, name: b.customerName }, select: { id: true } });
+    if (!same) throw err;
+    customerId = same.id;
+  }
+  await prisma.customerHcp.create({
+    data: { customerId, companyId, hcpCustomerId: b.customerId, raw: b.customer as Prisma.InputJsonValue },
+  });
+  return customerId;
+}
+
+/** The seed for a quote started from an HCP CUSTOMER (no job): customer only; no tax, no template match. */
+export async function seedQuoteFromHcpCustomer(companyId: number, hcpCustomerId: string): Promise<ZtQuoteSeed | null> {
+  const raw = await hcpCustomerRawFor(companyId, hcpCustomerId);
+  if (!raw) return null;
+  const b = customerBits(raw.rawPayload as Record<string, unknown>);
+  const customerId = await adoptHcpCustomer(companyId, b);
+  const templateChoices = await listProposalTemplateChoices(companyId).catch(() => [] as { id: number; name: string }[]);
+  return {
+    customerId,
+    customerName: b.customerName,
+    customerAddress: b.addressLine,
+    customerPhone: b.customerPhone,
+    salesTaxId: null,
+    taxRatePercent: null,
+    proposalTemplateId: null,
+    proposalTemplateName: null,
+    jobType: null,
+    templateChoices,
+  };
+}
+
 /**
  * Everything a new quote inherits from its Housecall Pro job — the ZenTrades seed shape:
  *  - the CLARA customer, adopted by HCP customer id first (customer_hcp), created from the
@@ -372,35 +557,7 @@ export async function seedQuoteFromHcpJob(companyId: number, hcpJobId: string): 
   if (!raw) return null;
   const b = jobBits(raw.rawPayload as Record<string, unknown>);
 
-  let customerId: number | null = null;
-  if (b.customerId && b.customerName) {
-    const link = await prisma.customerHcp.findUnique({
-      where: { companyId_hcpCustomerId: { companyId, hcpCustomerId: b.customerId } },
-      select: { customerId: true },
-    });
-    if (link) customerId = link.customerId;
-    else {
-      const created = await prisma.customer.create({
-        data: {
-          companyId,
-          name: b.customerName,
-          email: b.customerEmail,
-          phone: b.customerPhone,
-          // ponytail: the job's service address stands in for billing — a customer's billing
-          // address is a separate GET /customers/{id}/addresses; fetch it if a client needs the split.
-          address: b.addressLine,
-          addressLine1: [str(b.address?.street), str(b.address?.street_line_2)].filter(Boolean).join(", ") || null,
-          city: str(b.address?.city),
-          state: str(b.address?.state),
-          postalCode: str(b.address?.zip),
-        },
-      });
-      await prisma.customerHcp.create({
-        data: { customerId: created.id, companyId, hcpCustomerId: b.customerId, raw: b.customer as Prisma.InputJsonValue },
-      });
-      customerId = created.id;
-    }
-  }
+  const customerId = await adoptHcpCustomer(companyId, b);
 
   const templateChoices = await listProposalTemplateChoices(companyId).catch(() => [] as { id: number; name: string }[]);
   const matched = b.jobType ? matchTemplateToJobType(templateChoices, b.jobType) : null;

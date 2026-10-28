@@ -116,6 +116,7 @@ async function main() {
     hcpEstimateRef: null,
     hcpSyncedAt: null,
     hcpSyncError: null,
+  hcpCustomerId: null,
     blockingFlagCount: 0,
   };
   const branding: InvoiceBranding = {

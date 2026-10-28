@@ -216,6 +216,8 @@ export interface QuoteDto {
   hcpEstimateRef: string | null;
   hcpSyncedAt: string | null;
   hcpSyncError: string | null;
+  /** The linked customer's HCP id (customer_hcp) — what lets a quote with no HCP job still post. */
+  hcpCustomerId: string | null;
   blockingFlagCount: number;
 }
 
@@ -423,7 +425,7 @@ export type QuoteInput = {
   customerAddress: string | null;
   customerPhone: string | null;
   /** Optional: a fixture or a query that did not include the relation emits a null email. */
-  customer?: { email: string | null } | null;
+  customer?: { email: string | null; hcp?: { hcpCustomerId: string }[] } | null;
   salesTaxId: number | null;
   taxRatePercent: unknown;
   chosenOptionGroup: string | null;
@@ -583,6 +585,7 @@ export function toQuoteDto(
     hcpEstimateRef: quote.hcpEstimateRef ?? null,
     hcpSyncedAt: quote.hcpSyncedAt?.toISOString() ?? null,
     hcpSyncError: quote.hcpSyncError ?? null,
+    hcpCustomerId: quote.customer?.hcp?.[0]?.hcpCustomerId ?? null,
     blockingFlagCount: dtos.filter((d) =>
       d.flags.some((f) => (BLOCKING_FLAGS as readonly string[]).includes(f))
     ).length,

@@ -1,5 +1,5 @@
 import assert from "assert";
-import { addrText, jobBits, mapHcpCatalogItem, hcpExternalId } from "../src/lib/hcpIngest";
+import { addrText, jobBits, customerBits, mapHcpCatalogItem, hcpExternalId } from "../src/lib/hcpIngest";
 import { hcpLineItemsPayload, mergeHcpLineIds, hcpOptionTax } from "../src/lib/hcpEstimate";
 import type { LineItemDto } from "../src/copilot/estimating/quoteDto";
 
@@ -99,4 +99,24 @@ assert.deepStrictEqual(hcpOptionTax({ taxExempt: false, taxRatePercent: "5.0000"
 assert.deepStrictEqual(hcpOptionTax({ taxExempt: true, taxRatePercent: 5 }), { taxable: false });
 assert.strictEqual(hcpOptionTax({ taxExempt: false, taxRatePercent: null }), undefined);
 
-console.log("ok   check-hcp: job bits, catalog item map, estimate option line items, re-sync merge, option tax");
+// A synced customer (GET /customers row) → the seed/picker bits; first address = service address.
+const cb = customerBits({
+  id: "cus_9",
+  first_name: "Dana",
+  last_name: "Lee",
+  company: null,
+  email: "dana@example.com",
+  mobile_number: null,
+  home_number: "307-555-0199",
+  addresses: [{ id: "adr_1", street: "1 Main St", city: "Cody", state: "WY", zip: "82414" }, { id: "adr_2", street: "9 Other" }],
+});
+assert.strictEqual(cb.customerId, "cus_9");
+assert.strictEqual(cb.customerName, "Dana Lee");
+assert.strictEqual(cb.customerPhone, "307-555-0199");
+assert.strictEqual(cb.address?.id, "adr_1");
+assert.strictEqual(cb.addressLine, "1 Main St, Cody, WY, 82414");
+assert.strictEqual(customerBits({ id: 7, company: "Acme LLC" }).customerName, "Acme LLC");
+assert.strictEqual(customerBits({ id: 7, company: "Acme LLC" }).address, null);
+assert.strictEqual(customerBits({}).customerId, null);
+
+console.log("ok   check-hcp: job bits, customer bits, catalog item map, estimate option line items, re-sync merge, option tax");
